@@ -16,7 +16,9 @@ gcs 容器： hover_report.py record（經 mesh 只監控，不下指令）
 ## 編譯
 
 ```bash
-cbuild --packages-select px4_waypoint_node     # 在 uav1 執行一次，所有容器共用
+cd ~/CBBA_BT/ros2_ws
+colcon build --symlink-install --packages-select px4_waypoint_node   # 在 uav1 執行一次，所有容器共用
+source install/setup.bash
 ```
 
 ## takeoff_hover

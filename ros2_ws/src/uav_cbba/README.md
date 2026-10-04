@@ -40,7 +40,9 @@ uav_cbba/
 在 uav 容器裡：
 
 ```bash
-cbuild --packages-select swarm_interfaces uav_cbba
+cd ~/CBBA_BT/ros2_ws
+colcon build --symlink-install --packages-select swarm_interfaces uav_cbba
+source install/setup.bash
 ```
 
 不用 ROS、直接用 CMake（任何有 g++ 和 cmake 的環境，第一次會下載 googletest）：
@@ -76,7 +78,7 @@ ctest --test-dir /tmp/uav_cbba_build --output-on-failure
 三個指令，結果都寫成 CSV。下面用 `SIM` 代表執行檔：
 
 ```bash
-# 容器裡（cbuild 之後）
+# 容器裡（colcon build 之後）
 SIM="ros2 run uav_cbba cbba_sim"
 # 或 CMake 編譯的版本
 SIM=/tmp/uav_cbba_build/cbba_sim

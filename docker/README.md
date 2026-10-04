@@ -39,7 +39,7 @@ IP 規則（`NET_BASE=172.30`）：
 | `.env` | 唯一的設定來源 | `./start.sh` |
 | `gen_compose.py` | 依 `.env` 產生 `docker-compose.yaml` | `./start.sh` |
 | `entrypoint.sh` | UID 對應、產生 Fast DDS XML | 重啟容器 |
-| `bashrc_cbba.sh` | ROS 環境、`cbuild` | 重開 terminal |
+| `bashrc_cbba.sh` | ROS 環境、PATH | 重開 terminal |
 | `fastdds/profile.xml.template` | 所有容器共用的 Fast DDS 設定 | 重啟容器 |
 | `scripts/` | 容器內的工具（已在 PATH） | 立即生效 |
 | `*.Dockerfile`、`entrypoint_stub.sh`、`bashrc_loader.sh` | 映像內容 | `./build.sh` |
@@ -77,17 +77,18 @@ terminal 太多可以用 tmux：`Ctrl+O` 再按 `h`（左右分割）/ `v`（上
 
 ## 驗收步驟
 
-**① px4_msgs（任一台 uav，只做一次，所有 uavN 共用）**
+**① px4_msgs（任一台 uav，只做一次，所有容器共用）**
 ```bash
 setup_px4_msgs.sh
-cbuild --packages-select px4_msgs
+cd ~/CBBA_BT/ros2_ws
+colcon build --symlink-install --packages-select px4_msgs
+source install/setup.bash
 ```
-⚠ 所有 uavN 共用同一份編譯結果，**不要在兩台 uav 同時執行 cbuild**。
-gcs 要另外編一次：在 gcs 執行 `cbuild --packages-select px4_msgs`。
+⚠ 所有容器共用同一份編譯結果（ros2_ws/build、install），**不要在兩個容器同時編譯**。
 
 **② 收到飛控資料（uav1）**
 ```bash
-ros2 topic echo /uav1/fmu/out/vehicle_status --once
+ros2 topic echo /uav1/fmu/out/vehicle_status_v1 --once
 ```
 
 **③ mesh 看得到所有無人機（gcs）**
@@ -114,7 +115,7 @@ gcs 執行 `ros2 topic hz /uav1/fmu/out/vehicle_odometry` 頻率下降，但 Gaz
 |---|---|---|
 | `px4_sitl.sh [N] [機型]` | sim | 啟動第 N 台 PX4 |
 | `xrce_agent.sh` | uavN | 啟動 Agent |
-| `cbuild [colcon 參數]` | uavN / gcs | 編譯 ros2_ws |
+| `colcon build --symlink-install` | uav1（在 ros2_ws 裡） | 編譯 ros2_ws，所有容器共用 |
 | `mesh_tc.sh set/show/clear` | uavN / gcs | 控制 mesh 丟包 |
 | `gz_bridge.sh` | sim | 把 /clock 送進 ROS 2 |
 | `./enter.sh <容器>` | host | 進入容器（`uav` = `uav1`） |
