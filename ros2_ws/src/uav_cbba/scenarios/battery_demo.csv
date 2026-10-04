@@ -1,0 +1,11 @@
+# 電池測資：比較近的那台無人機電量偏低，只夠勉強做一個任務
+# 用來觀察電池權重如何改變分配（cbba_sim weights）
+#
+# kind,id,type,x,y,z,battery,safety_reserve,energy_per_meter,hover_energy_per_sec,cruise_speed
+agent,1,UAV,-10,0,5,34,20,0.5,0.2,5.0
+agent,2,UAV,12,0,5,150,20,0.5,0.2,5.0
+#
+# kind,id,type,x,y,z,deadline_sec,value,duration_sec
+task,1,AIR_RECON,0,0,5,120,60,5
+task,2,AIR_RECON,0,8,5,120,60,5
+task,3,AIR_RECON,0,-8,5,120,60,5

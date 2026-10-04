@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CBBA_BT 通用 Fast DDS 設定（sim / uavN / gcs 共用這一份）
+
+  entrypoint 啟動時依容器的環境變數填入：
+    ${CBBA_WHITELIST}  ← LOCAL_IPS：這個容器自己的網卡 IP（只允許走這些網卡）
+    ${CBBA_PEERS}      ← LOCAL_IPS + PEER_IPS：要主動去探索的對象
+  模擬時這兩個變數由 gen_compose.py 自動算好；
+  實機時直接在機上設定 LOCAL_IPS / PEER_IPS 即可，這份檔案不用改。
+
+  - 只用 UDPv4（關掉共享記憶體，確保流量一定經過網卡、tc 才有效）
+  - maxInitialPeersRange=32：每個 IP 最多探索 32 個 ROS 節點（預設只有 4 個）
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>cbba_udp</transport_id>
+        <type>UDPv4</type>
+        <maxInitialPeersRange>32</maxInitialPeersRange>
+        <interfaceWhiteList>
+${CBBA_WHITELIST}
+        </interfaceWhiteList>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="cbba_default" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>cbba_udp</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <builtin>
+          <initialPeersList>
+${CBBA_PEERS}
+          </initialPeersList>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

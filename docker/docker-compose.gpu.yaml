@@ -1,0 +1,7 @@
+# 有 NVIDIA 顯示卡時，start.sh 會自動疊加這個檔案，讓 Gazebo 用 GPU 渲染
+services:
+  sim:
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all

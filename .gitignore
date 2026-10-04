@@ -1,0 +1,22 @@
+# 每個容器各自的編譯輸出（cbuild 產生）
+ros2_ws/build_*/
+ros2_ws/install_*/
+ros2_ws/log_*/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# 第三方：由 docker/scripts/setup_px4_msgs.sh 依版本下載
+ros2_ws/src/px4_msgs/
+
+# Python 快取
+__pycache__/
+*.pyc
+
+# 由 gen_compose.py 依 .env 產生（start.sh 每次重新產生）
+docker/docker-compose.yaml
+
+# 測試結果只保留圖片（png、gif），CSV、log 可用腳本重新產生
+ros2_ws/src/uav_cbba/test/results/**/*.*
+!ros2_ws/src/uav_cbba/test/results/**/*.png
+!ros2_ws/src/uav_cbba/test/results/**/*.gif

@@ -1,0 +1,44 @@
+# CBBA 消解規則測試案例（介面規格 v0.1，Choi 2009 Table 1，共 17 條）
+# 兩邊的實作都必須通過這份檔案。
+# me=接收者 i, sender=傳送者 k；winner 為 0 表示無人。
+# stamps 格式：載具:時間;載具:時間（- 表示沒有資料）。expect: UPDATE / RESET / LEAVE
+name,rule,me,sender,sender_winner,sender_score,my_winner,my_score,sender_stamps,my_stamps,expect
+r01_sender_higher,1,1,2,2,50,1,40,-,-,UPDATE
+r01_sender_lower,1,1,2,2,30,1,40,-,-,LEAVE
+r01_tie_me_smaller_id,1,1,2,2,40,1,40,-,-,LEAVE
+r01_tie_sender_smaller_id,1,5,2,2,40,5,40,-,-,UPDATE
+r01_within_epsilon_is_tie,1,5,2,2,40.0005,5,40,-,-,UPDATE
+r02_same_winner,2,1,2,2,50,2,50,-,-,UPDATE
+r02_winner_lowers_own_score,2,1,2,2,10,2,50,-,-,UPDATE
+r03_sender_newer_on_m,3,1,2,2,30,3,40,3:10,3:5,UPDATE
+r03_sender_higher,3,1,2,2,50,3,40,3:5,3:10,UPDATE
+r03_neither,3,1,2,2,30,3,40,3:5,3:10,LEAVE
+r03_no_stamps_lower_score,3,1,2,2,30,3,40,-,-,LEAVE
+r04_i_have_none,4,1,2,2,50,0,0,-,-,UPDATE
+r05_both_think_me,5,1,2,1,40,1,40,-,-,LEAVE
+r06_sender_says_me_i_say_sender,6,1,2,1,40,2,50,-,-,RESET
+r07_sender_newer_on_m,7,1,2,1,40,3,50,3:10,3:5,RESET
+r07_sender_older_on_m,7,1,2,1,40,3,50,3:5,3:10,LEAVE
+r08_i_have_none,8,1,2,1,40,0,0,-,-,LEAVE
+r09_newer_and_higher,9,1,2,3,50,1,40,3:10,3:5,UPDATE
+r09_newer_but_lower,9,1,2,3,30,1,40,3:10,3:5,LEAVE
+r09_higher_but_older,9,1,2,3,50,1,40,3:5,3:10,LEAVE
+r10_sender_newer_on_m,10,1,2,3,50,2,40,3:10,3:5,UPDATE
+r10_sender_older_on_m,10,1,2,3,50,2,40,3:5,3:10,RESET
+r10_no_stamps,10,1,2,3,50,2,40,-,-,RESET
+r11_sender_newer_on_m,11,1,2,3,50,3,40,3:10,3:5,UPDATE
+r11_sender_older_on_m,11,1,2,3,50,3,40,3:5,3:10,LEAVE
+r12_newer_on_both,12,1,2,3,30,4,40,3:10;4:10,3:5;4:5,UPDATE
+r12_newer_on_m_and_higher,12,1,2,3,50,4,40,3:10;4:5,3:5;4:10,UPDATE
+r12_newer_on_m_but_lower,12,1,2,3,30,4,40,3:10;4:5,3:5;4:10,LEAVE
+r12_newer_on_n_older_on_m,12,1,2,3,50,4,40,3:5;4:10,3:10;4:5,RESET
+r12_nothing_newer,12,1,2,3,50,4,40,3:5;4:5,3:10;4:10,LEAVE
+r12_newer_on_n_equal_on_m,12,1,2,3,50,4,40,3:7;4:10,3:7;4:5,LEAVE
+r13_sender_newer_on_m,13,1,2,3,50,0,0,3:10,3:5,UPDATE
+r13_sender_older_on_m,13,1,2,3,50,0,0,3:5,3:10,LEAVE
+r13_sender_has_stamp_i_have_none,13,1,2,3,50,0,0,3:5,-,UPDATE
+r14_sender_none_i_say_me,14,1,2,0,0,1,40,-,-,LEAVE
+r15_sender_none_i_say_sender,15,1,2,0,0,2,40,-,-,UPDATE
+r16_sender_newer_on_m,16,1,2,0,0,3,40,3:10,3:5,UPDATE
+r16_sender_older_on_m,16,1,2,0,0,3,40,3:5,3:10,LEAVE
+r17_both_none,17,1,2,0,0,0,0,-,-,LEAVE

@@ -1,0 +1,4 @@
+# build context 是整個 CBBA_BT，但映像只需要 docker/ 底下的檔案
+# 排除其他東西，避免每次 build 都把 ros2_ws 的編譯結果送進 Docker
+*
+!docker/

@@ -1,0 +1,27 @@
+# 火場巡檢測資：3 台無人機（電量不同）＋ 1 隻假的機器狗，11 個任務
+# 範圍約 100 m x 80 m，座標為 map (ENU)，單位公尺。返航點等於起始位置。
+#
+# 載具：
+# kind,id,type,x,y,z,battery,safety_reserve,energy_per_meter,hover_energy_per_sec,cruise_speed
+agent,1,UAV,-40,-30,5,100,20,0.5,0.2,5.0
+agent,2,UAV,40,-30,5,55,20,0.5,0.2,5.0
+agent,3,UAV,0,35,5,75,20,0.5,0.2,5.0
+agent,50,UGV,0,-35,0,100,20,0.3,0.1,1.5
+#
+# 任務：
+# kind,id,type,x,y,z,deadline_sec,value,duration_sec[,tag]
+# tag 是選用欄位，只給畫圖用（fire = 火點，圖上以紅色標示），不影響 CBBA
+# 兩個疑似火點（急迫、價值高，需要懸停確認 10 秒）
+task,1,AIR_RECON,-15,5,5,60,80,10,fire
+task,2,AIR_RECON,25,10,5,60,80,10,fire
+# 六個例行觀測點（不急、價值低，懸停 5 秒）
+task,3,AIR_RECON,-35,10,5,300,40,5
+task,4,AIR_RECON,-20,-15,5,300,40,5
+task,5,AIR_RECON,10,-20,5,300,40,5
+task,6,AIR_RECON,35,-5,5,300,40,5
+task,7,AIR_RECON,30,30,5,300,40,5
+task,8,AIR_RECON,-25,30,5,300,40,5
+# 地面任務：無人機的分數為 0，由機器狗處理
+task,9,GROUND_INTERVENTION,-10,-10,0,120,100,20
+task,10,GROUND_INTERVENTION,20,-25,0,120,100,20
+task,11,PATROL,5,-5,0,600,20,0
