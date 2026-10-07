@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ugv_cbba</name>
+  <version>0.1.0</version>
+  <description>機器狗（Ghost V60）端的 CBBA 節點：共用 uav_cbba 的核心與機間協定，接狗的 BT</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>swarm_interfaces</depend>
+  <depend>uav_cbba</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

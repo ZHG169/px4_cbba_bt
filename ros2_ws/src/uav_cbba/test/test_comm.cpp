@@ -27,10 +27,11 @@ public:
   explicit Swarm(double loss = 0.0, unsigned seed = 1)
   : loss_(loss), rng_(seed) {}
 
-  CbbaComm & add(AgentId id, Vec3 pos, double battery = 100.0)
+  CbbaComm & add(AgentId id, Vec3 pos, double battery = 100.0, AgentType type = AgentType::UAV)
   {
-    nodes_.push_back(std::make_unique<CbbaComm>(makeState(id, pos, battery), ScoringParams{},
-      CommConfig{}));
+    AgentState s = makeState(id, pos, battery);
+    s.type = type;
+    nodes_.push_back(std::make_unique<CbbaComm>(s, ScoringParams{}, CommConfig{}));
     online_.push_back(true);
     return *nodes_.back();
   }
@@ -657,6 +658,61 @@ TEST(CbbaComm, SeqStoreFailureKeepsSending)
   node.setSeqStore(std::nullopt, [](std::uint32_t) {return false;});
   EXPECT_FALSE(sentSeqs(node, 1.7e9, 1.0).empty());
   EXPECT_GE(node.stats().seq_reserve_failures, 1);
+}
+
+TEST(CbbaComm, UgvAgent50TakesGroundTask)
+{
+  // 機器狗用介面規格的機號 50：無人機確認火情後建立地面處置任務，只有狗會出價、得標、完成
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(50, {5, 20, 0}, 100.0, AgentType::UGV);
+  swarm.run(2.0);
+  Task fire = newTask(1, 1, 6, 15, swarm.now(), 100.0, 120.0);
+  fire.type = TaskType::GROUND_INTERVENTION;
+  fire.position.z = 0.0;
+  ASSERT_TRUE(swarm.node(1).addLocalTask(fire, swarm.now()));
+  swarm.node(2).addLocalTask(newTask(2, 1, 12, 0, swarm.now()), swarm.now());   // 空中任務
+  swarm.run(2.0);
+
+  const TaskId fire_id = makeTaskId(1, 1);
+  for (AgentId a : {1, 2, 50}) {
+    EXPECT_EQ(swarm.node(a).agent().winner(fire_id), 50) << "uav" << int(a);
+    EXPECT_EQ(swarm.node(a).agent().winner(makeTaskId(2, 1)), 2) << "uav" << int(a);
+  }
+  ASSERT_TRUE(swarm.consistent());
+  // 時間戳 s 的長度是最大機號：N = 50
+  EXPECT_EQ(swarm.node(1).agentStateBody(swarm.now()).s.size(), 50u);
+
+  // 狗完成：照常等無人機的確認，全隊標成 DONE
+  ASSERT_TRUE(swarm.node(50).reportResult(fire_id, true, swarm.now()));
+  swarm.run(2.0);
+  for (AgentId a : {1, 2, 50}) {
+    EXPECT_EQ(swarm.node(a).agent().tasks().at(fire_id).status, TaskStatus::DONE) << int(a);
+  }
+  // 無人機完成：狗沒有鄰居位元，不等它的確認，但狗也收到證明
+  ASSERT_TRUE(swarm.node(2).reportResult(makeTaskId(2, 1), true, swarm.now()));
+  swarm.run(2.0);
+  EXPECT_EQ(swarm.node(50).agent().tasks().at(makeTaskId(2, 1)).status, TaskStatus::DONE);
+  EXPECT_EQ(swarm.node(1).stats().index_conflicts, 0);
+}
+
+TEST(CbbaComm, LostUgvReleasesGroundTask)
+{
+  // 狗失聯：它的地面任務釋放，但沒有別的地面載具，任務留在競標池（無人機不接）
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(50, {5, 20, 0}, 100.0, AgentType::UGV);
+  swarm.run(2.0);
+  Task fire = newTask(1, 1, 6, 15, swarm.now(), 100.0, 120.0);
+  fire.type = TaskType::GROUND_INTERVENTION;
+  ASSERT_TRUE(swarm.node(1).addLocalTask(fire, swarm.now()));
+  swarm.run(2.0);
+  ASSERT_EQ(swarm.node(1).agent().winner(makeTaskId(1, 1)), 50);
+  swarm.setOnline(50, false);
+  swarm.run(3.0);
+  EXPECT_EQ(swarm.node(1).agent().winner(makeTaskId(1, 1)), kNoAgent);
+  EXPECT_TRUE(swarm.node(1).agent().path().empty());
 }
 
 TEST(CbbaComm, RestartedNodeRejoins)
