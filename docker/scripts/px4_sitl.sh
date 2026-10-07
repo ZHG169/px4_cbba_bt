@@ -85,6 +85,13 @@ configure_dds() {
     "${BIN}/px4-param" --instance "${N}" set COM_RCL_EXCEPT 4   # offboard 模式下失去遙控器訊號不觸發 failsafe
     echo "[px4_sitl] uav${N}: 已設定模擬用參數 NAV_DLL_ACT=0 COM_RC_IN_MODE=4 COM_RCL_EXCEPT=4"
 
+    # 模擬電池：PX4 預設解鎖後 60 s 就從 100% 降到底、停在 50%，和 cbba 的能量模型對不上。
+    # 改成續航 SIM_BAT_DRAIN 秒（解鎖後依時間線性下降，和飛多遠無關），最低停在 SIM_BAT_MIN_PCT
+    # （= cbba 的安全存量，不會觸發 PX4 的低電量 failsafe）。cbba_uav.sh 用同一個續航算能量模型。
+    "${BIN}/px4-param" --instance "${N}" set SIM_BAT_DRAIN "${SIM_BAT_DRAIN:-900}"
+    "${BIN}/px4-param" --instance "${N}" set SIM_BAT_MIN_PCT "${SIM_BAT_MIN_PCT:-20}"
+    echo "[px4_sitl] uav${N}: 模擬電池續航 ${SIM_BAT_DRAIN:-900} s，最低 ${SIM_BAT_MIN_PCT:-20}%"
+
     "${BIN}/px4-uxrce_dds_client" --instance "${N}" stop || true
     sleep 1
     "${BIN}/px4-uxrce_dds_client" --instance "${N}" start \

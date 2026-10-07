@@ -1,0 +1,10 @@
+欄位	型別	說明	範例（火警任務）
+task_id	uint32	建立者 agent_id × 65536 + 流水號，各機自行編號，不會撞號	65537
+type	uint8	AIR_RECON = 1、GROUND_INTERVENTION = 2、PATROL = 3	2
+position	geometry_msgs/Point	任務位置，map 座標系（ENU），單位 m	(12.0, 5.0, 0.0)
+created	builtin_interfaces/Time	任務發現或建立的時間	確認火情的時刻
+deadline_sec	float32	期限，從 created 起算的秒數（軟限制）	120
+value	float32	任務價值，也是出價分數的上限	100
+duration_sec	float32	預估的現場執行時間，用來計算任務耗電	20
+status	uint8	OPEN = 0、DONE = 1、CANCELLED = 2	0
+status_stamp	builtin_interfaces/Time	狀態最後一次改變的時間	同 created

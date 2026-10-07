@@ -117,6 +117,8 @@ gcs 執行 `ros2 topic hz /uav1/fmu/out/vehicle_odometry` 頻率下降，但 Gaz
 | `xrce_agent.sh` | uavN | 啟動 Agent |
 | `colcon build --symlink-install` | uav1（在 ros2_ws 裡） | 編譯 ros2_ws，所有容器共用 |
 | `mesh_tc.sh set/show/clear` | uavN / gcs | 控制 mesh 丟包 |
+| `cbba_uav.sh` | uavN | 一次啟動 XRCE Agent、task_executor、cbba_node（步驟見 `uav_cbba/doc/sitl_test.md`） |
+| `cbba_task.sh new/done/fail/watch` | uavN | 發任務、手動回報結果、看目前指派 |
 | `gz_bridge.sh` | sim | 把 /clock 送進 ROS 2 |
 | `./enter.sh <容器>` | host | 進入容器（`uav` = `uav1`） |
 | `./stop.sh` | host | 刪除所有容器 |

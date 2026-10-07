@@ -1,6 +1,7 @@
 # uav_cbba
 
-無人機端的 CBBA（C++17）。核心函式庫不依賴 ROS，對應「CBBA 介面規格草稿 v0.1」。
+無人機端的 CBBA（C++17）。核心函式庫不依賴 ROS。
+機上節點 `cbba_node` 的機間通訊依「機間通訊封包規格」2026-10-06（UDP），機內只用 DDS 接 PX4 與 BT。
 
 ## 檔案結構
 
@@ -11,8 +12,15 @@ uav_cbba/
 │   ├── energy_model.hpp   電池與路徑能量（含回程）
 │   ├── scoring.hpp        成本與分數
 │   ├── cbba_agent.hpp     17 條消解規則、連鎖退標、bundle、出價上限、重新評估
+│   ├── wire_io.hpp        封包的位元組讀寫（小端序、不補位）
+│   ├── wire_header.hpp    機間通訊封包的共用表頭（14 B）與轉送表頭（9 B）、seq 過濾、轉送與去重複
+│   ├── wire_agent_state.hpp  AGENT_STATE 的編解碼與 flags
+│   ├── wire_task_event.hpp   TASK_EVENT 的編解碼（版本 1 照規格；版本 2 加任務類型、截止時刻、執行時間）
+│   ├── wire_completion.hpp   COMPLETION（宣告／證明）與 COMPLETION_ACK 的編解碼
+│   ├── cbba_comm.hpp      機間協定：任務編號、轉送、補發、完成確認、失聯（不依賴 ROS 與 socket）
+│   ├── udp_link.hpp       只走 mesh 網卡的 UDP multicast
 │   └── network_sim.hpp    離線模擬：丟包網路、場景檔讀取
-├── src/                   上面各標頭檔的實作
+├── src/                   上面各標頭檔的實作，以及 cbba_node.cpp（ROS 2 節點）
 ├── tools/cbba_sim.cpp     離線模擬工具，輸出 CSV
 ├── scripts/plot_results.py  把 CSV 畫成圖（matplotlib）
 ├── scenarios/             測資
@@ -72,6 +80,74 @@ ctest --test-dir /tmp/uav_cbba_build --output-on-failure
 | `test_rules` | 用 `cbba_rule_cases.csv` 驗證 17 條規則 |
 | `test_agent` | 連鎖退標、任務終止、舊訊息過濾、重新評估 |
 | `test_lossy_network` | 0%~70% 丟包下的收斂率、100% 斷網 |
+| `test_wire_agent_state` | AGENT_STATE 的大小（34／80／85／179 B）與位元組排列和規格書一致、來回編解碼、拒絕不合法的封包、flags |
+| `test_wire_task_event` | TASK_EVENT 的大小（42～49 B；版本 2 為 49～56 B）與位元組排列、轉送後內容不變、拒絕不合法的封包、截止時刻 |
+| `test_wire_completion` | COMPLETION（39／40+9K B）與 COMPLETION_ACK（39 B）的大小與位元組排列、拒絕不合法的封包、多跳時重送換新序號才補得回來 |
+| `test_comm` | 機間協定：任務擴散與編號、多跳轉送與完成確認（含掉包重送）、任務失敗交回、不參與出價、失聯重新分配、中間編號補發、晚加入、重開機、10%／30% 掉包、收斂後流量 |
+| `test_wire_header` | 共用表頭與轉送表頭的位元組排列與規格書一致、拒絕不合法的表頭、seq 過濾與重開機、轉送與去重複 |
+
+## 機上節點：cbba_node
+
+每台無人機的機上電腦各跑一個。機間協商走 UDP multicast，機內用 DDS 接 PX4 與 BT。
+
+```bash
+# uav 容器裡：機號、命名空間、mesh 網卡 IP 預設讀環境變數 UAV_ID、UAV_NS、MESH_IP
+ros2 run uav_cbba cbba_node
+
+# 不接 PX4、一律參與出價（只測協商）
+ros2 run uav_cbba cbba_node --ros-args -p use_px4:=false -p initial_position:="[0.0, 0.0, 5.0]" -p battery:=80.0
+```
+
+**話題**（以 uav1 為例）
+
+| 話題 | 型別 | 方向 | 說明 |
+|---|---|---|---|
+| `/uav1/new_task` | `swarm_interfaces/Task` | BT → CBBA | 本機發現的新任務；`task_id` = 機號 × 65536 + 流水號 |
+| `/uav1/task_result` | `swarm_interfaces/Task` | BT → CBBA | 任務結束時一次：`status = DONE` 完成；`CANCELLED` 失敗，交回競標池、自己不再接 |
+| `/uav1/assigned_task` | `swarm_interfaces/Task` | CBBA → BT | 目前要執行的任務（reliable、transient_local）；沒有任務時 `task_id = 0`、`status = CANCELLED` |
+| `/uav1/fmu/out/vehicle_local_position_v1` 等 | `px4_msgs` | PX4 → CBBA | 位置（NED → map ENU）、電量、armed、是否離地 |
+
+不接 BT 時可以用指令代替：
+
+```bash
+ros2 topic pub --once /uav1/new_task swarm_interfaces/msg/Task \
+  "{task_id: 65537, type: 1, position: {x: 2.0, y: 3.0, z: 5.0}, deadline_sec: 60.0, value: 80.0, duration_sec: 10.0}"
+ros2 topic echo /uav1/assigned_task --qos-durability transient_local --qos-reliability reliable
+ros2 topic pub --once /uav1/task_result swarm_interfaces/msg/Task "{task_id: 65537, status: 1}"   # 1 = DONE
+```
+
+**參數**
+
+| 參數 | 說明 | 預設 |
+|---|---|---|
+| `agent_id` | 機號 1~8 | 環境變數 `UAV_ID` |
+| `px4_ns` | 命名空間（`/uavN/...`） | 環境變數 `UAV_NS` |
+| `mesh_ip` | UDP 走哪張網卡 | 環境變數 `MESH_IP`；空字串由系統決定 |
+| `udp_group`、`udp_port` | multicast 群組 | `239.255.42.99`、`14600` |
+| `use_px4` | 從 PX4 讀位置與電量 | `true` |
+| `participate` | 何時參與出價：`airborne`（解鎖且離地）、`armed`、`always` | `airborne` |
+| `assign_hold` | 同一個任務連續排第一多久才交給 BT（秒） | 0.6 |
+| `recon_altitude` | 巡檢任務（AIR_RECON）的高度；z 低於它時改成它（BT 常給地面座標），要和執行者的飛行高度一致 | 5.0 |
+| `spawn_enu` | 出生點（map ENU），PX4 local position 的原點 | `[0, (機號−1)×UAV_SPAWN_SPACING, 0]` |
+| `initial_position`、`battery` | `use_px4:=false` 時的位置與電量 | 出生點、100 |
+| `safety_reserve`、`energy_per_meter`、`hover_energy_per_sec`、`cruise_speed` | 能量模型 | 20、0.5、0.2、5.0 |
+| `battery_weight`、`cost_ref`、`max_bundle` | 出價參數 | 1.0、50、5 |
+| `index_slots` | 任務編號空間切成幾份（≥ 機數） | 8 |
+| `lost_timeout` | 多久沒有某台的新資訊視為失聯（秒） | 1.5 |
+| `seq_file` | seq 預約紀錄的檔案；空字串＝不存檔，只用時鐘起點 | `~/.cbba/seq_uavN` |
+
+**機間通訊的做法**（細節見 `include/uav_cbba/cbba_comm.hpp`）
+
+- 封包：共用表頭、轉送表頭、AGENT_STATE、TASK_EVENT、COMPLETION、COMPLETION_ACK，格式照規格書。
+  TASK_EVENT 另有版本 2，尾端加任務類型、絕對截止時刻、執行時間（7 B）。
+- 任務編號各機自編、依機號交錯（uav1：0、8、16…）；`task_id` 以 8 位十六進位寫在 TASK_EVENT 的名稱欄。
+- AGENT_STATE 裡不認得或已結束的任務填 y = −1；`round_key` 是任務清單的 CRC-32 摘要，不同時逐格補發缺的任務與完成證明，另外每 5 s 保底重播。
+  不參與出價的鄰居（還在地面）沒有附 y，當成什麼都不知道，全部補一次。
+- 剛啟動的節點先和鄰居同步（摘要相同）才自編任務編號，重開機後不會撞號。
+- seq 重開機後接著開機前的繼續編：預約的上限存在 `seq_file`，先寫入才使用（區塊預約）；
+  沒有紀錄時用系統時鐘當起點。避免鄰居的去重複把重開機後的新事件當成舊的丟掉。
+- 完成確認照規格的宣告 → 確認 → 證明；重送一律換新序號（多跳時才補得回來），宣告後失聯的飛機不再等。
+- 某台 1.5 s 沒有新資訊視為失聯，它的任務重新分配；沒起飛的飛機不出價。
 
 ## 離線模擬：cbba_sim
 
@@ -178,6 +254,7 @@ task,1,AIR_RECON,-15,5,5,60,80,10,fire
 
 ## 還沒做的部分
 
-- ROS 2 節點（訂閱 `/swarm/cbba`、`/swarm/tasks`，把 `CbbaAgent` 接上訊息收發與定時重送）
-- 從 `/uavN/fmu/out/...` 取得位置與電量，更新 `AgentState`
+- 在 PX4 SITL＋Gazebo 上跑完整情境（起飛、分配、掉包、墜毀、完成）
 - 能量模型的參數校正（用 PX4 回報的實際耗電）
+- AGENT_STATE 的執行進度（`progress`）與「跟隨中」旗標，要等 BT 回報
+- docker 的 Fast DDS 設定仍讓 DDS 經過 mesh；要讓 DDS 只留在機內，需把 uav 容器的白名單改成只有線材網卡

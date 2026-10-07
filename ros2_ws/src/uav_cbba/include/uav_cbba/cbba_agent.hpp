@@ -5,11 +5,15 @@
 //   onMessage()  收到 /swarm/cbba 的出價訊息（17 條消解規則 + 連鎖退標 + 重新出價）
 //   reevaluate() 執行中依目前的位置、時間、電量重新計算手上任務的分數
 //   makeMessage() 產生要廣播的訊息
+//   setActive()  是否參與出價（例如還沒起飛時不參與）
+//   releaseAgent() / releaseStale()  某台停止參與或失聯：把它得標的任務設為無人，重新出價
+//   excludeTask() 自己做這個任務失敗：釋放並不再對它出價（交回給其他載具）
 #pragma once
 
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include "uav_cbba/scoring.hpp"
@@ -86,6 +90,23 @@ public:
   // 超過 timeout 秒沒收到訊息的鄰居
   std::vector<AgentId> lostNeighbors(double now, double timeout) const;
 
+  // 是否參與出價。停止時釋放自己所有的任務；恢復時重新出價。回傳 true 表示有改變。
+  bool setActive(bool active, double now);
+  bool active() const {return active_;}
+
+  // 把 agent 得標的任務設為無人得標，再重新出價。回傳 true 表示有改變。
+  bool releaseAgent(AgentId agent, double now);
+
+  // 時間戳 s 超過 timeout 秒沒更新的載具視為失聯，釋放它得標的任務。
+  // s 會經由鄰居的訊息傳遞，所以多跳之外、但仍有人聽得到的載具不會被誤判。
+  bool releaseStale(double now, double timeout);
+
+  // 自己做這個任務失敗：從 bundle 釋放（連同之後加入的），之後不再對它出價。
+  bool excludeTask(TaskId id, double now);
+  bool excluded(TaskId id) const {return excluded_.count(id) > 0;}
+
+  const std::map<AgentId, double> & stamps() const {return stamps_;}
+
   const std::vector<TaskId> & bundle() const {return bundle_;}  // 得標加入的順序
   const std::vector<TaskId> & path() const {return path_;}      // 實際執行的順序
   const std::map<TaskId, Task> & tasks() const {return tasks_;}
@@ -110,6 +131,8 @@ private:
   std::map<AgentId, std::uint32_t> last_seq_;
   std::vector<TaskId> bundle_;
   std::vector<TaskId> path_;
+  std::set<TaskId> excluded_;
+  bool active_{true};
   std::uint32_t seq_{0};
 };
 

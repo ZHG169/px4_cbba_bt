@@ -46,6 +46,26 @@ ros2 run px4_waypoint_node takeoff_hover --ros-args -p altitude:=5.0
 - 每台的 local 座標以自己的出生點為原點（NED）。
 - offboard 需要持續的 setpoint：**停掉節點 PX4 會觸發 failsafe**。測試結束時直接關 PX4／Gazebo。
 
+## task_executor（代替 BT，測試 cbba_node 用）
+
+```bash
+ros2 run px4_waypoint_node task_executor        # 機號、命名空間取自 UAV_ID、UAV_NS
+```
+
+起飛流程同 takeoff_hover，之後依 `/uavN/assigned_task` 飛到任務點正上方 `altitude` 公尺，
+停留 `duration_sec` 後對 `/uavN/task_result` 發 DONE，回到懸停等下一個指派。指派變成 task_id = 0 時原地懸停。
+
+| 參數 | 預設 | 說明 |
+|---|---|---|
+| `agent_id` | `$UAV_ID` | 機號，用來算出生點 |
+| `px4_ns` | `$UAV_NS` | PX4 話題前綴 |
+| `altitude` | 5.0 | 飛行高度（公尺，相對出生點） |
+| `cruise_speed` | 5.0 | setpoint 移動速度（m/s），要和 cbba_node 的 `cruise_speed` 一致 |
+| `reach_tolerance` | 0.5 | 視為到達的距離 |
+| `spawn_enu` | (0, (id−1)·`UAV_SPAWN_SPACING`, 0) | 出生點（map ENU），要和 px4_sitl.sh、cbba_node 一致 |
+
+通常用 `docker/scripts/cbba_uav.sh` 和 cbba_node 一起啟動，步驟見 `uav_cbba/doc/sitl_test.md`。
+
 ## 測試紀錄與報告：hover_report.py
 
 ```bash

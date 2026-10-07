@@ -3,6 +3,15 @@
 > 狀態：**勝翔定案（2026-10-03）**，待伯宇、宜臻審閱。
 > 需要修改請直接在這份文件標註，修改後版本號往上加（v1.1…），並同步改 `package.xml` 的 version。
 
+> **無人機端（2026-10-07 起）**：無人機之間的 CBBA 協商改走 UDP（依「機間通訊封包規格」，見 `uav_cbba/README.md`），
+> 無人機不再使用第 2 節的 `/swarm/tasks`、`/swarm/cbba`。機內 CBBA 與 BT 之間：
+>
+> | 話題 | 型別 | 方向 |
+> |---|---|---|
+> | `/uavN/new_task` | `Task` | BT → CBBA |
+> | `/uavN/task_result` | `Task`（`status` = DONE 完成、CANCELLED 失敗交回競標池） | BT → CBBA |
+> | `/uavN/assigned_task` | `Task` | CBBA → BT |
+
 ## 1. 載具編號與命名空間
 
 | 載具 | agent_id（訊息裡的 sender_id / winner_id） | 自己的話題命名空間 | 備註 |

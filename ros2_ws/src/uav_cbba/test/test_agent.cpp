@@ -261,3 +261,73 @@ TEST(Agent, LostNeighborsAfterTimeout)
   ASSERT_EQ(uav.lostNeighbors(15.5, 5.0).size(), 1u);
   EXPECT_EQ(uav.lostNeighbors(15.5, 5.0)[0], 2);
 }
+
+TEST(Agent, InactiveAgentDoesNotBidAndReleasesOnStop)
+{
+  AgentState s;
+  s.id = 1;
+  CbbaAgent uav(s, ScoringParams{});
+  Task t;
+  t.id = 7;
+  t.position = {5, 0, 0};
+  EXPECT_TRUE(uav.onTask(t, 0.0));
+  ASSERT_EQ(uav.bundle().size(), 1u);
+
+  EXPECT_TRUE(uav.setActive(false, 1.0));   // 停止：全部釋放
+  EXPECT_TRUE(uav.bundle().empty());
+  EXPECT_EQ(uav.winner(7), kNoAgent);
+  EXPECT_FALSE(uav.reevaluate(2.0));        // 不參與時不出價
+  EXPECT_TRUE(uav.bundle().empty());
+
+  EXPECT_TRUE(uav.setActive(true, 3.0));    // 恢復：重新出價
+  EXPECT_EQ(uav.winner(7), 1);
+}
+
+TEST(Agent, ReleaseAgentAndStale)
+{
+  AgentState s;
+  s.id = 1;
+  s.position = {100, 0, 0};
+  CbbaAgent uav(s, ScoringParams{});
+  Task t;
+  t.id = 7;
+  t.position = {0, 0, 0};
+  uav.onTask(t, 0.0);
+
+  CbbaMessage msg;
+  msg.sender = 2;
+  msg.seq = 1;
+  msg.bids.push_back(Bid{7, 79.0, 2});
+  uav.onMessage(msg, 10.0);
+  ASSERT_EQ(uav.winner(7), 2);
+
+  EXPECT_FALSE(uav.releaseStale(11.0, 1.5));  // 1 s：還不算失聯
+  EXPECT_EQ(uav.winner(7), 2);
+  EXPECT_TRUE(uav.releaseStale(11.6, 1.5));   // 1.6 s 沒有 uav2 的新資訊
+  EXPECT_EQ(uav.winner(7), 1);                // 自己接手
+
+  EXPECT_FALSE(uav.releaseAgent(1, 12.0));    // 不能釋放自己
+}
+
+TEST(Agent, ExcludedTaskIsNotBidAgain)
+{
+  AgentState s;
+  s.id = 1;
+  CbbaAgent uav(s, ScoringParams{});
+  Task a;
+  a.id = 7;
+  a.position = {5, 0, 0};
+  Task b;
+  b.id = 8;
+  b.position = {6, 0, 0};
+  uav.onTask(a, 0.0);
+  uav.onTask(b, 0.0);
+  ASSERT_EQ(uav.bundle().size(), 2u);
+
+  EXPECT_TRUE(uav.excludeTask(7, 1.0));       // 做任務 7 失敗
+  EXPECT_TRUE(uav.excluded(7));
+  EXPECT_EQ(uav.winner(7), kNoAgent);         // 交回競標池
+  EXPECT_EQ(uav.bundle(), std::vector<TaskId>{8});   // 其他任務重新接回
+  uav.reevaluate(2.0);
+  EXPECT_EQ(uav.winner(7), kNoAgent);         // 之後也不再出價
+}

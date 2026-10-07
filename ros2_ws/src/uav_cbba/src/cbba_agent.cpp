@@ -156,6 +156,9 @@ bool CbbaAgent::releaseLost()
 //   的最小值以下，出價就一定隨 bundle 變長而不增，收斂性得以保證。
 bool CbbaAgent::buildBundle(double now)
 {
+  if (!active_) {
+    return false;
+  }
   bool changed = false;
   while (bundle_.size() < params_.max_bundle) {
     const std::vector<Task> current_path = pathTasks(path_);
@@ -171,6 +174,7 @@ bool CbbaAgent::buildBundle(double now)
 
     for (const auto & [id, task] : tasks_) {
       if (task.status != TaskStatus::OPEN) {continue;}
+      if (excluded_.count(id) > 0) {continue;}   // 自己做失敗的任務不再出價
       if (std::find(bundle_.begin(), bundle_.end(), id) != bundle_.end()) {continue;}
 
       Insertion ins = bestInsertion(state_, current_path, task, now, params_);
@@ -377,6 +381,57 @@ CbbaMessage CbbaAgent::makeMessage(double now)
     }
   }
   return msg;
+}
+
+bool CbbaAgent::setActive(bool active, double now)
+{
+  if (active == active_) {
+    return false;
+  }
+  active_ = active;
+  return active ? buildBundle(now) : releaseFrom(0);
+}
+
+bool CbbaAgent::releaseAgent(AgentId agent, double now)
+{
+  if (agent == state_.id || agent == kNoAgent) {
+    return false;
+  }
+  bool changed = false;
+  for (auto & [id, winner] : z_) {
+    if (winner == agent) {
+      winner = kNoAgent;
+      y_[id] = 0.0;
+      changed = true;
+    }
+  }
+  if (changed) {
+    buildBundle(now);
+  }
+  return changed;
+}
+
+bool CbbaAgent::releaseStale(double now, double timeout)
+{
+  bool changed = false;
+  for (const auto & [agent, stamp] : stamps_) {
+    if (agent != state_.id && now - stamp > timeout) {
+      changed = releaseAgent(agent, now) || changed;
+    }
+  }
+  return changed;
+}
+
+bool CbbaAgent::excludeTask(TaskId id, double now)
+{
+  excluded_.insert(id);
+  const auto it = std::find(bundle_.begin(), bundle_.end(), id);
+  if (it == bundle_.end()) {
+    return false;
+  }
+  releaseFrom(static_cast<std::size_t>(it - bundle_.begin()));
+  buildBundle(now);
+  return true;
 }
 
 std::vector<AgentId> CbbaAgent::lostNeighbors(double now, double timeout) const

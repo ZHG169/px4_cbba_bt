@@ -1,0 +1,15 @@
+# 火場懸停監看的電量比較：3 台無人機、2 個火點、3 個巡檢點
+# uav1 電量低（34%）但離火點 T1 近；確認火情後就地懸停監看，電量到返航門檻才返航。
+# 對照組 fire_hover_noenergy.csv 與本檔相同，只是耗電參數設 0（出價時不考慮電量）。
+#
+# kind,id,type,x,y,z,battery,safety_reserve,energy_per_meter,hover_energy_per_sec,cruise_speed
+agent,1,UAV,-12,0,5,34,20,0.5,0.2,5.0
+agent,2,UAV,14,-4,5,100,20,0.5,0.2,5.0
+agent,3,UAV,2,16,5,60,20,0.5,0.2,5.0
+#
+# kind,id,type,x,y,z,deadline_sec,value,duration_sec[,tag]
+task,1,AIR_RECON,-0.7,-3.0,5,60,80,10,fire
+task,2,AIR_RECON,8.4,6.4,5,60,80,10,fire
+task,3,AIR_RECON,2.5,-3.0,5,300,40,5
+task,4,AIR_RECON,6.2,-7.2,5,300,40,5
+task,5,AIR_RECON,-4.6,-6.1,5,300,40,5

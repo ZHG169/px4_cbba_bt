@@ -12,6 +12,12 @@ add_library(${PROJECT_NAME}_core
   src/energy_model.cpp
   src/scoring.cpp
   src/cbba_agent.cpp
+  src/wire_header.cpp
+  src/wire_agent_state.cpp
+  src/wire_task_event.cpp
+  src/wire_completion.cpp
+  src/cbba_comm.cpp
+  src/udp_link.cpp
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -31,6 +37,11 @@ set(UAV_CBBA_TESTS
   test_rules
   test_agent
   test_lossy_network
+  test_wire_header
+  test_wire_agent_state
+  test_wire_task_event
+  test_wire_completion
+  test_comm
 )
 
 find_package(ament_cmake QUIET)
@@ -46,6 +57,15 @@ if(ament_cmake_FOUND)
   )
   # ros2 run uav_cbba cbba_sim / plot_results.py
   install(TARGETS cbba_sim DESTINATION lib/${PROJECT_NAME})
+
+  # 機上的 CBBA 節點：機間走 UDP，機內接 PX4 與 BT
+  find_package(rclcpp REQUIRED)
+  find_package(px4_msgs REQUIRED)
+  find_package(swarm_interfaces REQUIRED)
+  add_executable(cbba_node src/cbba_node.cpp)
+  target_link_libraries(cbba_node ${PROJECT_NAME}_core rclcpp::rclcpp
+    ${px4_msgs_TARGETS} ${swarm_interfaces_TARGETS})
+  install(TARGETS cbba_node DESTINATION lib/${PROJECT_NAME})
   install(PROGRAMS scripts/plot_results.py DESTINATION lib/${PROJECT_NAME})
   install(DIRECTORY scenarios DESTINATION share/${PROJECT_NAME})
   ament_export_include_directories(include)
