@@ -62,20 +62,10 @@ if(ament_cmake_FOUND)
   find_package(rclcpp REQUIRED)
   find_package(px4_msgs REQUIRED)
   find_package(swarm_interfaces REQUIRED)
-  # CBBA 節點共用的骨架（UDP 迴圈、交給 BT、seq 紀錄、log）：無人機 cbba_node、機器狗 ugv_cbba 都用
-  add_library(${PROJECT_NAME}_node_base STATIC src/cbba_node_base.cpp)
-  target_link_libraries(${PROJECT_NAME}_node_base PUBLIC ${PROJECT_NAME}_core rclcpp::rclcpp
-    ${swarm_interfaces_TARGETS})
-  # 無人機：接 PX4
   add_executable(cbba_node src/cbba_node.cpp)
-  target_link_libraries(cbba_node ${PROJECT_NAME}_node_base ${px4_msgs_TARGETS})
+  target_link_libraries(cbba_node ${PROJECT_NAME}_core rclcpp::rclcpp
+    ${px4_msgs_TARGETS} ${swarm_interfaces_TARGETS})
   install(TARGETS cbba_node DESTINATION lib/${PROJECT_NAME})
-  # 骨架也匯出給機器狗的套件 ugv_cbba 用
-  install(TARGETS ${PROJECT_NAME}_node_base
-    EXPORT export_${PROJECT_NAME}
-    ARCHIVE DESTINATION lib
-  )
-  ament_export_dependencies(rclcpp swarm_interfaces)
   install(PROGRAMS scripts/plot_results.py DESTINATION lib/${PROJECT_NAME})
   install(DIRECTORY scenarios DESTINATION share/${PROJECT_NAME})
   ament_export_include_directories(include)

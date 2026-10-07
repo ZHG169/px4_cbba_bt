@@ -28,7 +28,6 @@ docker/                       模擬環境（Dockerfile、啟動腳本、Fast DD
 ros2_ws/src/
 ├── swarm_interfaces/         ROS 訊息（Task 等）→ swarm_interfaces/README.md
 ├── uav_cbba/                 CBBA 核心、機間封包、協定層、cbba_node、離線模擬、單元測試 → uav_cbba/README.md
-├── ugv_cbba/                 機器狗的 CBBA 節點（共用 uav_cbba 的核心與協定）→ ugv_cbba/README.md
 │   ├── doc/                  封包規格書、參數說明（parameters.md）、SITL 測試步驟（sitl_test.md）
 │   └── test/results/         測試結果（只保留圖片）
 └── px4_waypoint_node/        PX4 offboard：takeoff_hover 起飛懸停、task_executor 暫代 BT → px4_waypoint_node/README.md
@@ -100,6 +99,7 @@ python3 src/uav_cbba/scripts/animate_results.py mission /tmp/fire_3uav $SCN/fire
 | CBBA 核心（17 條消解規則、連鎖退標、電池計分）＋單元測試 | ✅ |
 | 機間通訊封包（依規格書 2026-10-06）、協定層、UDP | ✅ 106 項單元測試 |
 | cbba_node：PX4 SITL 驗證分配、完成確認、失敗交回、墜毀重分配、晚加入、重開機 | ✅ |
+| 機器狗端的 CBBA 節點與介面對接 | ⏳ 待和隊友確認 |
 | 移動時的避碰（CPF 之類） | ⏳ 目前 SITL 同高度直線飛，會撞機 |
 | 能量模型校正（實機 ulog） | ⏳ |
 | 3D 航點介面、AprilTag 火情偵測、無人機行為樹 | ⏳ |

@@ -12,8 +12,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Bid.msg"
   "msg/AgentStamp.msg"
   "msg/CBBAMessage.msg"
-  "msg/RobotState.msg"
-  "msg/TaskResult.msg"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
 )
 

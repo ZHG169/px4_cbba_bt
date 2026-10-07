@@ -6,9 +6,6 @@
 #    cbba_task.sh new  <N> <流水號> <x> <y> [value] [duration_s] [deadline_s]
 #        由 uavN 建立任務，task_id = N × 65536 + 流水號；座標是 map ENU（公尺）
 #        例：cbba_task.sh new 1 1 10 5          → task 00010001 在 (10, 5)
-#    cbba_task.sh ground <N> <流水號> <x> <y> [value] [duration_s] [deadline_s]
-#        由 uavN 建立地面處置任務（GROUND_INTERVENTION，給機器狗）；預設照介面規格的火警任務：
-#        value 100、停留 20 s、期限 120 s。無人機不會出價
 #    cbba_task.sh done <N> <task_id>            uavN 回報完成（task_id 用 8 位十六進位，例如 00010001）
 #    cbba_task.sh fail <N> <task_id>            uavN 回報失敗：交回競標池、自己不再接
 #    cbba_task.sh watch <N>                     看 uavN 目前被指派的任務
@@ -17,7 +14,7 @@
 # ============================================================
 set -euo pipefail
 
-usage() { sed -n '4,15p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '4,12p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 CMD="${1:-}"
 N="${2:-}"
@@ -25,18 +22,14 @@ N="${2:-}"
 NS="/uav${N}"
 
 case "${CMD}" in
-    new|ground)
+    new)
         SEQ="${3:?缺流水號}"; X="${4:?缺 x}"; Y="${5:?缺 y}"
-        if [ "${CMD}" = new ]; then
-            TYPE=1; KIND="任務"; VALUE="${6:-80}"; DURATION="${7:-5}"; DEADLINE="${8:-300}"
-        else
-            TYPE=2; KIND="地面處置任務"; VALUE="${6:-100}"; DURATION="${7:-20}"; DEADLINE="${8:-120}"
-        fi
+        VALUE="${6:-80}"; DURATION="${7:-5}"; DEADLINE="${8:-300}"
         ID=$(( N * 65536 + SEQ ))
-        printf '[cbba_task] uav%s 建立%s %08X (%s, %s) value %s 停留 %s s 期限 %s s\n' \
-            "${N}" "${KIND}" "${ID}" "${X}" "${Y}" "${VALUE}" "${DURATION}" "${DEADLINE}"
+        printf '[cbba_task] uav%s 建立任務 %08X (%s, %s) value %s 停留 %s s 期限 %s s\n' \
+            "${N}" "${ID}" "${X}" "${Y}" "${VALUE}" "${DURATION}" "${DEADLINE}"
         ros2 topic pub --once -w 1 "${NS}/new_task" swarm_interfaces/msg/Task \
-            "{task_id: ${ID}, type: ${TYPE}, position: {x: ${X}, y: ${Y}, z: 0.0}, value: ${VALUE}, duration_sec: ${DURATION}, deadline_sec: ${DEADLINE}, status: 0}" \
+            "{task_id: ${ID}, type: 1, position: {x: ${X}, y: ${Y}, z: 0.0}, value: ${VALUE}, duration_sec: ${DURATION}, deadline_sec: ${DEADLINE}, status: 0}" \
             > /dev/null
         ;;
     done|fail)

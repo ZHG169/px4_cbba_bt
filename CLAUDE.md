@@ -11,8 +11,7 @@
 docker/                     模擬環境（sim、uavN、gcs 容器；mesh_net 可用 mesh_tc.sh 加掉包）
 ros2_ws/src/
 ├── swarm_interfaces/       ROS 訊息（Task、CBBAMessage、Bid、AgentStamp）
-├── uav_cbba/               CBBA 核心、機間封包、協定層、節點骨架、cbba_node（無人機）、離線模擬、測試
-├── ugv_cbba/               機器狗的 ugv_cbba_node（依賴 uav_cbba；狗的檔案都放這裡，不要混進 uav_cbba）
+├── uav_cbba/               CBBA 核心、機間封包、協定層、cbba_node、離線模擬、測試
 ├── px4_waypoint_node/      PX4 offboard：takeoff_hover 起飛懸停、task_executor 代替 BT
 └── px4_msgs/               由 docker/scripts/setup_px4_msgs.sh 下載（PX4 v1.17.0）
 ```
@@ -29,14 +28,14 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
   source /opt/ros/jazzy/setup.bash && source /home/ncrl/CBBA_BT/ros2_ws/install/setup.bash &&
   cd /home/ncrl/CBBA_BT/ros2_ws &&
   python3 -m colcon --log-base /out/log build --build-base /out/build --install-base /out/install \
-    --packages-select swarm_interfaces uav_cbba ugv_cbba --cmake-args -DCMAKE_BUILD_TYPE=Release &&
+    --packages-select swarm_interfaces uav_cbba --cmake-args -DCMAKE_BUILD_TYPE=Release &&
   cd /out/build/uav_cbba && for t in test_*; do ./$t; done'
 ```
 
 - 掛載路徑要是 `/home/ncrl/CBBA_BT`（共用 install 裡的 px4_msgs 用絕對路徑）。
 - 容器裡沒有 `colcon` 指令，用 `python3 -m colcon`。
 - 編譯要零警告（`-Wall -Wextra -Wpedantic`）。
-- 使用者自己在 uav 容器編譯：`colcon build --symlink-install --packages-select swarm_interfaces uav_cbba ugv_cbba`。
+- 使用者自己在 uav 容器編譯：`colcon build --symlink-install --packages-select swarm_interfaces uav_cbba`。
 - PX4 SITL 測試步驟：`uav_cbba/doc/sitl_test.md`（`cbba_uav.sh`、`cbba_task.sh` 在 `docker/scripts`）。
 - 參數說明：`uav_cbba/doc/parameters.md`（全部參數、要互相一致的參數、已知限制）；出價公式的實驗在 `uav_cbba/cbba_parameters.md`。
 - 多節點整合測試：同一個容器用 `use_px4:=false` 起多個 `cbba_node`，用 `ros2 topic pub` 代替 BT。
@@ -46,7 +45,7 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 
 | 層 | 檔案 | 說明 |
 |---|---|---|
-| ROS 節點 | `cbba_node_base.*`（共用骨架，也匯出給 ugv_cbba）、`cbba_node.cpp`（無人機，接 PX4） | 接感測與 BT；不寫邏輯 |
+| ROS 節點 | `src/cbba_node.cpp` | 接 PX4 與 BT；不寫邏輯 |
 | UDP | `udp_link.*` | multicast，綁 mesh 網卡（`MESH_IP`） |
 | 協定層 | `cbba_comm.*` | CBBA ⇄ 封包；不依賴 ROS 與 socket，用模擬網路測（`test_comm`） |
 | 封包格式 | `wire_io`、`wire_header`、`wire_agent_state`、`wire_task_event`、`wire_completion` | 只管位元組格式 |
@@ -93,23 +92,10 @@ TASK_EVENT、COMPLETION、COMPLETION_ACK。**DDS 只用在機內**（PX4、BT）
 
 `uav_cbba/doc/image.png` 是**機器狗端**的介面（RobotState、TaskResult、ManualOverride），不是無人機用的。
 
-## ugv_cbba_node（`ugv_cbba` 套件）與狗的 BT 的介面（2026-10-07 和使用者確認）
-
-| 項目 | 做法 |
-|---|---|
-| 話題 | `/v60/robot_state`（RobotState，2 Hz）、`/v60/task_result`（TaskResult）→ CBBA；`/v60/assigned_task`（Task）→ BT |
-| 訊息 | RobotState、TaskResult 照 image.png 加進 `swarm_interfaces`（v1.1）；狗端有自己的套件時再對齊 |
-| 機號 | **50**（介面規格）。沒有鄰居位元：無人機完成任務不等狗的確認；s 長度變 50（+200 B） |
-| 參與出價 | robot_state 1.5 s 內有更新。狗只接地面任務，等於「收到無人機的火點才出價」 |
-| 建立任務 | 狗不建立（50 的編號會和 uav2 撞）；ManualOverride 只在狗的機內 |
-| 失敗原因 | `TaskResult.detail` 只記 log |
-| 能量模型 | 佔位值（0.1 %/m、0.05 %/s、1 m/s），待伯宇實測，見 `ugv_cbba/doc/ugv_tuning.md` |
-| 套件 | 狗的節點與文件在獨立的 `ugv_cbba`；共用的核心、協定、骨架留在 `uav_cbba` |
-
 ## 目前狀態（2026-10-07）
 
 - 完成：封包格式、核心補強（停止出價、釋放、失聯、排除失敗任務）、協定層、UDP、cbba_node。
-  108 項單元測試通過；3 個節點走 UDP 的整合測試（分配、完成、失敗交回、墜毀重分配）正確。
+  106 項單元測試通過；3 個節點走 UDP 的整合測試（分配、完成、失敗交回、墜毀重分配）正確。
 - 共用工作區已編出 cbba_node（使用者 2026-10-07 在容器裡 colcon build 完成）。
 - 進行中：PX4 SITL＋Gazebo 測試（`sitl_test.md`）。BT 還沒好，先用 `px4_waypoint_node/task_executor` 代替
   （起飛、飛到指派的任務、停留 duration 後回報 DONE）。
@@ -123,9 +109,7 @@ TASK_EVENT、COMPLETION、COMPLETION_ACK。**DDS 只用在機內**（PX4、BT）
   AGENT_STATE 的 progress 與「跟隨中」旗標要等 BT；
   移動時的避碰（之後在飛行層加 CPF 之類的機制，和 CBBA 無關；目前 task_executor 同高度直線飛，SITL 會撞機）。
   每台只能建立約 32 個任務（任務編號 uint8、依機號交錯、已完成的不回收）。
-  機器狗端：`ugv_cbba_node` 完成，108 項單元測試＋2 台無人機加狗走真 UDP 的整合測試正確（地面任務只有狗出價、
-  完成、失敗交回、robot_state 斷掉時釋放）；還沒在真的狗上測、cbba_node 抽骨架後還沒在 SITL 重跑。
-  `cbba_task.sh ground` 建立地面處置任務。
+  機器狗端：要另寫 ugv 版節點（共用協定層）；狗在 ROS 的機號 50 要對應到網路上的 1～8，CBBA → BT 的話題待確認。
 - 要和規格作者確認：去重複鍵含封包種類、重送換新序號、座標系（我們用 map ENU）、拒絕確認的處理、
   重送 10 次後的處理、證明的 K 含不含執行機、**seq 起點與重開機**（規格只寫「遞增」，
   FORMATION 等其他模組和狗端也會遇到重開機撞號，最好由規格統一規定）。

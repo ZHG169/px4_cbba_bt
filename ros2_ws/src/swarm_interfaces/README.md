@@ -1,4 +1,4 @@
-# swarm_interfaces — 空地 CBBA 介面規格 v1.1
+# swarm_interfaces — 空地 CBBA 介面規格 v1.0
 
 > 狀態：**勝翔定案（2026-10-03）**，待伯宇、宜臻審閱。
 > 需要修改請直接在這份文件標註，修改後版本號往上加（v1.1…），並同步改 `package.xml` 的 version。
@@ -11,14 +11,6 @@
 > | `/uavN/new_task` | `Task` | BT → CBBA |
 > | `/uavN/task_result` | `Task`（`status` = DONE 完成、CANCELLED 失敗交回競標池） | BT → CBBA |
 > | `/uavN/assigned_task` | `Task` | CBBA → BT |
->
-> **機器狗端（2026-10-07，v1.1）**：狗的 CBBA 節點 `ugv_cbba/ugv_cbba_node` 也走同一套 UDP 封包。機內：
->
-> | 話題 | 型別 | 方向 |
-> |---|---|---|
-> | `/v60/robot_state` | `RobotState`（header、agent_id = 50、position map ENU、battery 0～100） | 狗的 BT → CBBA，2 Hz |
-> | `/v60/task_result` | `TaskResult`（task_id、success、detail） | 狗的 BT → CBBA，任務結束時一次 |
-> | `/v60/assigned_task` | `Task` | CBBA → 狗的 BT |
 
 ## 1. 載具編號與命名空間
 
@@ -122,4 +114,3 @@ deadline_sec = 120   value = 100   duration_sec = 20   status = OPEN
 |---|---|---|
 | v0.1 | 2026-10-02 | 草稿：四個訊息定義 |
 | v1.0 | 2026-10-03 | 勝翔定案：命名空間、agent_id、QoS、座標系、時間、火警任務格式、17 條規則 |
-| v1.1 | 2026-10-07 | 加入機器狗的 `RobotState`、`TaskResult`（依狗端的介面圖） |
