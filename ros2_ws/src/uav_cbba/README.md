@@ -21,6 +21,8 @@ uav_cbba/
 │   ├── udp_link.hpp       只走 mesh 網卡的 UDP multicast
 │   └── network_sim.hpp    離線模擬：丟包網路、場景檔讀取
 ├── src/                   上面各標頭檔的實作，以及 cbba_node.cpp（ROS 2 節點）
+├── doc/                   機間通訊封包規格書、parameters.md（所有參數）、sitl_test.md（PX4 SITL 測試步驟）
+├── cbba_parameters.md     出價參數的推導與實驗
 ├── tools/cbba_sim.cpp     離線模擬工具，輸出 CSV
 ├── scripts/plot_results.py  把 CSV 畫成圖（matplotlib）
 ├── scenarios/             測資
@@ -83,8 +85,8 @@ ctest --test-dir /tmp/uav_cbba_build --output-on-failure
 | `test_wire_agent_state` | AGENT_STATE 的大小（34／80／85／179 B）與位元組排列和規格書一致、來回編解碼、拒絕不合法的封包、flags |
 | `test_wire_task_event` | TASK_EVENT 的大小（42～49 B；版本 2 為 49～56 B）與位元組排列、轉送後內容不變、拒絕不合法的封包、截止時刻 |
 | `test_wire_completion` | COMPLETION（39／40+9K B）與 COMPLETION_ACK（39 B）的大小與位元組排列、拒絕不合法的封包、多跳時重送換新序號才補得回來 |
-| `test_comm` | 機間協定：任務擴散與編號、多跳轉送與完成確認（含掉包重送）、任務失敗交回、不參與出價、失聯重新分配、中間編號補發、晚加入、重開機、10%／30% 掉包、收斂後流量 |
-| `test_wire_header` | 共用表頭與轉送表頭的位元組排列與規格書一致、拒絕不合法的表頭、seq 過濾與重開機、轉送與去重複 |
+| `test_comm` | 機間協定：任務擴散與編號、多跳轉送與完成確認（含掉包重送）、任務失敗交回、不參與出價、失聯重新分配、中間編號補發、晚加入（含地面上的飛機 1 s 內補齊）、重開機（不撞號、seq 接續）、開機同步、seq 預約、10%／30% 掉包、收斂後流量 |
+| `test_wire_header` | 共用表頭與轉送表頭的位元組排列與規格書一致、拒絕不合法的表頭、seq 過濾與重開機、seq 起點與繞回 0、轉送與去重複 |
 
 ## 機上節點：cbba_node
 
@@ -97,6 +99,9 @@ ros2 run uav_cbba cbba_node
 # 不接 PX4、一律參與出價（只測協商）
 ros2 run uav_cbba cbba_node --ros-args -p use_px4:=false -p initial_position:="[0.0, 0.0, 5.0]" -p battery:=80.0
 ```
+
+PX4 SITL 上通常用 `docker/scripts/cbba_uav.sh` 一次啟動 XRCE Agent、task_executor（暫代 BT）、cbba_node，
+能量模型、速度、巡檢高度會一起對齊模擬電池。步驟見 [`doc/sitl_test.md`](doc/sitl_test.md)。
 
 **話題**（以 uav1 為例）
 
@@ -116,7 +121,7 @@ ros2 topic echo /uav1/assigned_task --qos-durability transient_local --qos-relia
 ros2 topic pub --once /uav1/task_result swarm_interfaces/msg/Task "{task_id: 65537, status: 1}"   # 1 = DONE
 ```
 
-**參數**
+**參數**（每個參數的意義、數值來源、要和誰一致，見 [`doc/parameters.md`](doc/parameters.md)）
 
 | 參數 | 說明 | 預設 |
 |---|---|---|
@@ -254,7 +259,10 @@ task,1,AIR_RECON,-15,5,5,60,80,10,fire
 
 ## 還沒做的部分
 
-- 在 PX4 SITL＋Gazebo 上跑完整情境（起飛、分配、掉包、墜毀、完成）
-- 能量模型的參數校正（用 PX4 回報的實際耗電）
+- PX4 SITL 已驗證：分配、完成確認、失敗交回、墜毀重分配、晚加入、重開機（2026-10-07）。掉包、斷網的 SITL 測試還沒做
+- 能量模型的參數校正（用實機 ulog 量；SITL 目前只對齊模擬電池）
+- 機器狗端的 CBBA 節點（共用協定層，介面不同；狗在 ROS 裡的機號 50 要對應到網路上的 1～8）
+- 每台只能建立約 32 個任務（任務編號 uint8、依機號交錯、已完成的不回收）
+- 沒有飛機接得起的任務沒有提示；只關 PX4 時 cbba_node 會繼續出價
 - AGENT_STATE 的執行進度（`progress`）與「跟隨中」旗標，要等 BT 回報
 - docker 的 Fast DDS 設定仍讓 DDS 經過 mesh；要讓 DDS 只留在機內，需把 uav 容器的白名單改成只有線材網卡

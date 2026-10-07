@@ -14,21 +14,23 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 | 容器 | 代表 | 主要內容 |
 |---|---|---|
 | sim | 真實世界＋所有飛控 | Gazebo、每台無人機一個 PX4 SITL |
-| uav1、uav2… | 每台無人機的機上電腦 | XRCE Agent、控制節點、CBBA |
+| uav1、uav2… | 每台無人機的機上電腦 | XRCE Agent、cbba_node、task_executor（暫代 BT） |
 | gcs | 地面站 | 任務注入、監控 |
 
 - 控制路徑（節點 → XRCE Agent → PX4）走每台自己的線，**不經過 mesh**。
-- 機間協商（`/swarm/tasks`、`/swarm/cbba`）走 mesh，可用 `mesh_tc.sh` 模擬丟包與延遲。
+- 機間協商走 mesh 上的 **UDP multicast**，封包依「機間通訊封包規格」2026-10-06
+  （`ros2_ws/src/uav_cbba/doc/`）。DDS 只用在機內（PX4、BT）。可用 `mesh_tc.sh` 模擬丟包與延遲。
 
 ## 目錄
 
 ```
 docker/                       模擬環境（Dockerfile、啟動腳本、Fast DDS、mesh tc）→ docker/README.md
 ros2_ws/src/
-├── swarm_interfaces/         CBBA 訊息與介面規格 v1.0 → swarm_interfaces/README.md
-├── uav_cbba/                 CBBA 核心（不依賴 ROS）、離線模擬、畫圖、單元測試 → uav_cbba/README.md
+├── swarm_interfaces/         ROS 訊息（Task 等）→ swarm_interfaces/README.md
+├── uav_cbba/                 CBBA 核心、機間封包、協定層、cbba_node、離線模擬、單元測試 → uav_cbba/README.md
+│   ├── doc/                  封包規格書、參數說明（parameters.md）、SITL 測試步驟（sitl_test.md）
 │   └── test/results/         測試結果（只保留圖片）
-└── px4_waypoint_node/        PX4 offboard 控制：起飛並懸停 → px4_waypoint_node/README.md
+└── px4_waypoint_node/        PX4 offboard：takeoff_hover 起飛懸停、task_executor 暫代 BT → px4_waypoint_node/README.md
 ```
 
 `px4_msgs` 不在 repo 裡，由 `docker/scripts/setup_px4_msgs.sh` 依 PX4 版本（v1.17.0）下載。
@@ -56,18 +58,19 @@ source install/setup.bash
 只編部分套件：`colcon build --symlink-install --packages-select uav_cbba`。
 不要在兩個容器同時編譯（共用同一個 build/、install/）。
 
-**3. 分散式起飛懸停**
+**3. CBBA 分配任務（PX4 SITL）**
 
 | Terminal | 容器 | 指令 |
 |---|---|---|
-| 1 | uav1 | `xrce_agent.sh` |
-| 2 | uav2 | `xrce_agent.sh` |
-| 3 | sim | `px4_sitl.sh 1`（同時開啟 Gazebo） |
-| 4 | sim | `px4_sitl.sh 2` |
-| 5 | uav1 | `ros2 run px4_waypoint_node takeoff_hover` |
-| 6 | uav2 | `ros2 run px4_waypoint_node takeoff_hover` |
+| 1、2、3 | uav1、uav2、uav3 | `cbba_uav.sh`（XRCE Agent＋task_executor＋cbba_node） |
+| 4 | sim | `px4_sitl.sh 1`、`px4_sitl.sh 2`、`px4_sitl.sh 3`（第 1 台同時開 Gazebo） |
+| 5 | uav1 | `cbba_task.sh new 1 1 10 0` 建立任務 |
 
-起飛到 5 m 後原地懸停（不含降落）。結束時直接關閉 PX4／Gazebo，詳見 `px4_waypoint_node/README.md`。
+每台起飛到 5 m 後參與出價，得標的飛過去、停留後回報完成。失敗交回、墜毀、晚加入的測試步驟見
+`ros2_ws/src/uav_cbba/doc/sitl_test.md`。
+
+只要起飛懸停的話：每台 `xrce_agent.sh`，sim 開 `px4_sitl.sh N`，再 `ros2 run px4_waypoint_node takeoff_hover`
+（見 `px4_waypoint_node/README.md`）。
 
 **4. CBBA 測試與離線模擬**（uav 容器）
 
@@ -93,11 +96,13 @@ python3 src/uav_cbba/scripts/animate_results.py mission /tmp/fire_3uav $SCN/fire
 | PX4 SITL＋XRCE-DDS 模擬環境（多台） | ✅ |
 | Ad-hoc mesh 與 tc 弱網環境 | ✅ |
 | 分散式起飛懸停（驗收 PASS，結果見 `uav_cbba/test/results/takeoff_hover/`） | ✅ |
-| CBBA 訊息與介面規格 v1.0 | ✅ 待隊友審閱 |
 | CBBA 核心（17 條消解規則、連鎖退標、電池計分）＋單元測試 | ✅ |
-| 3D 航點介面 | ⏳ |
-| CBBA ROS 2 節點（接上 `/swarm/tasks`、`/swarm/cbba`） | ⏳ |
-| AprilTag 火情偵測、無人機行為樹 | ⏳ |
+| 機間通訊封包（依規格書 2026-10-06）、協定層、UDP | ✅ 106 項單元測試 |
+| cbba_node：PX4 SITL 驗證分配、完成確認、失敗交回、墜毀重分配、晚加入、重開機 | ✅ |
+| 機器狗端的 CBBA 節點與介面對接 | ⏳ 待和隊友確認 |
+| 移動時的避碰（CPF 之類） | ⏳ 目前 SITL 同高度直線飛，會撞機 |
+| 能量模型校正（實機 ulog） | ⏳ |
+| 3D 航點介面、AprilTag 火情偵測、無人機行為樹 | ⏳ |
 
 ## 授權
 

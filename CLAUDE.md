@@ -37,6 +37,7 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 - 編譯要零警告（`-Wall -Wextra -Wpedantic`）。
 - 使用者自己在 uav 容器編譯：`colcon build --symlink-install --packages-select swarm_interfaces uav_cbba`。
 - PX4 SITL 測試步驟：`uav_cbba/doc/sitl_test.md`（`cbba_uav.sh`、`cbba_task.sh` 在 `docker/scripts`）。
+- 參數說明：`uav_cbba/doc/parameters.md`（全部參數、要互相一致的參數、已知限制）；出價公式的實驗在 `uav_cbba/cbba_parameters.md`。
 - 多節點整合測試：同一個容器用 `use_px4:=false` 起多個 `cbba_node`，用 `ros2 topic pub` 代替 BT。
   **停節點要用 `pkill -f "cbba_node.*agent_id:=N"`**，只 kill `ros2 run` 外層，節點還會繼續跑。
 
@@ -98,8 +99,8 @@ TASK_EVENT、COMPLETION、COMPLETION_ACK。**DDS 只用在機內**（PX4、BT）
 - 共用工作區已編出 cbba_node（使用者 2026-10-07 在容器裡 colcon build 完成）。
 - 進行中：PX4 SITL＋Gazebo 測試（`sitl_test.md`）。BT 還沒好，先用 `px4_waypoint_node/task_executor` 代替
   （起飛、飛到指派的任務、停留 duration 後回報 DONE）。
-  已通過：3 台基本分配、完成確認傳到全隊。晚加入測試找到兩個問題（地面上的飛機補發慢、重開機 seq 撞號），
-  已修好並在 SITL 重測通過（晚加入 1 s 內補齊、接到新任務）。還沒測：失敗交回、墜毀。掉包、斷網的測試之後再做。
+  **第一階段 SITL 驗證完成**：分配、完成確認（20 ms 內傳到全隊）、失敗交回（0.6 s 接手）、
+  墜毀重分配（1.5 s 判定、2 s 接手）、晚加入（20 ms 補齊）、重開機（seq 接續）。掉包、斷網的測試之後再做。
   SITL 的電量對齊（2026-10-07）：PX4 模擬電池續航 900 s、最低 20%；能量模型改成懸停 0.111 %/s、
   每公尺 0.022 %（`cbba_uav.sh` 傳入，核心預設 0.5／0.2 不變）；速度 5 m/s、巡檢高度 5 m 兩邊一致。
   之前 PX4 預設 60 s 就降到 50%，加上 0.5 %/m，遠一點、停留久的任務會被誤判成電量不夠。
@@ -107,6 +108,8 @@ TASK_EVENT、COMPLETION、COMPLETION_ACK。**DDS 只用在機內**（PX4、BT）
   docker 的 Fast DDS 仍讓 DDS 經過 mesh（要改 `gen_compose.py` 讓 uav 容器只走線材網卡）；
   AGENT_STATE 的 progress 與「跟隨中」旗標要等 BT；
   移動時的避碰（之後在飛行層加 CPF 之類的機制，和 CBBA 無關；目前 task_executor 同高度直線飛，SITL 會撞機）。
+  每台只能建立約 32 個任務（任務編號 uint8、依機號交錯、已完成的不回收）。
+  機器狗端：要另寫 ugv 版節點（共用協定層）；狗在 ROS 的機號 50 要對應到網路上的 1～8，CBBA → BT 的話題待確認。
 - 要和規格作者確認：去重複鍵含封包種類、重送換新序號、座標系（我們用 map ENU）、拒絕確認的處理、
   重送 10 次後的處理、證明的 K 含不含執行機、**seq 起點與重開機**（規格只寫「遞增」，
   FORMATION 等其他模組和狗端也會遇到重開機撞號，最好由規格統一規定）。
