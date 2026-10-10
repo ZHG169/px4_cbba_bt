@@ -4,13 +4,14 @@
 //   WAIT_READY → STREAM → ENGAGE → CLIMB   同 takeoff_hover（離地後 cbba_node 才開始參與出價）
 //   IDLE        懸停在目前位置，等 /uavN/assigned_task
 //   GOTO        以 cruise_speed 把 setpoint 往任務點移（任務點正上方 altitude 公尺）
-//   WORK        到達後停留 duration_sec，結束時發 /uavN/task_result（DONE）一次，回到 IDLE
+//   WORK        到達後停留 duration_sec，結束時發 /uavN/task_result（success = true）一次，回到 IDLE。
+//               assignment_version 帶回目前 assigned_task 的版本（同一個任務重新指派時版本會變）
 //
 // 指派中途換成別的任務就直接改飛新任務；變成 task_id = 0 就原地懸停。
 // 已回報過的任務不再執行（cbba_node 確認完成之前可能還會短暫指派同一個）。
-// 要測「失敗交回」時，手動對 /uavN/task_result 發 CANCELLED（docker/scripts/cbba_task.sh fail）。
+// 要測「失敗交回」時，手動對 /uavN/task_result 發 success = false（docker/scripts/cbba_task.sh fail）。
 //
-// 座標：任務是 map ENU；PX4 local 是 NED、以出生點為原點。出生點預設和 px4_sitl.sh、cbba_node 一樣，
+// 座標：任務是 map ENU；PX4 local 是 NED、以出生點為原點。出生點預設和 px4_sitl.sh、px4_state_bridge 一樣，
 // 沿 y 方向每台間隔 UAV_SPAWN_SPACING 公尺。
 //
 // 注意：offboard 需要持續的 setpoint，停掉這個節點 PX4 會觸發 failsafe。
@@ -30,6 +31,7 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <swarm_interfaces/msg/task.hpp>
+#include <swarm_interfaces/msg/task_result.hpp>
 
 using px4_msgs::msg::OffboardControlMode;
 using px4_msgs::msg::TrajectorySetpoint;
@@ -37,6 +39,7 @@ using px4_msgs::msg::VehicleCommand;
 using px4_msgs::msg::VehicleLocalPosition;
 using px4_msgs::msg::VehicleStatus;
 using TaskMsg = swarm_interfaces::msg::Task;
+using TaskResultMsg = swarm_interfaces::msg::TaskResult;
 
 namespace
 {
@@ -94,7 +97,7 @@ public:
       [this](VehicleLocalPosition::ConstSharedPtr msg) {position_ = *msg; have_position_ = true;});
 
     // 和 cbba_node 的 QoS 一致
-    result_pub_ = create_publisher<TaskMsg>(ns + "/task_result", rclcpp::QoS(20).reliable());
+    result_pub_ = create_publisher<TaskResultMsg>(ns + "/task_result", rclcpp::QoS(20).reliable());
     assigned_sub_ = create_subscription<TaskMsg>(
       ns + "/assigned_task", rclcpp::QoS(1).reliable().transient_local(),
       [this](TaskMsg::ConstSharedPtr msg) {onAssigned(*msg);});
@@ -278,10 +281,10 @@ private:
 
   void reportDone()
   {
-    TaskMsg msg = assigned_;
+    TaskResultMsg msg;
     msg.task_id = active_;
-    msg.status = TaskMsg::DONE;
-    msg.status_stamp = get_clock()->now();
+    msg.success = true;
+    msg.assignment_version = assigned_.task_id == active_ ? assigned_.assignment_version : 0;
     result_pub_->publish(msg);
     done_.insert(active_);
     RCLCPP_INFO(get_logger(), "回報 %s 完成", taskName(active_).c_str());
@@ -339,7 +342,7 @@ private:
   rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_pub_;
   rclcpp::Publisher<TrajectorySetpoint>::SharedPtr setpoint_pub_;
   rclcpp::Publisher<VehicleCommand>::SharedPtr command_pub_;
-  rclcpp::Publisher<TaskMsg>::SharedPtr result_pub_;
+  rclcpp::Publisher<TaskResultMsg>::SharedPtr result_pub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<VehicleLocalPosition>::SharedPtr position_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr assigned_sub_;

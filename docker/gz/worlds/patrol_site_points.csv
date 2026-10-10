@@ -1,0 +1,16 @@
+# 巡檢＋隨機插入測試場景的任務點（docs/sim_scenario_plan.md，2026-10-10）
+# 這份表是唯一的來源：gen_patrol_site.py 產生 patrol_site.sdf，patrol_scenario.sh 依編號建立任務、顯示 tag，
+# cbba_sim 的 insert 測試也讀它。改座標後要重新執行 gen_patrol_site.py。
+#
+# point：G1～G3 綠色（一開始就知道的巡檢任務），R1～R5 紅色（隨機插入的候選，插入時 tag 才出現）
+# x、y：map ENU（公尺），無人機出生點在 (0, 0)、(0, UAV_SPAWN_SPACING)、…
+# tag：tag36h11 的編號（綠色的一直貼著，紅色的插入時生成）
+point,x,y,tag
+G1,20,25,0
+G2,-25,20,1
+G3,10,-30,2
+R1,35,5,3
+R2,-35,-10,4
+R3,25,-25,5
+R4,-10,38,6
+R5,40,35,7

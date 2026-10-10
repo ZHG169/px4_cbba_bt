@@ -7,6 +7,7 @@
 #    px4_sitl.sh 2            第 2 台（加入已開啟的 Gazebo）
 #    px4_sitl.sh 1 gz_x500    指定機型
 #    HEADLESS=1 px4_sitl.sh   不開 Gazebo 視窗
+#    CBBA_WORLD=fire_site px4_sitl.sh 1   用 docker/gz/worlds 的場景（第 1 台負責開；之後的台自動加入）
 #
 #  每台會：
 #    - 用 PX4 實例編號 -i N，在 y 方向錯開出生點
@@ -31,6 +32,11 @@ AIRFRAME_DIR="${PX4_DIR}/ROMFS/px4fmu_common/init.d-posix/airframes"
 # source ROS 之後，GZ_CONFIG_PATH 只指向 ROS 內建的 gz 工具（只有 topic/service…），
 # 找不到 PX4 安裝的 Gazebo（gz sim）。把系統的 /usr/share/gz 放到最前面。
 export GZ_CONFIG_PATH="/usr/share/gz${GZ_CONFIG_PATH:+:${GZ_CONFIG_PATH}}"
+
+# 專案的模型（AprilTag、低解析度的 mono_cam）放在最前面：PX4 的 gz_env.sh 只會往後加自己的路徑，
+# 同名的模型（mono_cam）用專案的版本
+CBBA_GZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../gz" && pwd)"
+export GZ_SIM_RESOURCE_PATH="${CBBA_GZ_DIR}/models:${CBBA_GZ_DIR}/worlds${GZ_SIM_RESOURCE_PATH:+:${GZ_SIM_RESOURCE_PATH}}"
 
 # ---------- 第 N 台的 Agent IP ----------
 read -r -a AGENTS <<< "${UAV_AGENT_IPS}"
@@ -64,6 +70,28 @@ else
     if [ "${N}" != "1" ]; then
         echo "[px4_sitl] 提醒：Gazebo 還沒開，由第 ${N} 台負責開啟"
     fi
+fi
+
+# ---------- 專案的場景：自己開 Gazebo，PX4 會偵測到「已經在跑的世界」直接加入 ----------
+# （PX4 的 PX4_GZ_WORLD 只能選 PX4 自己 worlds 目錄裡的場景）
+if [ -n "${CBBA_WORLD:-}" ] && ! pgrep -f "gz[ ]sim" >/dev/null 2>&1; then
+    WORLD_FILE="${CBBA_GZ_DIR}/worlds/${CBBA_WORLD}.sdf"
+    [ -f "${WORLD_FILE}" ] || { echo "[px4_sitl] 找不到場景 ${WORLD_FILE}"; exit 1; }
+    # 和 PX4 的 gz_env.sh 相同的外掛、伺服器設定
+    ROOTFS="${PX4_DIR}/build/px4_sitl_default/rootfs"
+    # shellcheck disable=SC1091
+    set +u; . "${ROOTFS}/gz_env.sh"; set -u     # gz_env.sh 會讀還沒設定的變數
+    echo "[px4_sitl] 開啟場景 ${WORLD_FILE}"
+    gz sim --verbose=1 -r -s "${WORLD_FILE}" > /tmp/gz_server.log 2>&1 &
+    if [ -z "${HEADLESS:-}" ]; then
+        gz sim -g > /dev/null 2>&1 &
+    fi
+    for _ in $(seq 1 60); do
+        gz topic -l 2>/dev/null | grep -q "^/world/${CBBA_WORLD}/clock" && break
+        sleep 1
+    done
+    GZ_ENV=()            # 世界已經在跑：PX4 走「gazebo already running world」，自己生成機體
+    GZ_MSG="加入場景 ${CBBA_WORLD}"
 fi
 
 # ---------- 背景：等 PX4 開好後，把 DDS client 指向 uavN ----------
@@ -109,4 +137,5 @@ exec env \
     PX4_SIM_MODEL="${MODEL}" \
     PX4_GZ_MODEL_POSE="0,${POSE_Y}" \
     "${GZ_ENV[@]}" \
+    ${CBBA_WORLD:+PX4_GZ_WORLD="${CBBA_WORLD}"} \
     "${BIN}/px4" -i "${N}"

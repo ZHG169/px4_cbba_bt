@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>cbba_core</name>
+  <version>0.1.0</version>
+  <description>空地共用的 CBBA：核心（Velhal 時空成本加電池的計分、分散式共識）、機間協定、通用 cbba_node（不分載具、不依賴 PX4）</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>swarm_interfaces</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  火情巡檢測試場景（第 2、3 週）：PX4 default.sdf 的地面、光源、經緯度，加上：
+    火警    紅色方塊 (14, -6)，上面 tag36h11 編號 101（BT 的 expected_tag_id）
+    誘餌    紅色方塊 (-10, -8)，tag 編號 7（看得到、但不是火警，不能觸發）
+    巡檢點  綠色平台 (12, 12)（貼 tag 0）、(-12, 10)、(0, -16)
+  座標 = map ENU（無人機出生點沿 y 排開：0、UAV_SPAWN_SPACING、…）。tag 平面 1.0 m、黑框 0.8 m。
+  用法：在 sim 容器 CBBA_WORLD=fire_site px4_sitl.sh 1（見 cbba_core/doc/sitl_test.md）
+-->
+<sdf version="1.9">
+  <world name="fire_site">
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>1 1</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>500 500</size></plane></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.8 0.8 0.8 1</diffuse><specular>0.8 0.8 0.8 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 -0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.904 0.904 0.904 1</diffuse>
+      <specular>0.271 0.271 0.271 1</specular>
+      <attenuation><range>2000</range><linear>0</linear><constant>1</constant><quadratic>0</quadratic></attenuation>
+    </light>
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <model name="fire_box_1">
+      <static>true</static>
+      <pose>14 -6 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.8 0.1 0.1 1</ambient><diffuse>0.8 0.1 0.1 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>model://tag36h11_101</uri>
+      <name>fire_tag_101</name>
+      <pose>14 -6 0.302 0 0 0</pose>
+    </include>
+    <model name="decoy_box_7">
+      <static>true</static>
+      <pose>-10 -8 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.8 0.1 0.1 1</ambient><diffuse>0.8 0.1 0.1 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>model://tag36h11_7</uri>
+      <name>decoy_tag_7</name>
+      <pose>-10 -8 0.302 0 0 0</pose>
+    </include>
+    <model name="patrol_pad_1">
+      <static>true</static>
+      <pose>12 12 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="patrol_pad_2">
+      <static>true</static>
+      <pose>-12 10 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="patrol_pad_3">
+      <static>true</static>
+      <pose>0 -16 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>model://tag36h11_0</uri>
+      <name>patrol_tag_0</name>
+      <pose>12 12 0.052 0 0 0</pose>
+    </include>
+  </world>
+</sdf>

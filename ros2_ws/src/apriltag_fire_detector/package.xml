@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>apriltag_fire_detector</name>
+  <version>0.1.0</version>
+  <description>無人機下視相機的 AprilTag 火情偵測：tag 編號、map 位置、連續影像的 confidence（給 uav_px4_bt 判定火警）</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>apriltag</depend>
+  <depend>px4_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>swarm_interfaces</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

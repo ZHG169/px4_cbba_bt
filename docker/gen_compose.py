@@ -89,6 +89,8 @@ x-common-env: &common-env
   RMW_IMPLEMENTATION: rmw_fastrtps_cpp
   FASTRTPS_DEFAULT_PROFILES_FILE: /tmp/cbba_fastdds.xml
   FASTDDS_DEFAULT_PROFILES_FILE: /tmp/cbba_fastdds.xml
+  # cbba_node 的程序鎖（同一機號只能跑一個）：所有容器共用主機的 /tmp/cbba_locks
+  CBBA_LOCK_DIR: /run/cbba
 
 x-gui-env: &gui-env
   DISPLAY: ${{DISPLAY:-:0}}
@@ -116,6 +118,7 @@ services:
       UAV_AGENT_IPS: {ips(uav_wire(i) for i in uavs)}
     volumes:
       - ..:/home/ncrl/CBBA_BT
+      - /tmp/cbba_locks:/run/cbba
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     networks:
 """)
@@ -155,6 +158,7 @@ for i in uavs:
       PEER_IPS: {ips([sim_wire(i)] + others + [gcs_mesh])}
     volumes:
       - ..:/home/ncrl/CBBA_BT
+      - /tmp/cbba_locks:/run/cbba
     networks:
       sim_uav{i}_net:
         ipv4_address: {uav_wire(i)}
@@ -186,6 +190,7 @@ w(f"""
       PEER_IPS: {ips(uav_mesh(i) for i in uavs)}
     volumes:
       - ..:/home/ncrl/CBBA_BT
+      - /tmp/cbba_locks:/run/cbba
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     networks:
       mesh_net:

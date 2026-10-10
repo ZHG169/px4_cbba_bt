@@ -17,3 +17,4 @@ float32 value                         # 任務價值
 float32 duration_sec                  # 預估的現場執行時間
 uint8 status
 builtin_interfaces/Time status_stamp  # 狀態最後一次改變的時間
+uint64 assignment_version              # 正式指派的版本（cbba_node 發 assigned_task 時填；BT 回報 task_result 時原樣帶回；其他用途填 0）

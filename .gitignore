@@ -17,6 +17,6 @@ __pycache__/
 docker/docker-compose.yaml
 
 # 測試結果只保留圖片（png、gif），CSV、log 可用腳本重新產生
-ros2_ws/src/uav_cbba/test/results/**/*.*
-!ros2_ws/src/uav_cbba/test/results/**/*.png
-!ros2_ws/src/uav_cbba/test/results/**/*.gif
+ros2_ws/src/cbba_core/test/results/**/*.*
+!ros2_ws/src/cbba_core/test/results/**/*.png
+!ros2_ws/src/cbba_core/test/results/**/*.gif

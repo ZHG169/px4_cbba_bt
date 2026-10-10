@@ -33,6 +33,12 @@ if [ "$(id -u)" = "0" ]; then
         find "${HOME_DIR}" -xdev -path "${PROJECT_DIR}" -prune -o \
              -exec chown -h "${HOST_UID}:${HOST_GID}" {} +
     fi
+    # cbba_node 的程序鎖目錄（主機的 /tmp/cbba_locks，所有容器共用；docker 建立時是 root 的）
+    if [ -n "${CBBA_LOCK_DIR:-}" ]; then
+        mkdir -p "${CBBA_LOCK_DIR}"
+        chown "${HOST_UID}:${HOST_GID}" "${CBBA_LOCK_DIR}"
+        chmod 1777 "${CBBA_LOCK_DIR}"
+    fi
 fi
 
 # ---------- 2. Fast DDS 設定 ----------

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  無人機的前台行為樹（備用版，2026-10-09）：結構照週計畫的 MainUAVTree，節點說明在 include/uav_px4_bt/bt_nodes.hpp。
+  blackboard：ctx（UavContext*）、current_uav_task（uav_bt_node 每個 tick 寫入 cbba_node 的 assigned_task）、
+             altitude（參數）、active_uav_task（IsTaskValidAndUnchanged 維護）
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainUAVTree">
+  <BehaviorTree ID="MainUAVTree">
+    <!-- 頂層安全防護：每個 tick 先檢查電量 -->
+    <ReactiveFallback name="UAVSafetyFallback">
+
+      <!-- 分支 1：電量不足安全自動返航 (RTL) -->
+      <Sequence name="UAVBatteryProtection">
+        <IsUAVBatteryCritical min_battery="20.0"/>
+        <ExecuteReturnToLaunch task="{active_uav_task}" mode="AUTO_RTL"/>
+      </Sequence>
+
+      <ReactiveSequence name="UAVMission">
+        <TakeOff altitude="{altitude}"/>
+        <ReactiveFallback name="TaskOrLoiter">
+
+          <!-- 分支 2：空中偵巡反應序列 -->
+          <ReactiveSequence name="UAVActiveTask">
+            <IsTaskValidAndUnchanged task_in_execution="{active_uav_task}"
+                                     blackboard_task="{current_uav_task}"/>
+            <Fallback name="TaskOrFailure">
+              <Sequence name="AirReconSequence">
+                <!-- 1. CPF 避碰、飛抵目標空域 -->
+                <FlyToWaypoint task="{active_uav_task}" altitude="{altitude}"/>
+                <!-- 2～3. 下視相機驗證 AprilTag 火情標籤 → 向全網注入地面處置任務；沒有火警就繼續 -->
+                <Fallback name="FireCheck">
+                  <Sequence name="FireConfirmed">
+                    <DetectAprilTagFire task="{active_uav_task}" expected_tag_id="101" min_confidence="0.85"
+                                        fire_pose="{detected_fire_pose}" fire_tag="{detected_fire_tag}"/>
+                    <ReportFireEvent fire_pose="{detected_fire_pose}" fire_tag="{detected_fire_tag}"/>
+                  </Sequence>
+                  <AlwaysSuccess/>
+                </Fallback>
+                <!-- 4. 就地懸停監控到任務的停留時間 → 回報完成 -->
+                <HoverAndMonitor task="{active_uav_task}"/>
+                <ReportTaskResult task="{active_uav_task}" success="true"/>
+              </Sequence>
+              <ReportTaskResult task="{active_uav_task}" success="false" detail="FLY_TIMEOUT"/>
+            </Fallback>
+          </ReactiveSequence>
+
+          <!-- 分支 3：空閒待命 -->
+          <LandOrLoiter/>
+        </ReactiveFallback>
+      </ReactiveSequence>
+
+    </ReactiveFallback>
+  </BehaviorTree>
+</root>

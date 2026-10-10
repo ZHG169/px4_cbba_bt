@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>uav_px4_bt</name>
+  <version>0.1.0</version>
+  <description>無人機的備用行為樹（BehaviorTree.CPP v4）：起飛、CPF 避碰飛到 CBBA 指派的任務、AprilTag 火警判定與廣播、電量不足返航</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ament_index_cpp</depend>
+  <depend>behaviortree_cpp</depend>
+  <depend>cbba_core</depend>
+  <depend>px4_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>swarm_interfaces</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

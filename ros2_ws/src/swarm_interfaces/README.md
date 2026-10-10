@@ -1,16 +1,37 @@
-# swarm_interfaces — 空地 CBBA 介面規格 v1.0
+# swarm_interfaces — 空地 CBBA 介面規格 v1.5
 
 > 狀態：**勝翔定案（2026-10-03）**，待伯宇、宜臻審閱。
 > 需要修改請直接在這份文件標註，修改後版本號往上加（v1.1…），並同步改 `package.xml` 的 version。
 
-> **無人機端（2026-10-07 起）**：無人機之間的 CBBA 協商改走 UDP（依「機間通訊封包規格」，見 `uav_cbba/README.md`），
-> 無人機不再使用第 2 節的 `/swarm/tasks`、`/swarm/cbba`。機內 CBBA 與 BT 之間：
+> **機間（2026-10-07 起）**：載具之間的 CBBA 協商改走 UDP（2026-10-09 起是協定版本 2，見 `cbba_core/doc/protocol.md`），
+> 不再使用第 2 節的 `/swarm/tasks`、`/swarm/cbba`。
+>
+> **機內（2026-10-09 起，無人機和機器狗相同）**：每台跑同一個通用節點 `cbba_core/cbba_node`，話題在 `/<ns>`（`/uavN`、`/v60`）底下：
 >
 > | 話題 | 型別 | 方向 |
 > |---|---|---|
-> | `/uavN/new_task` | `Task` | BT → CBBA |
-> | `/uavN/task_result` | `Task`（`status` = DONE 完成、CANCELLED 失敗交回競標池） | BT → CBBA |
-> | `/uavN/assigned_task` | `Task` | CBBA → BT |
+> | `/<ns>/robot_state` | `RobotState`（header、agent_id、position map ENU、battery 0～100，負值 = 不知道；v1.2 加 flight_state_valid、armed、offboard、landed，狗填 false） | → CBBA。狗的 BT 2 Hz；無人機由 `px4_state_bridge` 從 PX4 轉換，PX4 有在更新就一直送 |
+> | `/<ns>/task_result` | `TaskResult`（task_id、success、detail、assignment_version） | BT → CBBA，任務結束時一次（reliable）；task_id 和 assignment_version 要是目前 assigned_task 上的 |
+> | `/<ns>/cancel_task` | `Task`（只看 task_id） | → CBBA，取消任務：要是建立者或 cancel_authorities 裡的機號 |
+> | `/<ns>/new_task` | `Task` | BT → CBBA（任何機號都能建立任務） |
+> | `/<ns>/assigned_task` | `Task`（含 assignment_version：這次正式指派的版本） | CBBA → BT（BT 接受後才發） |
+> | `/<ns>/exec_state` | `ExecState`（執行狀態、可否中斷、預估剩餘時間、執行中／排隊中的任務） | BT → CBBA |
+> | `/<ns>/assignment_request` | `AssignmentRequest`（ACTIVATE／RESERVE／RELEASE、preempt、Task） | CBBA → BT（`require_accept = true` 時） |
+> | `/<ns>/assignment_response` | `AssignmentResponse`（task_id、版本、接受／拒絕、原因） | BT → CBBA |
+>
+> 2026-10-09 之前無人機的 `task_result` 用 `Task`（看 `status`），改成和狗一樣的 `TaskResult`。
+>
+> **v1.2（2026-10-09）**：`RobotState` 加 `flight_state_valid`、`armed`、`offboard`、`landed`。訊息的型別雜湊變了，
+> **用到 swarm_interfaces 的套件（含狗端）都要重新編譯**，舊版的節點收不到新版發的 RobotState。
+>
+> **v1.3（2026-10-09）**：`Task`、`TaskResult` 加 `assignment_version`。cbba_node 在 assigned_task 填，BT 回報時原樣帶回；
+> 不是目前的正式指派就拒絕（擋掉任務被換掉、或 X→Y→X 之後的舊回報）。同樣要重新編譯。
+>
+> **v1.4（2026-10-09）**：`assignment_version` 改成 uint64；新增 `ExecState`、`AssignmentRequest`、`AssignmentResponse`：
+> CBBA 得標後先請 BT 接受，地面端保有最終的接受與中斷權（流程見 `cbba_core/doc/protocol.md` 第五節）。
+>
+> **v1.5（2026-10-09）**：新增 `FireDetection`（無人機機內：`apriltag_fire_detector` → BT 的 `/uavN/fire_detection`）。
+> 只是新增訊息，原有訊息的型別雜湊不變，狗端不用為了它重新編譯。
 
 ## 1. 載具編號與命名空間
 
@@ -65,7 +86,7 @@ type = GROUND_INTERVENTION      position = 火點的 map 座標
 deadline_sec = 120   value = 100   duration_sec = 20   status = OPEN
 ```
 
-（數值沿用 `uav_cbba/scenarios/fire_demo.csv` 的地面處置任務，之後可依實測調整。）
+（數值沿用 `cbba_core/scenarios/fire_demo.csv` 的地面處置任務，之後可依實測調整。）
 
 ### CBBAMessage.msg（`/swarm/cbba`）
 
@@ -95,7 +116,7 @@ deadline_sec = 120   value = 100   duration_sec = 20   status = OPEN
 
 ## 6. CBBA 共識規則
 
-- 衝突消解採 **Choi 2009 Table 1 的 17 條規則**，實作與測試案例在 `uav_cbba`（`test/cbba_rule_cases.csv`）。
+- 衝突消解採 **Choi 2009 Table 1 的 17 條規則**，實作與測試案例在 `cbba_core`（`test/cbba_rule_cases.csv`）。
 - 計畫中寫的「18 條」視為筆誤；如果有第 18 條（例如任務終止的處理），請宜臻提出規則內容，再加進案例檔。
 - 共識核心（bundle、消解規則、連鎖退標、出價上限）**兩邊共用同一份程式庫**，各自只提供自己的出價函數。
 
@@ -114,3 +135,7 @@ deadline_sec = 120   value = 100   duration_sec = 20   status = OPEN
 |---|---|---|
 | v0.1 | 2026-10-02 | 草稿：四個訊息定義 |
 | v1.0 | 2026-10-03 | 勝翔定案：命名空間、agent_id、QoS、座標系、時間、火警任務格式、17 條規則 |
+| v1.1 | 2026-10-07 | 加入機器狗的 `RobotState`、`TaskResult`（依狗端的介面圖） |
+| v1.2 | 2026-10-09 | `RobotState` 加 `flight_state_valid`、`armed`、`offboard`、`landed`（無人機的真實飛行狀態，狗填 false） |
+| v1.3 | 2026-10-09 | `Task`、`TaskResult` 加 `assignment_version`（正式指派的版本，BT 回報時帶回）；新增 `/<ns>/cancel_task` |
+| v1.4 | 2026-10-09 | `assignment_version` 改 uint64；新增 `ExecState`、`AssignmentRequest`、`AssignmentResponse`（BT 接受、搶占、排隊） |

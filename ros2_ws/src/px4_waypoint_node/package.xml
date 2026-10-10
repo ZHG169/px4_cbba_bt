@@ -2,7 +2,7 @@
 <package format="3">
   <name>px4_waypoint_node</name>
   <version>0.1.0</version>
-  <description>PX4 無人機的 offboard 控制介面：起飛並懸停、代替 BT 執行 CBBA 指派的任務</description>
+  <description>PX4 無人機端：起飛並懸停、代替 BT 執行 CBBA 指派的任務、把 PX4 的狀態轉成 cbba_node 的 RobotState</description>
   <maintainer email="a0977704724@gmail.com">zhg</maintainer>
   <license>MIT</license>
 

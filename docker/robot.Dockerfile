@@ -21,6 +21,11 @@ RUN set -eux; \
     rm -rf /tmp/xrce_agent; \
     command -v MicroXRCEAgent
 
+# 無人機的備用 BT（uav_px4_bt：BehaviorTree.CPP v4）與 AprilTag 火情偵測（apriltag_fire_detector：apriltag C 函式庫）
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ros-jazzy-behaviortree-cpp ros-jazzy-apriltag \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN if [ "${WITH_GUI}" = "1" ]; then \
         apt-get update \
      && apt-get install -y --no-install-recommends ros-jazzy-rviz2 \

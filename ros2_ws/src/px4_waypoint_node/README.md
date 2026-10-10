@@ -1,6 +1,7 @@
 # px4_waypoint_node
 
-PX4 無人機的 offboard 控制介面。目前只有**起飛並懸停**（不含降落），第 2 週再加 3D 航點。
+PX4 無人機端的節點：offboard 控制（起飛並懸停、代替 BT 的 task_executor），以及把 PX4 的狀態轉給通用 cbba_node 的
+`px4_state_bridge`。cbba_node 本身在 `cbba_core`，不依賴 PX4。
 
 ## 分散式架構
 
@@ -53,7 +54,7 @@ ros2 run px4_waypoint_node task_executor        # 機號、命名空間取自 UA
 ```
 
 起飛流程同 takeoff_hover，之後依 `/uavN/assigned_task` 飛到任務點正上方 `altitude` 公尺，
-停留 `duration_sec` 後對 `/uavN/task_result` 發 DONE，回到懸停等下一個指派。指派變成 task_id = 0 時原地懸停。
+停留 `duration_sec` 後對 `/uavN/task_result` 發 `swarm_interfaces/TaskResult`（`success: true`，`assignment_version` 帶回目前 assigned_task 的版本），回到懸停等下一個指派。指派變成 task_id = 0 時原地懸停。
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
@@ -62,9 +63,47 @@ ros2 run px4_waypoint_node task_executor        # 機號、命名空間取自 UA
 | `altitude` | 5.0 | 飛行高度（公尺，相對出生點） |
 | `cruise_speed` | 5.0 | setpoint 移動速度（m/s），要和 cbba_node 的 `cruise_speed` 一致 |
 | `reach_tolerance` | 0.5 | 視為到達的距離 |
-| `spawn_enu` | (0, (id−1)·`UAV_SPAWN_SPACING`, 0) | 出生點（map ENU），要和 px4_sitl.sh、cbba_node 一致 |
+| `spawn_enu` | (0, (id−1)·`UAV_SPAWN_SPACING`, 0) | 出生點（map ENU），要和 px4_sitl.sh、px4_state_bridge 一致 |
 
-通常用 `docker/scripts/cbba_uav.sh` 和 cbba_node 一起啟動，步驟見 `uav_cbba/doc/sitl_test.md`。
+通常用 `docker/scripts/cbba_uav.sh` 和 px4_state_bridge、cbba_node 一起啟動，步驟見 `cbba_core/doc/sitl_test.md`。
+
+## px4_state_bridge（PX4 → cbba_node 的轉接節點）
+
+通用 cbba_node 只吃標準介面 `RobotState`（map ENU 的位置、電量、飛行狀態）。PX4 的格式不一樣（4 個話題、NED、以出生點為原點），
+所以由這個節點轉換：
+
+```
+/uavN/fmu/out/vehicle_local_position_v1 ┐
+/uavN/fmu/out/vehicle_status_v1         ├─→ px4_state_bridge ─→ /uavN/robot_state ─→ cbba_node
+/uavN/fmu/out/battery_status_v1         │   NED → map ENU、加出生點
+/uavN/fmu/out/vehicle_land_detected     ┘   真實的 armed／offboard／landed
+```
+
+```bash
+ros2 run px4_waypoint_node px4_state_bridge --ros-args -r __node:=uav1_px4_state_bridge   # 機號、命名空間取自 UAV_ID、UAV_NS
+```
+
+| 參數 | 預設 | 說明 |
+|---|---|---|
+| `agent_id` | `$UAV_ID` | 機號，填進 RobotState、用來算出生點；要和 cbba_node 一樣 |
+| `px4_ns` | `$UAV_NS` | PX4 話題前綴，robot_state 也發在這底下；要和 cbba_node 的 `ns` 一樣 |
+| `position_timeout` | 0.5 s | PX4 的位置這麼久沒更新就停止送（PX4 斷線） |
+| `status_timeout` | 2.0 s | `vehicle_status` 這麼久沒更新，`flight_state_valid` 就是 false |
+| `rate_hz` | 10 | 發送頻率 |
+| `spawn_enu` | (0, (id−1)·`UAV_SPAWN_SPACING`, 0) | 出生點（map ENU），要和 px4_sitl.sh、task_executor 一致 |
+
+| RobotState 欄位 | 來源 |
+|---|---|
+| `armed` | `vehicle_status.arming_state == ARMING_STATE_ARMED` |
+| `offboard` | `vehicle_status.nav_state == NAVIGATION_STATE_OFFBOARD` |
+| `landed` | `vehicle_land_detected.landed` |
+| `flight_state_valid` | 收到過 `vehicle_status` 和 `vehicle_land_detected`，而且 `vehicle_status` 在 `status_timeout` 內有更新。逾時後 armed 等保留最後的值但不算數 |
+
+- PX4 的位置有在更新就一直送，**地面上、未解鎖時也送**，鄰居的 AGENT_STATE 才看得到真實的狀態。
+  要不要出價由 cbba_node 判斷：飛行狀態有效、已解鎖，而且（`require_airborne`，預設）沒有 landed。
+- PX4 斷線（位置沒在更新）時停止送，cbba_node 在 `state_timeout`（1.5 s）後停止參與出價、釋放任務。
+- cbba_node 收到的第一筆位置當返航點（只用在出價時估返航的耗電），也就是地面的出生點。
+- 電池沒連上時電量送 −1，cbba_node 沿用上一筆。
 
 ## 測試紀錄與報告：hover_report.py
 

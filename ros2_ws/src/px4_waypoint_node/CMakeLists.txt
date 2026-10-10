@@ -20,7 +20,11 @@ target_link_libraries(takeoff_hover rclcpp::rclcpp ${px4_msgs_TARGETS})
 add_executable(task_executor src/task_executor.cpp)
 target_link_libraries(task_executor rclcpp::rclcpp ${px4_msgs_TARGETS} ${swarm_interfaces_TARGETS})
 
-install(TARGETS takeoff_hover task_executor DESTINATION lib/${PROJECT_NAME})
+# 轉接節點：PX4 的話題 → 通用 cbba_node 的 RobotState（NED → map ENU；解鎖且離地才送）
+add_executable(px4_state_bridge src/px4_state_bridge.cpp)
+target_link_libraries(px4_state_bridge rclcpp::rclcpp ${px4_msgs_TARGETS} ${swarm_interfaces_TARGETS})
+
+install(TARGETS takeoff_hover task_executor px4_state_bridge DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/hover_report.py DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
