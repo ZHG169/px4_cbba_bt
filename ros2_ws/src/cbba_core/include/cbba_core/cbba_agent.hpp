@@ -7,7 +7,7 @@
 //   makeMessage() 產生要廣播的訊息
 //   setActive()  是否參與出價（例如還沒起飛時不參與）
 //   releaseAgent() / releaseStale()  某台停止參與或失聯：把它得標的任務設為無人，重新出價
-//   excludeTask() 自己做這個任務失敗：釋放並不再對它出價（交回給其他載具）
+//   excludeTask() 自己做這個任務失敗：釋放並在一段時間內（或永久）不再對它出價（交回給其他載具）
 //   setExecConstraints() 執行狀態的限制（2026-10-09）：已接受的任務釘在路徑最前面；
 //                 搶占要「可以安全中斷、新任務優先級較高」；火警排隊最多 1 個、要在期限內做得完
 //   setLocked()   別台已接受（保留／執行中）的任務：不出價（容量承諾）
@@ -117,9 +117,11 @@ public:
   // s 會經由鄰居的訊息傳遞，所以多跳之外、但仍有人聽得到的載具不會被誤判。
   bool releaseStale(double now, double timeout);
 
-  // 自己做這個任務失敗：從 bundle 釋放（連同之後加入的），之後不再對它出價。
-  bool excludeTask(TaskId id, double now);
-  bool excluded(TaskId id) const {return excluded_.count(id) > 0;}
+  // 自己做這個任務失敗：從 bundle 釋放（連同之後加入的），duration 秒內不再對它出價（kInf = 永久）。
+  // 2026-10-12 起照 TaskResult.reason：PERMANENT 永久、其他（TRANSIENT／PREEMPTED／STOPPED）一段時間，
+  // 時間到了在下一次 reevaluate（每 reevaluate_period）重新出價
+  bool excludeTask(TaskId id, double now, double duration = kInf);
+  bool excluded(TaskId id, double now) const;
 
   // 執行狀態的限制。回傳 true 表示有改變（例如已接受的任務改了、不能再排隊的任務被釋放）
   bool setExecConstraints(const ExecConstraints & c, double now);
@@ -163,7 +165,7 @@ private:
   std::map<AgentId, std::uint32_t> last_seq_;
   std::vector<TaskId> bundle_;
   std::vector<TaskId> path_;
-  std::set<TaskId> excluded_;
+  std::map<TaskId, double> excluded_;   // 任務 → 排除到什麼時刻（kInf = 永久）
   std::set<TaskId> suspended_;
   std::set<TaskId> locked_;
   ExecConstraints exec_;

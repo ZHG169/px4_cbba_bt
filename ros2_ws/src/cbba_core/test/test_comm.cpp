@@ -270,8 +270,10 @@ TEST(CbbaComm, NonParticipantDoesNotBid)
   EXPECT_FALSE(swarm.node(3).currentTask());
   const auto b = swarm.node(3).cbbaStateBody(swarm.now());
   EXPECT_FALSE(b.participating);
+  EXPECT_TRUE(b.stamps.empty());                     // 沒有 s
+  ASSERT_EQ(b.records.size(), 1u);                   // 紀錄照送（正式指派要傳得出去），收的那端不交給規則
   EXPECT_EQ(wire::encodeCbbaState(wire::Header{PacketType::CBBA_STATE, 3, 1, 1, 0}, b).size(),
-    36u);                                            // 沒有 s、沒有紀錄
+    36u + 21u);
   EXPECT_TRUE(swarm.node(1).converged(swarm.now()));   // 不參與的鄰居不影響收斂判定
 
   swarm.node(3).setParticipating(true, swarm.now());  // 起飛

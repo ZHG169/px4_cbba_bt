@@ -246,7 +246,7 @@ public:
   {
     return {
       BT::BidirectionalPort<AssignedTask>("task_in_execution", "執行中的任務（這個節點負責更新）"),
-      BT::InputPort<AssignedTask>("blackboard_task", "cbba_node 目前的指派（assigned_task）"),
+      BT::InputPort<AssignedTask>("blackboard_task", "cbba_node 目前的指派（current_task）"),
     };
   }
 

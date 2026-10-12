@@ -1,0 +1,5 @@
+/**:   # 任何 namespace 下的 cbba_node 都吃這份（裸的 cbba_node: 對不到 /v60/cbba_node）
+  ros__parameters:
+    agent_id: 1
+    agent_type: "UAV"
+    recon_altitude: 5.0       # AIR_RECON 的 z 低於這個高度就抬到巡檢高度；能量模型用 UAV 預設

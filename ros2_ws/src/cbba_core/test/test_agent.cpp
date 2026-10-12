@@ -324,10 +324,39 @@ TEST(Agent, ExcludedTaskIsNotBidAgain)
   uav.onTask(b, 0.0);
   ASSERT_EQ(uav.bundle().size(), 2u);
 
-  EXPECT_TRUE(uav.excludeTask(7, 1.0));       // 做任務 7 失敗
-  EXPECT_TRUE(uav.excluded(7));
+  EXPECT_TRUE(uav.excludeTask(7, 1.0));       // 做任務 7 失敗（預設永久）
+  EXPECT_TRUE(uav.excluded(7, 1e9));
   EXPECT_EQ(uav.winner(7), kNoAgent);         // 交回競標池
   EXPECT_EQ(uav.bundle(), std::vector<TaskId>{8});   // 其他任務重新接回
   uav.reevaluate(2.0);
   EXPECT_EQ(uav.winner(7), kNoAgent);         // 之後也不再出價
+}
+
+TEST(Agent, TemporaryExclusionExpires)
+{
+  // TaskResult.reason 是 TRANSIENT 之類（2026-10-12）：排除 60 s，時間到了重新評估時再出價；
+  // 之後再永久排除時，不會被較短的排除蓋掉
+  AgentState s;
+  s.id = 1;
+  CbbaAgent uav(s, ScoringParams{});
+  Task a;
+  a.id = 7;
+  a.position = {5, 0, 0};
+  a.deadline_sec = 1000.0;
+  uav.onTask(a, 0.0);
+  ASSERT_EQ(uav.winner(7), 1);
+
+  EXPECT_TRUE(uav.excludeTask(7, 1.0, 60.0));
+  EXPECT_EQ(uav.winner(7), kNoAgent);
+  uav.reevaluate(30.0);
+  EXPECT_EQ(uav.winner(7), kNoAgent);         // 60 s 內不出價
+  EXPECT_TRUE(uav.excluded(7, 60.9));
+  EXPECT_FALSE(uav.excluded(7, 61.0));
+  uav.reevaluate(61.5);
+  EXPECT_EQ(uav.winner(7), 1);                // 時間到了重新出價
+
+  uav.excludeTask(7, 62.0);                   // 永久
+  uav.excludeTask(7, 63.0, 60.0);             // 之後的短排除不會縮短它
+  uav.reevaluate(500.0);
+  EXPECT_EQ(uav.winner(7), kNoAgent);
 }

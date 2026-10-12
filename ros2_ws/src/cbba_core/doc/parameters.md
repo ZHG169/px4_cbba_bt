@@ -9,7 +9,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 
 | 種類 | 在哪裡 | 怎麼改 |
 |---|---|---|
-| **ROS 參數** | `cbba_node` 的 `declare_parameter` | `ros2 run cbba_core cbba_node --ros-args -p 名稱:=值`，或 `cbba_uav.sh -p 名稱:=值` |
+| **ROS 參數** | `swarm_cbba/cbba_node` 的 `declare_parameter` | `config/cbba_uav.yaml`、`cbba_v60.yaml`，或 `ros2 run swarm_cbba cbba_node --ros-args -p 名稱:=值`、`cbba_uav.sh -p 名稱:=值` |
 | **程式常數** | `CommConfig`（`cbba_comm.hpp`）、`ScoringParams`（`scoring.hpp`）、`wire_header.hpp` | 改程式碼、重新編譯 |
 | **SITL 環境變數** | `docker/scripts/cbba_uav.sh`、`px4_sitl.sh` | `變數=值 cbba_uav.sh`；或寫進 `docker/.env` 後 `./start.sh` |
 
@@ -23,7 +23,8 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `cost_ref` | 50 m | 換場地時，取場地半寬左右 |
 | `battery_weight` | 1.0 | 只在 0～2 之間調；超過 2 沒有額外效果 |
 | `lost_timeout` | 1.5 s | 網路很差、常誤判失聯時加大（全隊要一樣） |
-| `assign_hold` | 0.6 s | BT 被來回切換時加大；接手太慢時減小 |
+| `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
+| `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
 
 ---
 
@@ -33,9 +34,9 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `agent_id` | 必填 | 機號 1～254，全隊不能重複。協定版本 2 以 task_id 識別任務，任何機號都能建立任務（版本 1 只有 1～8 能）。協定本身是 1～65534，節點限制在 254 是因為 `RobotState.agent_id` 是 uint8。狗用 50 |
-| `vehicle_type` | `uav` | `uav` 或 `ugv`：AGENT_STATE 的載具種類（無人機只接 AIR_RECON，狗只接 GROUND_INTERVENTION、PATROL），以及參與出價的條件、能量模型、`recon_altitude`、`ns` 的預設值 |
-| `ns` | `uav<agent_id>`；ugv 是 `v60` | 話題前綴：`/<ns>/robot_state`、`/<ns>/new_task`、`/<ns>/task_result`、`/<ns>/assigned_task` |
+| `agent_id` | 環境變數 `AGENT_ID`，沒有就 50 | 機號 1～254，全隊不能重複。協定版本 2 以 task_id 識別任務，任何機號都能建立任務（版本 1 只有 1～8 能）。協定本身是 1～65534，節點限制在 254 是因為 `RobotState.agent_id` 是 uint8。狗用 50 |
+| `agent_type` | `UGV` | `UAV` 或 `UGV`（2026-10-12 起取代 `vehicle_type`，照機器狗端）：AGENT_STATE 的載具種類（無人機只接 AIR_RECON，狗只接 GROUND_INTERVENTION、PATROL），以及能量模型的預設值 |
+| `ns` | 空字串 | 空＝話題用相對名稱，由 launch 的 namespace（或 `-r __ns:=/uavN`）決定；給了就是 `/<ns>/current_task`… |
 | `mesh_ip` | 環境變數 `MESH_IP` | UDP 只走這張網卡（mesh）。空字串由系統決定，可能會走到 PX4 的線材網路 |
 | `udp_group`、`udp_port` | `239.255.42.99`、`14600` | multicast 群組。**全隊（含機器狗）要一樣** |
 
@@ -46,8 +47,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `participate` | `state` | `state`＝`robot_state` 在 `state_timeout` 內有更新才參與；無人機另外要 `flight_state_valid`、`armed`，而且 `require_airborne` 時要沒有 `landed`。`always`＝一律參與、不訂閱 `robot_state`，位置和電量用 `initial_position`、`battery`（只用來測協商）。不參與時 CBBA_STATE 沒有 s、沒有紀錄（36 B），手上的任務立刻釋放 |
-| `require_airborne` | true | 無人機要離地才參與出價；false = 解鎖就參與（原本轉接節點的 `participate:=armed`） |
+| `participate` | `state` | `state`＝`robot_state` 在 `state_timeout` 內有更新**而且 `mode == AUTO`** 才參與（2026-10-12 起；無人機的 mode 由 px4_state_bridge 給：在空中 = AUTO）。`always`＝一律參與、不訂閱 `robot_state`，位置和電量用 `initial_position`、`battery`（只用來測協商）。不參與時 CBBA_STATE 沒有 s，紀錄照送，手上的任務立刻釋放 |
 | `state_timeout` | 1.5 s | `robot_state` 這麼久沒更新就停止參與出價。無人機的轉接節點在 PX4 的位置有在更新時就一直送（地面上也送），PX4 斷線時停送 |
 | `initial_position`、`battery` | `[0, 0, 0]`、100 | 只在 `participate:=always` 時用 |
 | `recon_altitude` | uav 5.0 m、ugv 0 | 巡檢任務（AIR_RECON）的高度。BT 常給地面座標（z = 0），z 比它低時改成它；不改的話，每段距離都多算到地面的高度差，耗電也估錯。0 = 不調整。**要和執行者的飛行高度一致** |
@@ -55,7 +55,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 返航點是第一筆 `robot_state` 的位置，只用在出價時估返航的耗電（不會叫載具飛回去）。轉接節點在地面上就開始送，
 所以無人機的返航點是地面的出生點。
 
-AGENT_STATE 的 armed、offboard、landed 是 `robot_state` 的真實值，只在 `flight_state_valid` 時送（否則都是 0）。
+AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 起送 0（RobotState 改成機器狗端的 mode，沒有飛行狀態了）。
 
 **無人機的轉接節點 `px4_state_bridge`**（`px4_waypoint_node`）的參數：
 
@@ -63,17 +63,15 @@ AGENT_STATE 的 armed、offboard、landed 是 `robot_state` 的真實值，只�
 |---|---|---|
 | `agent_id`、`px4_ns` | 環境變數 `UAV_ID`、`UAV_NS` | 要和 cbba_node 的 `agent_id`、`ns` 一樣 |
 | `position_timeout` | 0.5 s | PX4 的位置這麼久沒更新就停止送（PX4 斷線）；有在更新就一直送，地面上、未解鎖也送 |
-| `status_timeout` | 2.0 s | `vehicle_status` 這麼久沒更新，`flight_state_valid` 就是 false（armed 等保留最後的值但不算數）。還要收到過 `vehicle_land_detected` |
+| `status_timeout` | 5.0 s | `vehicle_status` 這麼久沒更新，飛行狀態就無效、mode 送 MANUAL（armed 等保留最後的值但不算數）。還要收到過 `vehicle_land_detected`。PX4 只低頻送 vehicle_status（SITL 間隔 1.4～2.6 s），2 s 會誤判（2026-10-12 改） |
 | `spawn_enu` | `[0, (機號−1)×UAV_SPAWN_SPACING, 0]` | 出生點（map ENU）。PX4 的 local position 以出生點為原點，加上它才是 map 座標。**要和 `px4_sitl.sh`、`task_executor` 一致** |
 
 ### 3. 交給 BT（正式指派、接受、搶占、排隊）
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `assign_hold` | 0.6 s | 同一個任務要連續排在路徑第一位這麼久，才請 BT 接受（`require_accept = false` 時直接發到 `assigned_task`）。協商途中的 10 ms 級來回換手不會傳給 BT。**分段量測（2026-10-09）顯示它是火警插單延遲的大部分（建立 → BT 執行約 0.8 s），目前不能宣稱符合 300 ms**；要調低時要一起驗證會不會造成指派震盪 |
-| `require_accept` | uav false、ugv true | 要 BT 接受才執行。false 只跳過握手（請求當下就算接受），可行性、版本、回報檢查照常。無人機的 BT 完成後改成 true |
-| `accept_timeout` | 3.0 s | BT 多久沒回覆就當成暫時拒絕、送 RELEASE；之後才到的接受回覆不會啟動任務。這是故障處理的上限，不是正常的反應時間 |
-| `exec_timeout` | 1.5 s | ExecState 多久沒更新就不能接新任務（`require_accept = true` 時）；用本機收到訊息的單調時間判斷 |
+| `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
+| `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
 | `max_queued_fires` | 1 | 執行中任務之後最多保留幾個火警 |
 | `max_queue_wait` | 120 s | 沒有期限的任務，排隊時最多等多久（從任務建立時算，不會每輪競標重新起算）。有期限時用期限 |
 | `tick_ms` | 10 ms | 主迴圈週期：收 UDP、跑協定、送封包。改大會讓所有反應變慢 |
@@ -89,7 +87,7 @@ AGENT_STATE 的 armed、offboard、landed 是 `robot_state` 的真實值，只�
 | `cruise_speed` | 5.0 m/s | 5.0 | 估到達時間用（再乘 `speed_margin` 0.8）。**要和執行者實際的速度一致** |
 
 電量來自 `robot_state.battery`；無人機由轉接節點從 PX4 的 `battery_status.remaining`（× 100）換算。
-上面是 `vehicle_type:=uav` 的預設值；`ugv` 的預設是 0.1 %/m、0.05 %/s、1.0 m/s（佔位值，見 [`ugv_tuning.md`](ugv_tuning.md)）。
+上面是 `agent_type: UAV` 的預設值；`UGV` 的預設是 0.1 %/m、0.05 %/s、1.0 m/s（佔位值，見 [`ugv_tuning.md`](ugv_tuning.md)）。
 
 SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗電、和飛多遠無關，續航 `SIM_BAT_DRAIN` = 900 s，
 所以懸停 = 100 / 900 ≈ 0.111 %/s，以 5 m/s 前飛 = 0.111 / 5 ≈ 0.022 %/m。

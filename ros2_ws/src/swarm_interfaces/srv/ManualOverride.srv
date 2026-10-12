@@ -1,0 +1,7 @@
+# 平板接管機器狗（/<ns>/manual_override，平板 → 狗的 BT）。照狗端介面規格（cbba_core/doc/spec/ugv_interface.png）；
+# 無人機不用。接管期間狗的 BT 發 robot_state.mode = MANUAL，CBBA 對所有任務出價 0
+swarm_interfaces/Task task      # 要去的點；task_id = 0 × 65536 + 流水號（0 是取消，不可用）
+bool clear                      # true = 解除接管
+---
+bool accepted
+string message

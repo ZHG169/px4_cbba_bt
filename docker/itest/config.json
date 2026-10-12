@@ -1,0 +1,69 @@
+{
+  "_說明": "整合測試（itest.py）的設定。只看話題與網路，不看 log，所以換成別人寫的 CBBA Node／BT 時只改這份。預設值是 2026-10-12 的統一版介面（swarm_cbba，照機器狗端）。{id} = 機號、{ns} = 命名空間",
+
+  "containers": {
+    "sim": "cbba_sim",
+    "uav": "cbba_uav{id}",
+    "_說明": "容器名稱（docker/start.sh 起的）"
+  },
+  "paths": {
+    "host_repo": "..",
+    "container_repo": "/home/ncrl/CBBA_BT",
+    "ros_setup": "/home/ncrl/CBBA_BT/ros2_ws/install/setup.bash",
+    "_說明": "host_repo 相對於這個檔案；容器裡要 source 的環境（要有 swarm_interfaces、px4_msgs 和要測的套件）"
+  },
+  "vehicles": {
+    "ids": [1, 2, 3],
+    "ns": "uav{id}",
+    "spawn_spacing": 2.0,
+    "_說明": "要測的無人機；出生點 map (0, (id-1)*spawn_spacing)，和 docker/.env 的 UAV_SPAWN_SPACING 一致"
+  },
+
+  "topics": {
+    "new_task":    {"name": "/{ns}/new_task",      "type": "swarm_interfaces/msg/Task",       "reliable": true,  "transient_local": false},
+    "assigned":    {"name": "/{ns}/current_task",  "type": "swarm_interfaces/msg/Task",       "reliable": true,  "transient_local": true},
+    "result":      {"name": "/{ns}/task_result",   "type": "swarm_interfaces/msg/TaskResult", "reliable": true,  "transient_local": false},
+    "robot_state": {"name": "/{ns}/robot_state",   "type": "swarm_interfaces/msg/RobotState", "reliable": true,  "transient_local": false},
+    "px4_position": {"name": "/{ns}/fmu/out/vehicle_local_position_v1", "type": "px4_msgs/msg/VehicleLocalPosition", "reliable": false, "transient_local": false},
+    "px4_status":   {"name": "/{ns}/fmu/out/vehicle_status_v1",         "type": "px4_msgs/msg/VehicleStatus",        "reliable": false, "transient_local": false}
+  },
+  "fields": {
+    "task_id": "task_id",
+    "version": "",
+    "task_type": "type",
+    "success": "success",
+    "no_task_id": 0,
+    "ground_type": 2,
+    "_說明": "assigned、new_task 訊息裡的欄位名稱。version 設成空字串表示介面沒有指派版本（2026-10-12 起就是這樣）"
+  },
+  "messages": {
+    "new_task": {"task_id": "{task_id}", "type": 1, "position": {"x": "{x}", "y": "{y}", "z": 0.0},
+                 "value": 80.0, "duration_sec": "{duration}", "deadline_sec": 300.0, "status": 0},
+    "result_success": {"task_id": "{task_id}", "success": true, "reason": 0},
+    "result_failure": {"task_id": "{task_id}", "success": false, "detail": "ITEST", "reason": 2},
+    "robot_state": {"agent_id": "{id}", "position": {"x": "{x}", "y": "{y}", "z": 5.0}, "battery": 90.0, "mode": 0},
+    "_說明": "測試發的訊息；{...} 會換成數值。result_failure 的 reason 2 = TRANSIENT（失敗的那台 60 s 內不接）。robot_state 只在通訊測試用（mode 0 = AUTO，假裝已經起飛）"
+  },
+
+  "comm": {
+    "start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:=uav{id}_cbba_node -p agent_id:={id} -p agent_type:=UAV",
+    "stop_pattern": "__node:=uav{id}_cbba_node( |$)",
+    "positions": {"1": [0.0, 0.0], "2": [0.0, 20.0], "3": [20.0, 0.0]},
+    "warmup": 6.0,
+    "_說明": "通訊測試：每台在自己的容器啟動 CBBA Node（不開 PX4、BT），位置由測試發假的 robot_state"
+  },
+  "uav": {
+    "start": "export EXECUTOR=bt; exec cbba_uav.sh",
+    "stop_pattern": "cbba_uav.sh",
+    "px4_start": "sleep infinity | px4_sitl.sh {id}",
+    "px4_stop_pattern": "bin/px4 -i {id}( |$)",
+    "camera_start": "exec gz_bridge.sh",
+    "world": "fire_site",
+    "headless": true,
+    "altitude": 5.0,
+    "task_duration": 5.0,
+    "fire": {"x": 14.0, "y": -6.0},
+    "decoy": {"x": -10.0, "y": -8.0},
+    "_說明": "UAV 整串：每台的 CBBA Node＋BT＋轉接（start 在 uav 容器執行，要在背景一直跑），PX4 在 sim 容器。fire、decoy 是 fire_site 場景的火警與誘餌位置"
+  }
+}

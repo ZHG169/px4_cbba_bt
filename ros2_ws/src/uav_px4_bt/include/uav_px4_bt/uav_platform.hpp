@@ -25,7 +25,7 @@ struct VehicleState
   bool landed{true};
 };
 
-// cbba_node 的 assigned_task（task_id = 0 表示沒有任務）
+// cbba_node 的 current_task（task_id = 0 表示沒有任務）。version 2026-10-12 起固定 0（介面不帶指派版本）
 struct AssignedTask
 {
   std::uint32_t task_id{0};

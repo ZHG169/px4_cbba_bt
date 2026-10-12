@@ -233,12 +233,13 @@ void CbbaComm::resumeSuspended(double now)
   markChanged(agent_.resumeSuspended(now));
 }
 
-void CbbaComm::excludeTask(TaskId task_id, double now)
+void CbbaComm::excludeTask(TaskId task_id, double now, double duration)
 {
-  markChanged(agent_.excludeTask(task_id, now));
+  markChanged(agent_.excludeTask(task_id, now, duration));
 }
 
-ReportCheck CbbaComm::reportResult(TaskId task_id, bool success, std::uint64_t version, double now)
+ReportCheck CbbaComm::reportResult(TaskId task_id, bool success, std::uint64_t version, double now,
+  double exclude_sec)
 {
   if (!isOpen(task_id)) {
     return ReportCheck::NOT_OPEN;
@@ -251,9 +252,9 @@ ReportCheck CbbaComm::reportResult(TaskId task_id, bool success, std::uint64_t v
     return ReportCheck::PENDING;
   }
   if (!success) {
-    // 執行失敗：結束指派（新版本）、交回競標池，自己不再出價；任務保留，不送 TASK_CLOSE
+    // 執行失敗：結束指派（新版本）、交回競標池，自己 exclude_sec 秒內不再出價；任務保留，不送 TASK_CLOSE
     endAssignment(task_id);
-    markChanged(agent_.excludeTask(task_id, now));
+    markChanged(agent_.excludeTask(task_id, now, exclude_sec));
     return ReportCheck::ACCEPTED;
   }
   PendingCompletion pc;
@@ -588,15 +589,17 @@ wire::CbbaStateBody CbbaComm::cbbaStateBody(double now) const
   b.participating = agent_.active();
   b.stable_steps = static_cast<std::uint8_t>(stable_steps_);
   b.snapshot_id = snapshot_id_;
-  if (!agent_.active()) {
-    return b;   // 不參與出價：沒有 s、沒有紀錄
-  }
-  for (const auto & [agent, stamp] : agent_.stamps()) {
-    if (agent != id() && wire::validAgentId(agent)) {
-      b.stamps.push_back(wire::Stamp{agent, toStampMs(stamp)});
+  // 不參與出價時不送 s（收的那端不會把它的紀錄交給 CBBA 規則），但紀錄照送：
+  // 停止參與（PX4 斷線、降落）時自己撤銷的正式指派只有自己知道，不送的話別台一直以為它還在執行、鎖著不出價
+  // （2026-10-11 SITL 測試發現：飛行中關掉 PX4，任務卡住沒人接手）。收的那端只從紀錄合併正式指派
+  if (agent_.active()) {
+    for (const auto & [agent, stamp] : agent_.stamps()) {
+      if (agent != id() && wire::validAgentId(agent)) {
+        b.stamps.push_back(wire::Stamp{agent, toStampMs(stamp)});
+      }
     }
+    b.stamps.push_back(wire::Stamp{id(), toStampMs(now)});
   }
-  b.stamps.push_back(wire::Stamp{id(), toStampMs(now)});
   for (const auto & [task_id, winner] : winnerMap()) {
     const Assignment a = assignment(task_id);
     b.records.push_back(wire::Record{task_id, winner,
@@ -700,7 +703,8 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
 }
 
 // 補發（anti-entropy）：摘要不同才比對，補對方缺的。
-// 不參與出價的鄰居沒有附紀錄，下面每個任務都當成「不認得」，等於把所有任務和 TASK_CLOSE 補一次。
+// 不參與出價的鄰居也附紀錄（2026-10-11 起），和參與的一樣只補它缺的；還沒收齊它的任何一次時 view 是空的，
+// 下面每個任務都當成「不認得」，等於把所有任務和 TASK_CLOSE 補一次。
 void CbbaComm::resendMissing(const NeighborInfo & n, double now)
 {
   if (n.round_key == roundKey()) {

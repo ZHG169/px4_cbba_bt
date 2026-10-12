@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   無人機的前台行為樹（備用版，2026-10-09）：結構照週計畫的 MainUAVTree，節點說明在 include/uav_px4_bt/bt_nodes.hpp。
-  blackboard：ctx（UavContext*）、current_uav_task（uav_bt_node 每個 tick 寫入 cbba_node 的 assigned_task）、
+  blackboard：ctx（UavContext*）、current_uav_task（uav_bt_node 每個 tick 寫入 cbba_node 的 current_task）、
              altitude（參數）、active_uav_task（IsTaskValidAndUnchanged 維護）
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainUAVTree">

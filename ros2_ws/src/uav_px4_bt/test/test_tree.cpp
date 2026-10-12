@@ -166,7 +166,7 @@ TEST_F(TreeTest, TakesOffAndLoiters)
 
 TEST_F(TreeTest, ExecutesAssignmentAndReportsWithVersion)
 {
-  // 指派 → 前往（NAVIGATING）→ 到達後觀察、停留（EXECUTING）→ 回報完成（帶 assignment_version）→ 閒置
+  // 指派 → 前往（NAVIGATING）→ 到達後觀察、停留（EXECUTING）→ 回報完成→ 閒置
   ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
   assigned = task(0x00010001, 10, 0, 5.0, 7);
   run(1.0);

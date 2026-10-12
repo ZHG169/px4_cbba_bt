@@ -64,12 +64,7 @@ if(ament_cmake_FOUND)
   # ros2 run cbba_core cbba_sim / plot_results.py
   install(TARGETS cbba_sim DESTINATION lib/${PROJECT_NAME})
 
-  # 通用的 CBBA 節點：機間走 UDP，機內只吃標準介面（RobotState、TaskResult、Task），不依賴 PX4
-  find_package(rclcpp REQUIRED)
-  find_package(swarm_interfaces REQUIRED)
-  add_executable(cbba_node src/cbba_node.cpp)
-  target_link_libraries(cbba_node ${PROJECT_NAME}_core rclcpp::rclcpp ${swarm_interfaces_TARGETS})
-  install(TARGETS cbba_node DESTINATION lib/${PROJECT_NAME})
+  # CBBA 的 ROS 節點在 swarm_cbba 套件（2026-10-12，照機器狗端的套件結構）；這裡只有核心、協定層、離線模擬
   install(PROGRAMS scripts/plot_results.py DESTINATION lib/${PROJECT_NAME})
   install(DIRECTORY scenarios DESTINATION share/${PROJECT_NAME})
   ament_export_include_directories(include)

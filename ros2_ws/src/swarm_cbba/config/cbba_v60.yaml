@@ -1,0 +1,10 @@
+/**:   # 任何 namespace 下的 cbba_node 都吃這份（裸的 cbba_node: 對不到 /v60/cbba_node）
+  ros__parameters:
+    agent_id: 50
+    agent_type: "UGV"
+    state_timeout: 1.5
+    assign_hold: 0.4          # spec §2.3 規則 1：2 個廣播週期（節點預設也是 0.4）
+    cruise_speed: 1.0         # 佔位，待實測（cbba_core/doc/ugv_tuning.md）
+    energy_per_meter: 0.1
+    hover_energy_per_sec: 0.05
+    safety_reserve: 20.0

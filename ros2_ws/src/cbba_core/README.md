@@ -1,22 +1,23 @@
 # cbba_core
 
-空地共用的 CBBA（C++17）：CBBA 核心、機間通訊封包、協定層、通用的機上節點 `cbba_node`、離線模擬。
+空地共用的 CBBA（C++17）：CBBA 核心、機間通訊封包、協定層、指派流程、離線模擬（不依賴 ROS）。ROS 節點在 `swarm_cbba`。
 
 - 機間通訊走 mesh 上的 UDP multicast，**協定版本 2**（2026-10-09）：每筆任務資料都帶 task_id，不相容於「機間通訊封包規格」
   2026-10-06（見 [`doc/protocol.md`](doc/protocol.md)）。DDS 只用在機內（PX4、BT）。
 - 核心、封包、協定層都不依賴 ROS，可以單獨編譯和測試。
-- `cbba_node` 不分載具、不依賴 PX4：無人機和機器狗跑同一個節點，只吃標準介面（RobotState、TaskResult、Task）。
+- ROS 節點 `swarm_cbba/cbba_node` 不分載具、不依賴 PX4：無人機和機器狗跑同一個節點，只吃標準介面（RobotState、TaskResult、Task）。
   無人機的 PX4 話題由 `px4_waypoint_node/px4_state_bridge` 轉成 RobotState；狗的 BT 直接送。
 
 | 文件 | 內容 |
 |---|---|
 | [`doc/protocol.md`](doc/protocol.md) | 機間通訊協定版本 2：封包總覽、接收端處理、分批、和規格書與建議不同的地方、流量 |
 | [`doc/parameters.md`](doc/parameters.md) | 所有參數：意義、預設值、為什麼是這個值、要和誰一致、已知限制 |
-| [`doc/sitl_test.md`](doc/sitl_test.md) | PX4 SITL＋Gazebo 的測試步驟（分配、失敗交回、墜毀、晚加入） |
+| [`doc/sitl_test.md`](doc/sitl_test.md) | PX4 SITL＋BT 的手動測試步驟（自動版是 `docker/itest`） |
 | [`doc/ugv_test.md`](doc/ugv_test.md) | 機器狗端的執行方式與測試資料 T1～T8 |
 | [`doc/ugv_tuning.md`](doc/ugv_tuning.md) | 機器狗的能量模型怎麼量、怎麼改 |
 | [`cbba_parameters.md`](cbba_parameters.md) | 出價公式各參數的推導與實驗數據 |
-| `doc/機間通訊封包規格_20261006.pdf` | 封包規格書（版本 1 照它；版本 2 不相容，原因見 `doc/protocol.md`） |
+| `doc/spec/機間通訊封包規格_20261006.pdf` | 封包規格書（版本 1 照它；版本 2 不相容，原因見 `doc/protocol.md`） |
+| [`doc/README.md`](doc/README.md) | `doc/` 的目錄（公式設計、實驗結果、外部規格、封存） |
 
 ## 檔案結構
 
@@ -38,7 +39,7 @@ cbba_core/
 │   ├── session_registry.hpp  成員與 session 層的介面（只定義，還沒接上）
 │   ├── udp_link.hpp          只走 mesh 網卡的 UDP multicast
 │   └── network_sim.hpp       離線模擬：丟包網路、場景檔讀取
-├── src/                      上面各標頭檔的實作，以及 cbba_node.cpp（通用的 ROS 2 節點）
+├── src/                      上面各標頭檔的實作（ROS 節點在 swarm_cbba）
 ├── tools/cbba_sim.cpp        離線模擬工具，輸出 CSV
 ├── scripts/                  plot_results.py（畫圖）、animate_results.py（GIF）、compare_hover.py（電量比較 GIF）
 ├── scenarios/                離線模擬的測資
@@ -70,78 +71,11 @@ cmake --build /tmp/cbba_core_build -j
 
 編譯要零警告（`-Wall -Wextra -Wpedantic`）。
 
-## 機上節點：cbba_node
+## 機上節點：在 swarm_cbba 套件
 
-每台載具的機上電腦各跑一個。同一個機號只能跑一個：啟動時對 `<lock_dir>/agentN.lock` 加程序鎖，拿不到就拒絕啟動，
-退出才釋放（docker 的所有容器共用 `/run/cbba`）。程式裡固定叫 `cbba_node`，啟動時用 `-r __node:=` 加上載具名稱，
-`ros2 node list` 才分得出是哪一台。
-
-```bash
-# 無人機（PX4 的狀態由 px4_state_bridge 轉成 /uav1/robot_state）
-ros2 run cbba_core cbba_node --ros-args -r __node:=uav1_cbba_node -p agent_id:=1
-# 機器狗（狗的 BT 送 /v60/robot_state）
-ros2 run cbba_core cbba_node --ros-args -r __node:=v60_cbba_node -p vehicle_type:=ugv -p agent_id:=50
-# 不接 PX4／狗、一律參與出價（只測協商）
-ros2 run cbba_core cbba_node --ros-args -r __node:=uav1_cbba_node -p agent_id:=1 -p participate:=always \
-  -p initial_position:="[0.0, 0.0, 5.0]" -p battery:=80.0
-```
-
-PX4 SITL 上用 `docker/scripts/cbba_uav.sh` 一次啟動 XRCE Agent、task_executor（暫代 BT）、px4_state_bridge、cbba_node，
-能量模型、速度、巡檢高度會一起對齊模擬電池；任務用 `cbba_task.sh` 建立。步驟見 [`doc/sitl_test.md`](doc/sitl_test.md)。
-
-### 話題（以 uav1 為例；狗是 `/v60/...`）
-
-| 話題 | 型別 | 方向 | 說明 |
-|---|---|---|---|
-| `/uav1/robot_state` | `swarm_interfaces/RobotState` | 轉接節點或狗的 BT → CBBA | 位置（map ENU）、電量（負值 = 不知道）、飛行狀態（`flight_state_valid`、`armed`、`offboard`、`landed`，狗填 false）。`state_timeout`（1.5 s）內有更新才參與出價；第一筆的位置當返航點 |
-| `/uav1/new_task` | `swarm_interfaces/Task` | BT → CBBA | 本機發現的新任務；`task_id` = 機號 × 65536 + 流水號，不能和已知的任務重複（BT 重開機後流水號要接續） |
-| `/uav1/task_result` | `swarm_interfaces/TaskResult` | BT → CBBA | 任務結束時一次（reliable）：`success = true` 完成；`false` 執行失敗，任務保留、交回競標池、自己不再接；`detail` 只記 log。**task_id 和 `assignment_version` 都要是目前 assigned_task 上的**，否則拒絕 |
-| `/uav1/cancel_task` | `swarm_interfaces/Task` | → CBBA | 取消任務（只看 task_id）。要是建立者或 `cancel_authorities` 裡的機號，全隊標成 CANCELLED |
-| `/uav1/assigned_task` | `swarm_interfaces/Task` | CBBA → BT | 目前要執行的任務（正式指派，reliable、transient_local）：同一任務連續 0.6 s 排第一、**BT 接受後**才發，帶 `assignment_version`；沒有任務時 `task_id = 0`、`status = CANCELLED` |
-| `/uav1/exec_state` | `swarm_interfaces/ExecState` | BT → CBBA | BT 的執行狀態：狀態、可否中斷、預估剩餘時間、執行中／排隊中的任務。決定能不能接新任務、能不能中斷、能不能排隊 |
-| `/uav1/assignment_request` | `swarm_interfaces/AssignmentRequest` | CBBA → BT | 請 BT 接受：ACTIVATE（`preempt` = 要中斷目前的任務）、RESERVE（排隊保留）、RELEASE（作廢）。`require_accept = true` 時才送 |
-| `/uav1/assignment_response` | `swarm_interfaces/AssignmentResponse` | BT → CBBA | 接受／拒絕（暫時、永久）＋原因，版本原樣帶回 |
-
-- 巡檢任務（AIR_RECON）的 z 低於 `recon_altitude`（無人機 5 m）時改成巡檢高度：BT 常給地面座標。
-- 地面處置任務（GROUND_INTERVENTION）照樣廣播，但無人機不出價，給機器狗。
-
-不接 BT 時可以用指令代替：
-
-```bash
-ros2 topic pub --once /uav1/new_task swarm_interfaces/msg/Task \
-  "{task_id: 65537, type: 1, position: {x: 2.0, y: 3.0, z: 0.0}, deadline_sec: 60.0, value: 80.0, duration_sec: 10.0}"
-ros2 topic echo /uav1/assigned_task --qos-durability transient_local --qos-reliability reliable
-ros2 topic pub --once /uav1/task_result swarm_interfaces/msg/TaskResult \
-  "{task_id: 65537, success: true, assignment_version: 1}"   # 版本照 assigned_task 上的
-ros2 topic pub --once /uav1/cancel_task swarm_interfaces/msg/Task "{task_id: 65537}"
-```
-
-### 參數
-
-最常用的幾個；全部的參數和說明見 [`doc/parameters.md`](doc/parameters.md)。
-
-| 參數 | 說明 | 預設 |
-|---|---|---|
-| `agent_id` | 機號 1～254，全隊不能重複（協定本身是 1～65534，`RobotState.agent_id` 是 uint8） | 必填 |
-| `vehicle_type` | `uav` 或 `ugv`：能接哪些任務，以及能量模型、巡檢高度的預設值 | `uav` |
-| `ns` | 話題前綴（`/<ns>/...`） | `uav<agent_id>`；ugv 是 `v60` |
-| `mesh_ip` | UDP 走哪張網卡 | 環境變數 `MESH_IP` |
-| `participate` | `state`：robot_state 有在更新才參與（無人機另外要飛行狀態有效、已解鎖、離地）；`always`：一律參與，位置與電量用 `initial_position`、`battery`（只測協商） | `state` |
-| `require_airborne` | 無人機要離地才參與（false = 解鎖就參與） | true |
-| `state_timeout` | robot_state 多久沒更新就停止參與出價、釋放任務（秒） | 1.5 |
-| `assign_hold` | 同一個任務連續排第一多久才交給 BT（秒） | 0.6 |
-| `recon_altitude` | 巡檢任務的高度，要和執行者的飛行高度一致；0 = 不調整 | uav 5.0、ugv 0 |
-| `energy_per_meter`、`hover_energy_per_sec` | 能量模型（**未校正**；SITL 用 0.022、0.111） | uav 0.5、0.2；ugv 0.1、0.05 |
-| `cruise_speed` | 估到達時間用，要和執行者的速度一致 | uav 5.0、ugv 1.0 |
-| `battery_weight`、`cost_ref` | 出價參數 | 1.0、50 |
-| `lost_timeout` | 多久沒有某台的新資訊視為失聯（秒），全隊要一樣 | 1.5 |
-| `max_packet` | CBBA_STATE 每批（整個 UDP 封包）的上限（B），任務多時分批 | 1200 |
-| `cancel_authorities` | 除了建立者，可以取消任務的機號（授權的管理端），全隊要一樣 | `[]` |
-| `require_accept` | 要 BT 接受才執行（握手）；false 只跳過握手，可行性、版本、回報檢查照常 | uav false、ugv true |
-| `accept_timeout` | BT 多久沒回覆就當成暫時拒絕（故障處理的上限） | 3.0 s |
-| `exec_timeout` | ExecState 多久沒更新就不能接新任務（本機單調時間） | 1.5 s |
-| `max_queued_fires`、`max_queue_wait` | 執行中任務之後最多排幾個火警；沒有期限時最多等多久（從建立時算） | 1、120 s |
-| `lock_dir` | 程序鎖的目錄 | `CBBA_LOCK_DIR` → `$XDG_RUNTIME_DIR/cbba` → `/tmp/cbba` |
+2026-10-12 起 ROS 節點搬到 `ros2_ws/src/swarm_cbba`（照機器狗端的套件與介面：`current_task`、`robot_state` 的 `mode`、
+`task_result` 的 `reason`、launch＋yaml、不握手）。啟動方式、話題、參數見 [`../swarm_cbba/README.md`](../swarm_cbba/README.md)。
+這個套件只剩核心、協定層、指派流程、離線模擬與測試，不依賴 ROS。
 
 ## 怎麼分配任務
 
@@ -177,14 +111,14 @@ ros2 topic pub --once /uav1/cancel_task swarm_interfaces/msg/Task "{task_id: 655
 - CBBA_STATE 只放認得、進行中的任務（task_id、得標者、得標價），每批 ≤ 1200 B，每批都帶完整的 s。
   每批直接交給 CBBA 規則；收斂判定、補發只用收齊的那一次。
 - `round_key` 是任務清單的 CRC-32 摘要，不同時比對紀錄、補發對方缺的 TASK_ANNOUNCE 或 TASK_CLOSE；
-  不參與出價的鄰居（還在地面）沒有附紀錄，全部補一次。另外每 5 s 保底重播。
+  不參與出價的鄰居（還在地面）也附紀錄（不附 s），只補它缺的。另外每 5 s 保底重播。
 - 重開機換新的 session_id（隨機），不用存檔；重開機前延遲的封包會被丟掉。
 - 完成：宣告 → 確認 → TASK_CLOSE；重送一律換新序號（多跳時才補得回來），宣告後失聯的不再等。
   存活名單是機號清單，機號 50 的狗也會被等待確認。
 - **接受、搶占、排隊**（見 [`doc/protocol.md`](doc/protocol.md) 第五節）：得標後先請 BT 接受，接受後才是正式指派；
   已接受（執行中、保留）的任務別台不出價（持有者失聯也照樣鎖著，只標記待確認）。搶占要可以安全中斷、優先級較高
   （火警 ＞ 巡檢，同級不搶占）；執行中任務之後最多保留 1 個火警，要在期限內做得完。每個指派印一行分段量測。
-- **正式指派**：發到 assigned_task 時產生新版本（全隊共用、每個任務一個），撤銷時也加一；版本跟著 CBBA_STATE 傳。
+- **正式指派**：發到 current_task 時產生新版本（全隊共用、每個任務一個），撤銷時也加一；版本跟著 CBBA_STATE 傳。
   回報、完成宣告、TASK_CLOSE 都帶版本，舊的拒絕（X→Y→X 時 X 第一次的回報無效）。
   取消只能由建立者或 `cancel_authorities` 發起；執行失敗不關閉任務，撤銷指派後由 CBBA 重新分配。
 - 某台 1.5 s 沒有新資訊視為失聯，它的任務重新分配；沒起飛的飛機不出價。
@@ -218,7 +152,7 @@ ctest --test-dir /tmp/cbba_core_build --output-on-failure
 | `test_exec_constraints` | 核心的限制：搶占、排隊（數量、期限、剩餘時間）、鎖定、暫時撤回、故障（見 `doc/protocol.md` 第七節） |
 | `test_assignment` | 指派流程：BT 接受、搶占、排隊與保留、拒絕、逾時、鎖定、失聯（見 `doc/protocol.md` 第七節） |
 
-多節點整合測試：同一個容器用 `participate:=always` 起多個 `cbba_node`（各自 `-r __node:=uavN_cbba_node`），
+多節點整合測試：同一個容器起多個 `swarm_cbba/cbba_node`（各自 `-r __ns:=/uavN -r __node:=uavN_cbba_node`，假 robot_state 用 `mode: 0` 或 `participate:=always`），
 用 `ros2 topic pub` 代替 BT（走真的 UDP）。停節點要用 `pkill -f "__node:=uavN_cbba_node( |$)"`，
 只停 `ros2 run` 外層的話節點會繼續跑。
 

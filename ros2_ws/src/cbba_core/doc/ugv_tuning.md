@@ -1,6 +1,6 @@
 # 機器狗（V60）的 CBBA 參數調整
 
-通用 `cbba_node`（`vehicle_type:=ugv`）· 2026-10-07，2026-10-09 改成通用節點
+統一版 `swarm_cbba/cbba_node`（`agent_type: UGV`，`config/cbba_v60.yaml`）· 2026-10-07，2026-10-12 改成機器狗端的介面
 
 狗的出價會用到的參數，以及怎麼量、怎麼改。**目前的能量模型是佔位值，還沒校正**，請伯宇用狗的實測資料換掉。
 和無人機共用的參數（協定、出價公式）的完整說明見 [`parameters.md`](parameters.md)。
@@ -20,7 +20,8 @@
 改的方法：
 
 ```bash
-ros2 run cbba_core cbba_node --ros-args -r __node:=v60_cbba_node -p vehicle_type:=ugv -p agent_id:=50 \
+# 改 config/cbba_v60.yaml，或在命令列蓋過（-p 蓋過 yaml）
+ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.yaml> \
   -p energy_per_meter:=0.08 -p hover_energy_per_sec:=0.03 -p cruise_speed:=1.2 -p safety_reserve:=25.0
 ```
 
@@ -77,11 +78,11 @@ ros2 run cbba_core cbba_node --ros-args -r __node:=v60_cbba_node -p vehicle_type
 
 | 參數 | 值 | 說明 |
 |---|---|---|
-| `vehicle_type` | `ugv` | 只接地面任務；上面四個能量參數不指定時用狗的預設值 |
+| `agent_type` | `UGV` | 只接地面任務；上面四個能量參數不指定時用狗的預設值 |
 | `agent_id` | 50 | 介面規格的機號。無人機完成任務時也會等狗的確認（協定版本 2 起） |
-| `ns` | `v60` | 話題前綴：`/v60/robot_state`、`/v60/task_result`、`/v60/assigned_task` |
+| namespace | `v60`（launch 給） | 話題：`/v60/robot_state`、`/v60/task_result`、`/v60/current_task` |
 | `state_timeout` | 1.5 s | `robot_state` 這麼久沒更新就停止參與出價、釋放手上的任務。robot_state 是 2 Hz，等於連掉 3 則 |
-| `assign_hold` | 0.6 s | 同一個任務連續排第一這麼久，才發到 `/v60/assigned_task`，避免協商途中來回換 |
+| `assign_hold` | 0.4 s | 同一個任務連續排第一這麼久，才發到 `/v60/current_task`，避免協商途中來回換 |
 | `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式。現在只有一隻狗，誰得標不受影響；之後多隻狗時再一起調 |
 
 ---
@@ -104,14 +105,13 @@ ros2 run cbba_core cbba_node --ros-args -r __node:=v60_cbba_node -p vehicle_type
 
 | 話題 | 型別 | 方向 | 說明 |
 |---|---|---|---|
-| `/v60/robot_state` | `swarm_interfaces/RobotState` | BT → CBBA | 2 Hz。`agent_id` 要是 50，位置是 map ENU，電量 0～100 |
-| `/v60/task_result` | `swarm_interfaces/TaskResult` | BT → CBBA | 任務結束時一次，**請用 reliable 發**，`assignment_version` 原樣帶回 assigned_task 上的版本。`success = false` 時交回競標池、狗不再接；`detail` 記在 log |
-| `/v60/assigned_task` | `swarm_interfaces/Task` | CBBA → BT | reliable、transient_local。目前要執行的任務；沒有任務時 `task_id = 0`、`status = CANCELLED` |
+| `/v60/robot_state` | `swarm_interfaces/RobotState` | BT → CBBA | 2 Hz。`agent_id` 要是 50，位置是 map ENU，電量 0～100；`mode` AUTO 才出價 |
+| `/v60/task_result` | `swarm_interfaces/TaskResult` | BT → CBBA | 任務結束時一次，**請用 reliable 發**。task_id 要是目前 current_task 上的。`success = false` 時交回競標池，依 `reason` 狗 60 s 內（PERMANENT 永久）不再接；`detail` 記在 log |
+| `/v60/current_task` | `swarm_interfaces/Task` | CBBA → BT | reliable、transient_local。目前要執行的任務；沒有任務時 `task_id = 0`、`status = CANCELLED` |
 
 狗也能建立任務（`/v60/new_task`，協定版本 2 起）。ManualOverride（平板 → BT）只在狗的機內。
 
-2026-10-09 起：BT 要送 `/v60/exec_state`、回覆 `/v60/assignment_request`（接受後才發 `assigned_task`），
-地面端保有最終的接受與中斷權。細節見 [`ugv_test.md`](ugv_test.md) 與 [`protocol.md`](protocol.md) 第五節。
+2026-10-12 起照機器狗端（伯宇）的介面：不握手、不送 exec_state，BT 的哨兵負責中斷。細節見 `../../swarm_cbba/README.md`。
 
 ---
 

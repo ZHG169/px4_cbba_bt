@@ -2,14 +2,14 @@
 //
 //   IsUAVBatteryCritical / ExecuteReturnToLaunch   電量 ≤ min_battery → 回報目前任務失敗、執行狀態故障、PX4 返航
 //   TakeOff                                        offboard＋解鎖、爬升到 altitude（週計畫沒有，前台樹要先起飛）
-//   IsTaskValidAndUnchanged                        比對 cbba_node 的 assigned_task（task_id＋assignment_version）
+//   IsTaskValidAndUnchanged                        比對 cbba_node 的 current_task（task_id；2026-10-12 起介面不帶指派版本）
 //                                                  和執行中的任務：換了 → 回傳 FAILURE 一次（中斷舊的序列）並換成新的
 //   FlyToWaypoint                                  CPF 避碰、飛到任務點上方 altitude
 //   DetectAprilTagFire / ReportFireEvent           到達、懸停穩定 settle_sec 後觀察到 observe_sec：
 //                                                  expected_tag_id 的 confidence ≥ min_confidence
 //                                                  → 對 cbba_node 建立 GROUND_INTERVENTION 任務（同一個 tag 只報一次）
 //   HoverAndMonitor                                停留到任務的 duration_sec（從到達算起，含觀察的時間）
-//   ReportTaskResult                               task_result（帶 assignment_version）
+//   ReportTaskResult                               task_result（success、detail、reason）
 //   LandOrLoiter                                   沒有任務：原地懸停（目前只做 loiter；降落後 cbba_node 會停止出價）；
 //                                                  執行任務中的鄰機靠近時讓路（不拉回待命點，被推開後在新位置待命）
 //

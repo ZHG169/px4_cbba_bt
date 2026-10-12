@@ -18,7 +18,7 @@
 //                 任務多時分批，每批不超過 max_packet（1200 B）
 //   TASK_ANNOUNCE 建立時一次。補發：鄰居的 round_key 和我不同時，比對它上一次收齊的 CBBA_STATE，
 //                 補它缺的任務定義或 TASK_CLOSE（每個每秒最多一次）；不參與出價的鄰居（還在地面、
-//                 剛開機）沒有附紀錄，當成什麼都不知道，全部補一次。保底：每 5 s 輪流重播一個已知任務
+//                 剛開機）也附紀錄、只補它缺的（2026-10-11 起；它還什麼都不知道時就是全部補一次）。保底：每 5 s 輪流重播一個已知任務
 //   完成          COMPLETION → COMPLETION_ACK → TASK_CLOSE（見 wire_completion.hpp）
 //
 // 收到 CBBA_STATE
@@ -243,11 +243,12 @@ public:
   void setExecConstraints(const ExecConstraints & c, double now);
   bool suspendTask(TaskId id, double now);
   void resumeSuspended(double now);
-  void excludeTask(TaskId id, double now);   // BT 永久拒絕：不再出價
+  void excludeTask(TaskId id, double now, double duration = kInf);   // 不再出價（duration 秒；kInf = 永久）
 
   // BT 回報任務結果。version 必須是自己目前「執行中」的正式指派。
-  // success：開始完成確認；失敗：結束指派、釋放回競標池，自己不再對它出價（任務保留）。
-  ReportCheck reportResult(TaskId id, bool success, std::uint64_t version, double now);
+  // success：開始完成確認；失敗：結束指派、釋放回競標池，自己 exclude_sec 秒內不再對它出價（任務保留；kInf = 永久）。
+  ReportCheck reportResult(TaskId id, bool success, std::uint64_t version, double now,
+    double exclude_sec = kInf);
 
   // 取消任務：只有建立者或 cancel_authorities 裡的機號能發。送 TASK_CLOSE（reason = 取消）
   ReportCheck cancelTask(TaskId id, double now);

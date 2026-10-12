@@ -1,5 +1,9 @@
 # 機間通訊協定版本 2：變更通知
 
+> **2026-10-12 補充**：下面「狗端要改的」那張表（`assigned_task`、`assignment_version`、`exec_state`、握手）**已經作廢**：
+> BT 之間的介面改成照伯宇的 handoff（`current_task`、`mode`、`reason`、不握手），他的 BT 不用改，見 `ros2_ws/src/swarm_cbba/README.md`。
+> 機間協定版本 2（task_id、session、大端序、和規格書不相容）的部分仍然有效。
+
 2026-10-09 · 勝翔（無人機端）· 詳細設計見 `ros2_ws/src/cbba_core/doc/protocol.md`
 
 給三種人：狗端（BT、cbba_node 的使用者）、規格書作者、全隊。
@@ -14,7 +18,7 @@
   **用到它的套件全部要重新編譯**，否則舊版的節點收不到新版的訊息。
 - `cancel_authorities`（可以取消任何任務的機號）全隊要設成一樣。
 - 每台只能跑一個 cbba_node（程序鎖 `agentN.lock`）；docker 的容器共用主機的 `/tmp/cbba_locks`。
-- 無人機端還沒在 PX4 SITL 重跑版本 2，步驟在 `cbba_core/doc/sitl_test.md`（第 1～5 步、3b、4b）。
+- 無人機端 2026-10-11 在 PX4 SITL（3 台）驗證過版本 2；手動步驟在 `cbba_core/doc/sitl_test.md`，自動測試在 `docker/itest`。
 
 ## 二、狗端：要改的地方
 

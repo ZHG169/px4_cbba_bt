@@ -323,7 +323,7 @@ TEST(Assignment, PermanentRejectStopsBidding)
   team.bt(50).state = 1;
   team.swarm.run(2.0);
   EXPECT_EQ(team.requestsOf(50, RequestKind::ACTIVATE, f), 1);
-  EXPECT_TRUE(team.swarm.node(50).agent().excluded(f));
+  EXPECT_TRUE(team.swarm.node(50).agent().excluded(f, team.swarm.now() + 1e6));
 }
 
 TEST(Assignment, TimeoutReleasesAndLateAcceptCannotStart)
@@ -402,6 +402,64 @@ TEST(Assignment, LostHolderStaysLockedPendingConfirmation)
   EXPECT_EQ(lost.front(), std::make_pair(f, AgentId{50}));
   EXPECT_EQ(team.requestsOf(51, RequestKind::ACTIVATE, f), 0);
   EXPECT_TRUE(team.swarm.node(1).taskOpen(f));
+}
+
+TEST(Assignment, HolderThatStopsParticipatingReleasesItsLock)
+{
+  // 執行中的持有者停止參與（PX4 斷線、降落）：它自己撤銷，撤銷要傳到別台 → 解除鎖定、別台接手。
+  // 2026-10-11 SITL 測試發現：停止參與的節點的 CBBA_STATE 不帶紀錄，撤銷傳不出去，任務一直鎖著沒人接
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 20, 0});
+  team.addDog(51, {0, -20, 0});
+  team.swarm.run(2.0);
+  const TaskId f = makeTaskId(1, 1);
+  team.swarm.node(1).addLocalTask(groundTask(1, 1, 2, 18, team.swarm.now()), team.swarm.now());
+  team.swarm.run(1.5);
+  ASSERT_TRUE(activeIs(team.mgr(50), f));
+  const std::uint64_t v = team.mgr(50).active()->version;
+
+  team.swarm.node(50).setParticipating(false, team.swarm.now());
+  team.swarm.run(2.0);
+  EXPECT_FALSE(team.mgr(50).active());
+  EXPECT_GT(team.swarm.node(1).assignment(f).version, v);          // 收到撤銷（新版本）
+  EXPECT_FALSE(team.swarm.node(51).agent().locked(f));
+  EXPECT_TRUE(team.swarm.node(1).lockedByLostAgents(team.swarm.now()).empty());
+  EXPECT_TRUE(activeIs(team.mgr(51), f));                           // 別台接手
+  EXPECT_TRUE(team.swarm.consistent());
+}
+
+TEST(Assignment, TemporaryFailureRetriesAfterExclusion)
+{
+  // TaskResult.reason 不是 PERMANENT（2026-10-12）：失敗後 60 s 內不出價，之後同一隻狗重新接回；
+  // PERMANENT 則一直不接
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 20, 0}, 100.0, false);
+  team.swarm.run(2.0);
+  const TaskId f = makeTaskId(1, 1);
+  const TaskId g = makeTaskId(1, 2);
+  const auto longTask = [&team](std::uint16_t seq, double x) {
+      Task t = groundTask(1, seq, x, 20, team.swarm.now());
+      t.deadline_sec = 1000.0;   // 測試要跑 100 多秒：期限拉長，不讓逾期影響出價
+      return t;
+    };
+  team.swarm.node(1).addLocalTask(longTask(1, 2), team.swarm.now());
+  team.swarm.run(1.0);
+  ASSERT_TRUE(activeIs(team.mgr(50), f));
+  ASSERT_EQ(team.mgr(50).onResult(f, team.mgr(50).active()->version, false, team.swarm.now(), 60.0),
+    ReportCheck::ACCEPTED);
+  team.swarm.run(30.0);
+  EXPECT_FALSE(team.mgr(50).active());          // 排除中
+  team.swarm.run(32.0);
+  EXPECT_TRUE(activeIs(team.mgr(50), f));       // 60 s 後重新接回
+
+  ASSERT_EQ(team.mgr(50).onResult(f, team.mgr(50).active()->version, false, team.swarm.now()),
+    ReportCheck::ACCEPTED);                     // 永久
+  team.swarm.node(1).addLocalTask(longTask(2, 3), team.swarm.now());
+  team.swarm.run(70.0);
+  EXPECT_TRUE(activeIs(team.mgr(50), g));       // 別的任務照接
+  EXPECT_TRUE(team.swarm.node(50).agent().excluded(f, team.swarm.now()));
 }
 
 TEST(Assignment, WithoutAcceptStillVersionedAndChecked)

@@ -7,7 +7,8 @@
 #    px4_sitl.sh 2            第 2 台（加入已開啟的 Gazebo）
 #    px4_sitl.sh 1 gz_x500    指定機型
 #    HEADLESS=1 px4_sitl.sh   不開 Gazebo 視窗
-#    CBBA_WORLD=fire_site px4_sitl.sh 1   用 docker/gz/worlds 的場景（第 1 台負責開；之後的台自動加入）
+#    CBBA_WORLD=fire_site px4_sitl.sh 1   用 docker/gz/worlds 的場景（第 1 台負責開；之後的台不用設，
+#                                         自動加入正在跑的場景）
 #
 #  每台會：
 #    - 用 PX4 實例編號 -i N，在 y 方向錯開出生點
@@ -70,6 +71,28 @@ else
     if [ "${N}" != "1" ]; then
         echo "[px4_sitl] 提醒：Gazebo 還沒開，由第 ${N} 台負責開啟"
     fi
+fi
+
+# ---------- Gazebo 已經在跑：加入正在跑的世界 ----------
+# PX4 要知道世界名稱（PX4_GZ_WORLD），沒給時會一直等 default 世界。第 2 台之後沒設 CBBA_WORLD 也要加入
+# 第 1 台開的場景，所以從 Gazebo 讀出世界名稱（2026-10-11 SITL 測試發現：fire_site 的第 2、3 台起不來）
+if pgrep -f "gz[ ]sim" >/dev/null 2>&1; then
+    RUNNING_WORLD=""
+    for _ in $(seq 1 30); do
+        RUNNING_WORLD="$(gz topic -l 2>/dev/null | grep -m 1 -E '^/world/[^/]+/clock$' \
+            | sed -E 's#^/world/([^/]+)/clock$#\1#' || true)"
+        [ -n "${RUNNING_WORLD}" ] && break
+        sleep 1
+    done
+    if [ -z "${RUNNING_WORLD}" ]; then
+        echo "[px4_sitl] Gazebo 在跑，但 30 s 內讀不到世界名稱（gz topic -l 沒有 /world/<名稱>/clock）"
+        exit 1
+    fi
+    if [ -n "${CBBA_WORLD:-}" ] && [ "${CBBA_WORLD}" != "${RUNNING_WORLD}" ]; then
+        echo "[px4_sitl] 提醒：正在跑的是 ${RUNNING_WORLD}，不是 CBBA_WORLD=${CBBA_WORLD}；加入 ${RUNNING_WORLD}（要換場景先關掉 Gazebo）"
+    fi
+    CBBA_WORLD="${RUNNING_WORLD}"
+    GZ_MSG="加入已開啟的場景 ${RUNNING_WORLD}"
 fi
 
 # ---------- 專案的場景：自己開 Gazebo，PX4 會偵測到「已經在跑的世界」直接加入 ----------

@@ -174,7 +174,7 @@ bool CbbaAgent::buildBundle(double now)
 
     for (const auto & [id, task] : tasks_) {
       if (task.status != TaskStatus::OPEN) {continue;}
-      if (excluded_.count(id) > 0) {continue;}   // 自己做失敗的任務不再出價
+      if (excluded(id, now)) {continue;}         // 自己做失敗的任務：排除期間不出價
       if (suspended_.count(id) > 0) {continue;}  // BT 暫時拒絕
       if (locked_.count(id) > 0) {continue;}     // 別台已接受
       if (std::find(bundle_.begin(), bundle_.end(), id) != bundle_.end()) {continue;}
@@ -585,9 +585,17 @@ bool CbbaAgent::resumeSuspended(double now)
   return buildBundle(now);
 }
 
-bool CbbaAgent::excludeTask(TaskId id, double now)
+bool CbbaAgent::excluded(TaskId id, double now) const
 {
-  excluded_.insert(id);
+  const auto it = excluded_.find(id);
+  return it != excluded_.end() && now < it->second;
+}
+
+bool CbbaAgent::excludeTask(TaskId id, double now, double duration)
+{
+  // 再失敗一次時取比較晚的（永久的不會被短的蓋掉）
+  double & until = excluded_[id];
+  until = std::max(until, duration < kInf ? now + duration : kInf);
   const auto it = std::find(bundle_.begin(), bundle_.end(), id);
   if (it == bundle_.end()) {
     return false;

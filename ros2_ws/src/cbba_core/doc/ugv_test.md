@@ -1,5 +1,10 @@
 # 機器狗（V60）端的 CBBA：執行與測試
 
+> **2026-10-12 起狗端照伯宇的介面**（`swarm_cbba`：`ros2 launch swarm_cbba cbba.launch.py namespace:=v60`、
+> `current_task`、RobotState 的 `mode`、TaskResult 的 `reason`、不握手），說明在 `ros2_ws/src/swarm_cbba/README.md`，
+> 驗收用伯宇 README 的 T1、T2、T9（2026-10-12 在我們的節點上照跑，結果一致）。
+> 下面是 2026-10-07～09 舊介面（`assigned_task`、`assignment_version`、`exec_state`、握手）的執行方式與測試紀錄，留著查歷史。
+
 狗和無人機跑**同一個通用節點** `cbba_core/cbba_node`（2026-10-09 起，取代原本的 `ugv_cbba` 套件），
 所以兩邊在網路上講的一定是同一套協定。狗的 BT 本來就送標準介面（RobotState、TaskResult），直接接上，不用轉接節點。
 

@@ -20,3 +20,11 @@ docker/docker-compose.yaml
 ros2_ws/src/cbba_core/test/results/**/*.*
 !ros2_ws/src/cbba_core/test/results/**/*.png
 !ros2_ws/src/cbba_core/test/results/**/*.gif
+
+# 整合測試的輸出（docker/itest/itest.py）
+docker/itest/out/
+
+# 隊友給的資料，只留在本機
+docs/handoff_uav_2026-10-11/
+docs/messageImage_*.jpg
+ros2_ws/src/swarm_cbba/testdata_for_uav_2026-10-12/

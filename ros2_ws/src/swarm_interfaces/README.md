@@ -1,37 +1,27 @@
-# swarm_interfaces — 空地 CBBA 介面規格 v1.5
+# swarm_interfaces — 空地 CBBA 介面規格 v1.6
 
-> 狀態：**勝翔定案（2026-10-03）**，待伯宇、宜臻審閱。
-> 需要修改請直接在這份文件標註，修改後版本號往上加（v1.1…），並同步改 `package.xml` 的 version。
-
-> **機間（2026-10-07 起）**：載具之間的 CBBA 協商改走 UDP（2026-10-09 起是協定版本 2，見 `cbba_core/doc/protocol.md`），
-> 不再使用第 2 節的 `/swarm/tasks`、`/swarm/cbba`。
+> **v1.6（2026-10-12）＝ 機器狗端（伯宇）的 v1.2 ＋ FireDetection**：無人機和機器狗共用同一份，
+> `RobotState`、`TaskResult`、`Task` 的欄位和機器狗端**完全一樣**（DDS 會比對型別雜湊，不一樣就連不上）。
+> 訊息變了，**用到 swarm_interfaces 的套件都要重新編譯**（含狗端的 task_manager）。
 >
-> **機內（2026-10-09 起，無人機和機器狗相同）**：每台跑同一個通用節點 `cbba_core/cbba_node`，話題在 `/<ns>`（`/uavN`、`/v60`）底下：
+> **機間**：載具之間的 CBBA 協商走 UDP（協定版本 2，見 `cbba_core/doc/protocol.md`），不使用第 2 節的 `/swarm/tasks`、`/swarm/cbba`
+> （`CBBAMessage`、`Bid`、`AgentStamp` 保留給相容，沒有程式在用）。
+>
+> **機內**：每台跑同一個 `swarm_cbba/cbba_node`，話題在 launch 的 namespace（`/uavN`、`/v60`）底下，
+> 用法與規則見 `swarm_cbba/README.md`：
 >
 > | 話題 | 型別 | 方向 |
 > |---|---|---|
-> | `/<ns>/robot_state` | `RobotState`（header、agent_id、position map ENU、battery 0～100，負值 = 不知道；v1.2 加 flight_state_valid、armed、offboard、landed，狗填 false） | → CBBA。狗的 BT 2 Hz；無人機由 `px4_state_bridge` 從 PX4 轉換，PX4 有在更新就一直送 |
-> | `/<ns>/task_result` | `TaskResult`（task_id、success、detail、assignment_version） | BT → CBBA，任務結束時一次（reliable）；task_id 和 assignment_version 要是目前 assigned_task 上的 |
-> | `/<ns>/cancel_task` | `Task`（只看 task_id） | → CBBA，取消任務：要是建立者或 cancel_authorities 裡的機號 |
-> | `/<ns>/new_task` | `Task` | BT → CBBA（任何機號都能建立任務） |
-> | `/<ns>/assigned_task` | `Task`（含 assignment_version：這次正式指派的版本） | CBBA → BT（BT 接受後才發） |
-> | `/<ns>/exec_state` | `ExecState`（執行狀態、可否中斷、預估剩餘時間、執行中／排隊中的任務） | BT → CBBA |
-> | `/<ns>/assignment_request` | `AssignmentRequest`（ACTIVATE／RESERVE／RELEASE、preempt、Task） | CBBA → BT（`require_accept = true` 時） |
-> | `/<ns>/assignment_response` | `AssignmentResponse`（task_id、版本、接受／拒絕、原因） | BT → CBBA |
+> | `current_task` | `Task`（task_id = 0 表示沒有任務） | CBBA → BT（reliable、transient_local） |
+> | `robot_state` | `RobotState`（header、agent_id、position map ENU、battery 0～100，負值 = 不知道、**mode**：AUTO／MANUAL／ESTOP） | BT → CBBA，約 2 Hz；只有 AUTO 參與出價。無人機由 `px4_state_bridge` 從 PX4 轉換（在空中 = AUTO） |
+> | `task_result` | `TaskResult`（task_id、success、detail、**reason**：NONE／PERMANENT／TRANSIENT／PREEMPTED／STOPPED） | BT → CBBA，任務結束時一次（reliable）；task_id 要是目前 current_task 上的 |
+> | `new_task` | `Task` | BT → CBBA（任何機號都能建立任務） |
+> | `cancel_task` | `Task`（只看 task_id） | → CBBA，取消任務：要是建立者或 cancel_authorities |
+> | `manual_override` | `ManualOverride.srv`（Task task、bool clear → bool accepted、string message） | 平板 → 狗的 BT（不經過 CBBA；接管時狗發 mode = MANUAL） |
+> | `/uavN/fire_detection` | `FireDetection` | 無人機機內：`apriltag_fire_detector` → BT |
 >
-> 2026-10-09 之前無人機的 `task_result` 用 `Task`（看 `status`），改成和狗一樣的 `TaskResult`。
->
-> **v1.2（2026-10-09）**：`RobotState` 加 `flight_state_valid`、`armed`、`offboard`、`landed`。訊息的型別雜湊變了，
-> **用到 swarm_interfaces 的套件（含狗端）都要重新編譯**，舊版的節點收不到新版發的 RobotState。
->
-> **v1.3（2026-10-09）**：`Task`、`TaskResult` 加 `assignment_version`。cbba_node 在 assigned_task 填，BT 回報時原樣帶回；
-> 不是目前的正式指派就拒絕（擋掉任務被換掉、或 X→Y→X 之後的舊回報）。同樣要重新編譯。
->
-> **v1.4（2026-10-09）**：`assignment_version` 改成 uint64；新增 `ExecState`、`AssignmentRequest`、`AssignmentResponse`：
-> CBBA 得標後先請 BT 接受，地面端保有最終的接受與中斷權（流程見 `cbba_core/doc/protocol.md` 第五節）。
->
-> **v1.5（2026-10-09）**：新增 `FireDetection`（無人機機內：`apriltag_fire_detector` → BT 的 `/uavN/fire_detection`）。
-> 只是新增訊息，原有訊息的型別雜湊不變，狗端不用為了它重新編譯。
+> 2026-10-09～11 的 v1.2～v1.5（`RobotState` 的飛行狀態欄位、`assignment_version`、`ExecState`、
+> `AssignmentRequest`／`Response`）在 v1.6 拿掉，改用機器狗端的定義（指派版本只在 CBBA 節點之間用、不握手）。
 
 ## 1. 載具編號與命名空間
 
@@ -139,3 +129,5 @@ deadline_sec = 120   value = 100   duration_sec = 20   status = OPEN
 | v1.2 | 2026-10-09 | `RobotState` 加 `flight_state_valid`、`armed`、`offboard`、`landed`（無人機的真實飛行狀態，狗填 false） |
 | v1.3 | 2026-10-09 | `Task`、`TaskResult` 加 `assignment_version`（正式指派的版本，BT 回報時帶回）；新增 `/<ns>/cancel_task` |
 | v1.4 | 2026-10-09 | `assignment_version` 改 uint64；新增 `ExecState`、`AssignmentRequest`、`AssignmentResponse`（BT 接受、搶占、排隊） |
+| v1.5 | 2026-10-09 | 新增 `FireDetection`（無人機機內） |
+| v1.6 | 2026-10-12 | **改成機器狗端（伯宇）的 v1.2**：`RobotState` 用 `mode`（拿掉飛行狀態欄位）、`TaskResult` 用 `reason`（拿掉 `assignment_version`）、`Task` 拿掉 `assignment_version`；刪 `ExecState`、`AssignmentRequest`、`AssignmentResponse`；新增 `ManualOverride.srv`（照狗端介面規格圖）；保留 `FireDetection` |

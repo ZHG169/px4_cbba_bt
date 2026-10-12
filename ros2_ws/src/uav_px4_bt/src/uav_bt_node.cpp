@@ -2,11 +2,12 @@
 //
 //   PX4   <px4_ns>/fmu/out/{vehicle_status_v1, vehicle_local_position_v1, battery_status_v1, vehicle_land_detected}
 //         <px4_ns>/fmu/in/{offboard_control_mode, trajectory_setpoint（速度）, vehicle_command}
-//   CBBA  <ns>/assigned_task → BT；BT → <ns>/task_result、<ns>/exec_state（2 Hz＋改變時）、<ns>/new_task（火警）
+//   CBBA  <ns>/current_task → BT；BT → <ns>/task_result（TaskResult：success、detail、reason）、<ns>/new_task（火警）
+//         2026-10-12 照機器狗端的介面：不帶指派版本、不發 exec_state（任務換了只看 task_id）
 //   偵測  <ns>/fire_detection（apriltag_fire_detector）
 //   機間  飛行層的位置廣播（UDP multicast，beacon_port，10 Hz），給 CPF 避碰（格式見 flight_beacon.hpp）
 //
-// 每 1/tick_hz 秒：把 assigned_task 寫進 blackboard（current_uav_task）→ tick 一次樹 → 把樹設定的速度送給 PX4。
+// 每 1/tick_hz 秒：把 current_task 寫進 blackboard（current_uav_task）→ tick 一次樹 → 把樹設定的速度送給 PX4。
 // 樹的節點不碰 ROS，透過 UavPlatform（這個檔案實作）讀狀態、下指令。
 //
 // 座標：BT 用 map ENU；PX4 local 是 NED、以出生點為原點。出生點預設和 px4_sitl.sh、px4_state_bridge 一樣，
@@ -39,7 +40,6 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <swarm_interfaces/msg/exec_state.hpp>
 #include <swarm_interfaces/msg/fire_detection.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
@@ -56,7 +56,6 @@ using px4_msgs::msg::VehicleCommand;
 using px4_msgs::msg::VehicleLandDetected;
 using px4_msgs::msg::VehicleLocalPosition;
 using px4_msgs::msg::VehicleStatus;
-using ExecStateMsg = swarm_interfaces::msg::ExecState;
 using FireDetectionMsg = swarm_interfaces::msg::FireDetection;
 using TaskMsg = swarm_interfaces::msg::Task;
 using TaskResultMsg = swarm_interfaces::msg::TaskResult;
@@ -166,8 +165,7 @@ public:
     const std::string prefix = "/" + ns;
     result_pub_ = create_publisher<TaskResultMsg>(prefix + "/task_result", rclcpp::QoS(20).reliable());
     new_task_pub_ = create_publisher<TaskMsg>(prefix + "/new_task", rclcpp::QoS(20).reliable());
-    exec_pub_ = create_publisher<ExecStateMsg>(prefix + "/exec_state", rclcpp::QoS(10).best_effort());
-    assigned_sub_ = create_subscription<TaskMsg>(prefix + "/assigned_task",
+    assigned_sub_ = create_subscription<TaskMsg>(prefix + "/current_task",
         rclcpp::QoS(1).reliable().transient_local(),
         [this](TaskMsg::ConstSharedPtr m) {onAssigned(*m);});
     fire_sub_ = create_subscription<FireDetectionMsg>(prefix + "/fire_detection", rclcpp::QoS(20),
@@ -247,7 +245,9 @@ public:
     msg.task_id = task.task_id;
     msg.success = success;
     msg.detail = detail;
-    msg.assignment_version = task.version;
+    // 失敗分類（spec §2.3 規則 3）：低電量返航 = 載具本身停了；其他（飛行逾時等）可以再試
+    msg.reason = success ? TaskResultMsg::NONE :
+      (detail == "BATTERY_RTL" ? TaskResultMsg::STOPPED : TaskResultMsg::TRANSIENT);
     result_pub_->publish(msg);
   }
 
@@ -284,7 +284,6 @@ private:
       t.type = m.type;
       t.position = {m.position.x, m.position.y, m.position.z};
       t.duration = std::max(0.0f, m.duration_sec);
-      t.version = m.assignment_version;
     }
     assigned_ = t;
   }
@@ -307,7 +306,6 @@ private:
       last_beacon_ = t;
       sendBeacon();
     }
-    publishExec(t);
   }
 
   void publishSetpoint()
@@ -346,25 +344,6 @@ private:
     link_->send(encodeBeacon(b));
   }
 
-  void publishExec(double t)
-  {
-    const bool changed = exec_.mode != last_exec_.mode || exec_.active_task != last_exec_.active_task ||
-      exec_.active_version != last_exec_.active_version;
-    if (!changed && t - last_exec_pub_ < 0.5) {
-      return;
-    }
-    last_exec_pub_ = t;
-    last_exec_ = exec_;
-    ExecStateMsg msg;
-    msg.header.stamp = get_clock()->now();
-    msg.execution_state = static_cast<std::uint8_t>(exec_.mode);
-    msg.preemptible = exec_.preemptible;
-    msg.estimated_remaining_time = static_cast<float>(exec_.remaining);
-    msg.has_active = exec_.active_task != 0;
-    msg.active_task_id = exec_.active_task;
-    msg.active_assignment_version = exec_.active_version;
-    exec_pub_->publish(msg);
-  }
 
   void sendCommand(std::uint32_t command, float param1 = 0.0f, float param2 = 0.0f)
   {
@@ -401,7 +380,6 @@ private:
   rclcpp::Publisher<VehicleCommand>::SharedPtr command_pub_;
   rclcpp::Publisher<TaskResultMsg>::SharedPtr result_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr new_task_pub_;
-  rclcpp::Publisher<ExecStateMsg>::SharedPtr exec_pub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<VehicleLocalPosition>::SharedPtr position_sub_;
   rclcpp::Subscription<BatteryStatus>::SharedPtr battery_sub_;
@@ -424,8 +402,6 @@ private:
   Vec3 velocity_cmd_;
   bool offboard_{true};
   ExecStatus exec_;
-  ExecStatus last_exec_;
-  double last_exec_pub_{-1e9};
 
   std::unique_ptr<UavContext> ctx_;
   BT::BehaviorTreeFactory factory_;

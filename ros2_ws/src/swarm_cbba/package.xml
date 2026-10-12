@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>swarm_cbba</name>
+  <version>0.2.0</version>
+  <description>統一版 CBBA 節點（無人機、機器狗同一支，agent_type 參數決定）：核心與機間協定版本 2 在 cbba_core；機內接 BT 的 current_task / robot_state / task_result / new_task</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>swarm_interfaces</depend>
+  <depend>cbba_core</depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

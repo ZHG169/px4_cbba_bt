@@ -364,12 +364,13 @@ void AssignmentManager::onResponse(
   }
 }
 
-ReportCheck AssignmentManager::onResult(TaskId task, std::uint64_t version, bool success, double now)
+ReportCheck AssignmentManager::onResult(TaskId task, std::uint64_t version, bool success, double now,
+  double exclude_sec)
 {
   if (!active_ || active_->task != task || active_->version != version) {
     return ReportCheck::STALE;
   }
-  const ReportCheck check = comm_.reportResult(task, success, version, now);
+  const ReportCheck check = comm_.reportResult(task, success, version, now, exclude_sec);
   if (check == ReportCheck::ACCEPTED) {
     active_.reset();
     assigned_changed_ = true;

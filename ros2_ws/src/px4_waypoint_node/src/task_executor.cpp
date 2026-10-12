@@ -2,10 +2,9 @@
 //
 // 和 takeoff_hover 一樣起飛，之後照 cbba_node 的指派飛：
 //   WAIT_READY → STREAM → ENGAGE → CLIMB   同 takeoff_hover（離地後 cbba_node 才開始參與出價）
-//   IDLE        懸停在目前位置，等 /uavN/assigned_task
+//   IDLE        懸停在目前位置，等 /uavN/current_task
 //   GOTO        以 cruise_speed 把 setpoint 往任務點移（任務點正上方 altitude 公尺）
-//   WORK        到達後停留 duration_sec，結束時發 /uavN/task_result（success = true）一次，回到 IDLE。
-//               assignment_version 帶回目前 assigned_task 的版本（同一個任務重新指派時版本會變）
+//   WORK        到達後停留 duration_sec，結束時發 /uavN/task_result（success = true、reason = NONE）一次，回到 IDLE
 //
 // 指派中途換成別的任務就直接改飛新任務；變成 task_id = 0 就原地懸停。
 // 已回報過的任務不再執行（cbba_node 確認完成之前可能還會短暫指派同一個）。
@@ -99,7 +98,7 @@ public:
     // 和 cbba_node 的 QoS 一致
     result_pub_ = create_publisher<TaskResultMsg>(ns + "/task_result", rclcpp::QoS(20).reliable());
     assigned_sub_ = create_subscription<TaskMsg>(
-      ns + "/assigned_task", rclcpp::QoS(1).reliable().transient_local(),
+      ns + "/current_task", rclcpp::QoS(1).reliable().transient_local(),
       [this](TaskMsg::ConstSharedPtr msg) {onAssigned(*msg);});
 
     timer_ = create_wall_timer(
@@ -284,7 +283,7 @@ private:
     TaskResultMsg msg;
     msg.task_id = active_;
     msg.success = true;
-    msg.assignment_version = assigned_.task_id == active_ ? assigned_.assignment_version : 0;
+    msg.reason = TaskResultMsg::NONE;
     result_pub_->publish(msg);
     done_.insert(active_);
     RCLCPP_INFO(get_logger(), "回報 %s 完成", taskName(active_).c_str());

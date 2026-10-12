@@ -1,67 +1,53 @@
-// 通用的 CBBA 節點：每台載具（無人機、機器狗）的機上電腦各跑一個，程式不分載具
+// 統一版 CBBA 節點（swarm_cbba）：無人機和機器狗跑同一支，agent_type 與能量模型由 params yaml 決定
 //
-// 機間（mesh）：UDP multicast，協定版本 2（task_id 識別任務，見 cbba_comm.hpp、doc/protocol.md）
-// 機內（DDS）：只吃一套標準介面，話題都在 /<ns> 底下：
-//   → CBBA   <ns>/robot_state  (swarm_interfaces/RobotState)   位置（map ENU）、電量、飛行狀態
-//            <ns>/task_result  (swarm_interfaces/TaskResult)   任務結束時一次：
-//                              success = false 時交回競標池、自己不再接；detail 只記 log
-//            <ns>/new_task     (swarm_interfaces/Task)         本機發現的新任務（task_id 建立者要是自己）
-//            <ns>/cancel_task  (swarm_interfaces/Task)         取消任務（只看 task_id）：要是建立者或 cancel_authorities
-//   CBBA →   <ns>/assigned_task (swarm_interfaces/Task)        目前要執行的任務（正式指派）：
-//            同一任務連續 assign_hold 秒排第一才發，帶 assignment_version；沒有任務時 task_id = 0、status = CANCELLED
+// 2026-10-12 起照機器狗端（伯宇，spec v1.1 §2）的套件與介面：launch 給 namespace、話題用相對名稱、
+// params yaml（config/cbba_uav.yaml、cbba_v60.yaml），BT 端不用改。核心與機間協定用 cbba_core（協定版本 2）。
 //
-// 載具的差異由外面處理：
-//   - 狗的 BT 直接送 RobotState、TaskResult（飛行狀態的欄位填 false）。
-//   - 無人機由 px4_waypoint_node/px4_state_bridge 把 PX4 的話題轉成 RobotState（NED → map ENU、加出生點、
-//     真實的 armed／offboard／landed），PX4 有在更新就一直送。
-//   - 節點名稱用啟動時的 remap 區分（-r __node:=uav1_cbba_node、v60_cbba_node），程式裡固定叫 cbba_node。
-//   - vehicle_type 決定 AGENT_STATE 的載具種類（能接哪些任務）、參與出價的條件，以及能量模型、巡檢高度的預設值。
+// 機間（mesh）：UDP multicast，協定版本 2（task_id 識別任務，見 cbba_core/doc/protocol.md）
+// 機內（DDS），話題在 /<namespace> 底下：
+//   BT → CBBA   robot_state  (swarm_interfaces/RobotState)   位置（map ENU）、電量、mode；約 2 Hz
+//               task_result  (swarm_interfaces/TaskResult)   任務結束時一次；success = false 交回競標池，
+//                                                            reason 決定這台多久不再對它出價（PERMANENT 永久，其他 failure_exclude_sec）
+//               new_task     (swarm_interfaces/Task)         本機發現的新任務（task_id 建立者要是自己）
+//               cancel_task  (swarm_interfaces/Task)         取消任務（只看 task_id）：要是建立者或 cancel_authorities
+//   CBBA → BT   current_task (swarm_interfaces/Task)         目前要執行的任務；task_id = 0 表示沒有任務
 //
-// 參與出價（participate）：
-//   state  = robot_state 在 state_timeout 內有更新（預設）。無人機另外要飛行狀態有效、已解鎖，
-//            而且 require_airborne（預設 true）時要離地。轉接節點或狗的 BT 停掉時停止參與、立刻釋放任務
-//   always = 一律參與，不訂閱 robot_state；位置與電量用參數 initial_position、battery（測試協商用）
+// 參與出價（spec §2.3 規則 2、4）：robot_state 在 state_timeout 內有更新，而且 mode == AUTO。
+//   MANUAL（平板接管）、ESTOP（急停）、沒有 robot_state 時對所有任務出價 0，手上的任務立刻釋放。
+//   無人機的 mode 由 BT 或 px4_state_bridge 決定（已解鎖、離地 = AUTO）。
+//   participate = always（測試協商用）：一律參與，不訂閱 robot_state，位置與電量用參數 initial_position、battery。
 //
-// AGENT_STATE 的旗標用 robot_state 的真實值：armed、offboard、landed 只在 flight_state_valid 時送。
+// 正式指派（流程在 cbba_core/assignment_manager.hpp）：同一任務連續 assign_hold 秒排第一就發 current_task，
+// 不和 BT 握手（BT 的哨兵負責中斷舊的）。指派版本只在 CBBA 節點之間用（機間封包）：
+// task_result 的 task_id 必須是目前 current_task 上的任務，版本由節點自己補上；不是就拒絕、任務狀態不變。
 //
-// 返航點（只用在出價時估返航的耗電，不會叫載具飛回去）：第一筆 robot_state 的位置。
-//
-// 正式指派（2026-10-09，流程在 assignment_manager.hpp）：
-//   CBBA 得標只是候選，BT（地面端）保有最終的接受與中斷權。require_accept = true（狗）時：
-//   <ns>/assignment_request（ACTIVATE、RESERVE、RELEASE）→ BT → <ns>/assignment_response（接受／拒絕＋原因）；
-//   接受後才發 assigned_task。<ns>/exec_state（ExecState）是 BT 的執行狀態：能不能接新任務、能不能中斷、
-//   預估剩餘時間（排隊用）。require_accept = false（無人機的 BT 還沒好）跳過握手，其他檢查照常。
-//   task_result 的 task_id、assignment_version 必須是目前執行中的正式指派，不是就拒絕、任務狀態不變。
-//   每個開始執行的指派印一行分段量測（建立 → 排第一 → 請求 → 接受 → 發布 → BT 回報執行）。
+// 和 2026-10-09 版本（cbba_core 的 cbba_node）不同的地方：話題 assigned_task → current_task；
+// RobotState 的飛行狀態欄位改成 mode；TaskResult 的 assignment_version 改成 reason；
+// 拿掉 exec_state、assignment_request／response（握手）；assign_hold 0.6 → 0.4 s；vehicle_type → agent_type。
 //
 // 機號（agent_id）1～254：RobotState.agent_id 是 uint8。協定本身是 uint16（1～65534）。
+// 返航點（只用在出價時估返航的耗電）：第一筆 robot_state 的位置。
 //
-// 程序鎖（2026-10-09）：啟動時對 <lock_dir>/agentN.lock 加 flock（不等待），拿不到就拒絕啟動，
-// 從啟動持有到程序結束（程序死掉時核心自動釋放），不因任務完成、取消、切換而釋放。
-// 只有 cbba_node 用這把鎖；BT、Nav2 等其他節點不碰。lock_dir 要在同一台機器的所有容器共用
-// （docker 掛 /run/cbba），否則兩個容器各跑一個同機號的節點時鎖不到。
+// 程序鎖：啟動時對 <lock_dir>/agentN.lock 加 flock（不等待），拿不到就拒絕啟動，從啟動持有到程序結束。
+// lock_dir 要在同一台機器的所有容器共用（docker 掛 /run/cbba，CBBA_LOCK_DIR），否則兩個容器各跑一個同機號的節點時鎖不到。
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
-#include <cstring>
-#include <filesystem>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <map>
 #include <memory>
-#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
-#include <swarm_interfaces/msg/assignment_request.hpp>
-#include <swarm_interfaces/msg/assignment_response.hpp>
-#include <swarm_interfaces/msg/exec_state.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
@@ -78,16 +64,6 @@ namespace
 using RobotStateMsg = swarm_interfaces::msg::RobotState;
 using TaskMsg = swarm_interfaces::msg::Task;
 using TaskResultMsg = swarm_interfaces::msg::TaskResult;
-using ExecStateMsg = swarm_interfaces::msg::ExecState;
-using RequestMsg = swarm_interfaces::msg::AssignmentRequest;
-using ResponseMsg = swarm_interfaces::msg::AssignmentResponse;
-
-// 判斷 BT 的執行狀態有沒有在更新：本機的單調時間（不受對時影響）
-double steadyNow()
-{
-  using namespace std::chrono;
-  return duration<double>(steady_clock::now().time_since_epoch()).count();
-}
 
 std::string envOr(const char * name, const std::string & fallback)
 {
@@ -151,6 +127,28 @@ TaskMsg toMsg(const Task & t)
   m.status_stamp = toRosTime(t.status_stamp);
   return m;
 }
+
+const char * reasonName(std::uint8_t r)
+{
+  switch (r) {
+    case TaskResultMsg::NONE: return "NONE";
+    case TaskResultMsg::PERMANENT: return "PERMANENT";
+    case TaskResultMsg::TRANSIENT: return "TRANSIENT";
+    case TaskResultMsg::PREEMPTED: return "PREEMPTED";
+    case TaskResultMsg::STOPPED: return "STOPPED";
+  }
+  return "?";
+}
+
+const char * modeName(std::uint8_t m)
+{
+  switch (m) {
+    case RobotStateMsg::AUTO: return "AUTO";
+    case RobotStateMsg::MANUAL: return "MANUAL";
+    case RobotStateMsg::ESTOP: return "ESTOP";
+  }
+  return "?";
+}
 }  // namespace
 
 class CbbaNode : public rclcpp::Node
@@ -160,30 +158,32 @@ public:
   : Node("cbba_node")
   {
     // ---------- 載具 ----------
-    const int agent_id = declare_parameter<int>("agent_id", 0);
+    const int agent_id = declare_parameter<int>("agent_id", std::stoi(envOr("AGENT_ID", "50")));
     if (agent_id < 1 || agent_id > 254) {
       throw std::invalid_argument("agent_id must be 1~254 (0 is reserved for \"nobody\")");
     }
-    const std::string vehicle = declare_parameter<std::string>("vehicle_type", "uav");
-    if (vehicle != "uav" && vehicle != "ugv") {
-      throw std::invalid_argument("vehicle_type must be uav or ugv");
+    const std::string agent_type = declare_parameter<std::string>("agent_type", "UGV");
+    if (agent_type != "UAV" && agent_type != "UGV") {
+      throw std::invalid_argument("agent_type must be UAV or UGV");
     }
-    const bool uav = vehicle == "uav";
+    const bool uav = agent_type == "UAV";
     agent_id_ = static_cast<AgentId>(agent_id);
     acquireLock(declare_parameter<std::string>("lock_dir", defaultLockDir()), agent_id);
-    const std::string ns = declare_parameter<std::string>(
-      "ns", uav ? "uav" + std::to_string(agent_id) : "v60");
-    const std::string prefix = ns.empty() ? "" : "/" + ns;
+    // 空字串＝相對名稱，由 launch 的 namespace 決定（/v60/current_task …）；給了就是 /<ns>/…
+    const std::string ns = declare_parameter<std::string>("ns", "");
+    const auto topic = [&ns](const char * name) {
+        return ns.empty() ? std::string(name) : "/" + ns + "/" + name;
+      };
 
     participate_ = declare_parameter<std::string>("participate", "state");
     if (participate_ != "state" && participate_ != "always") {
       throw std::invalid_argument("participate must be state or always");
     }
     state_timeout_ = declare_parameter<double>("state_timeout", 1.5);
-    require_airborne_ = declare_parameter<bool>("require_airborne", true);
-    // 巡檢任務的 z 是巡檢高度；0 = 不調整（狗不接巡檢任務）
-    recon_altitude_ = declare_parameter<double>("recon_altitude", uav ? 5.0 : 0.0);
-    is_uav_ = uav;
+    // AIR_RECON 的 z 低於巡檢高度時抬到巡檢高度（地面處置任務不改）
+    recon_altitude_ = declare_parameter<double>("recon_altitude", 5.0);
+    // 失敗（reason 不是 PERMANENT）後多久不再對同一個任務出價（spec §2.3 規則 3）
+    failure_exclude_sec_ = declare_parameter<double>("failure_exclude_sec", 60.0);
 
     AgentState s;
     s.id = agent_id_;
@@ -191,7 +191,7 @@ public:
     if (uav) {
       s.cruise_speed = 5.0;   // PX4 多旋翼的 MPC_XY_CRUISE
     } else {
-      // 狗的能量模型是佔位值（未校正）：步行約 1 m/s；續航、耗電要用狗的實測資料換掉（見 doc/ugv_tuning.md）
+      // 狗的能量模型是佔位值（未校正）：步行約 1 m/s；續航、耗電要用狗的實測資料換掉（見 cbba_core/doc/ugv_tuning.md）
       s.safety_reserve = 20.0;
       s.energy_per_meter = 0.1;
       s.hover_energy_per_sec = 0.05;
@@ -233,14 +233,11 @@ public:
     udp.interface_ip = declare_parameter<std::string>("mesh_ip", envOr("MESH_IP", ""));
 
     AssignmentConfig assign;
-    // 狗的 BT 要接受才執行；無人機的 BT 還沒好，先跳過握手（BT 完成後改成 true）
-    assign.require_accept = declare_parameter<bool>("require_accept", !uav);
-    assign.assign_hold = declare_parameter<double>("assign_hold", assign.assign_hold);
-    assign.accept_timeout = declare_parameter<double>("accept_timeout", assign.accept_timeout);
+    assign.require_accept = false;   // 不握手：直接發 current_task，BT 的哨兵負責中斷（2026-10-12）
+    assign.assign_hold = declare_parameter<double>("assign_hold", 0.4);   // spec §2.3 規則 1：2 個廣播週期
     assign.max_queued_fires = static_cast<std::size_t>(
       declare_parameter<int>("max_queued_fires", static_cast<int>(assign.max_queued_fires)));
     assign.max_queue_wait = declare_parameter<double>("max_queue_wait", assign.max_queue_wait);
-    exec_timeout_ = declare_parameter<double>("exec_timeout", 1.5);
     const int tick_ms = declare_parameter<int>("tick_ms", 10);
 
     state_ = s;
@@ -258,50 +255,37 @@ public:
           }
         });
 
-    // ---------- 機內話題 ----------
-    assigned_pub_ = create_publisher<TaskMsg>(
-      prefix + "/assigned_task", rclcpp::QoS(1).reliable().transient_local());
-    request_pub_ = create_publisher<RequestMsg>(prefix + "/assignment_request", rclcpp::QoS(20).reliable());
-    response_sub_ = create_subscription<ResponseMsg>(
-      prefix + "/assignment_response", rclcpp::QoS(20).reliable(),
-      [this](ResponseMsg::ConstSharedPtr msg) {
-        assignments_->onResponse(msg->task_id, msg->assignment_version, msg->accepted,
-          static_cast<RejectReason>(msg->reason), msg->detail, wallNow());
-      });
-    exec_sub_ = create_subscription<ExecStateMsg>(
-      prefix + "/exec_state", rclcpp::QoS(10).best_effort(),
-      [this](ExecStateMsg::ConstSharedPtr msg) {last_exec_ = *msg; exec_rx_ = steadyNow(); have_exec_ = true;});
-
+    // ---------- 機內話題（QoS 和機器狗端的 task_manager 一致）----------
+    current_pub_ = create_publisher<TaskMsg>(topic("current_task"), rclcpp::QoS(1).reliable().transient_local());
     if (participate_ == "state") {
-      // 用什麼 QoS 發都收得到：best effort 的訂閱可以接 reliable 和 best effort 的發布
+      // best effort 的訂閱可以接 reliable 和 best effort 的發布（BT 用 reliable）
       state_sub_ = create_subscription<RobotStateMsg>(
-        prefix + "/robot_state", rclcpp::QoS(10).best_effort(),
+        topic("robot_state"), rclcpp::QoS(10).best_effort(),
         [this](RobotStateMsg::ConstSharedPtr msg) {onRobotState(*msg);});
     }
     // 任務結果、新任務只有一則，掉了就沒有了：用 reliable（發的一方也要用 reliable）
     result_sub_ = create_subscription<TaskResultMsg>(
-      prefix + "/task_result", rclcpp::QoS(20).reliable(),
+      topic("task_result"), rclcpp::QoS(20).reliable(),
       [this](TaskResultMsg::ConstSharedPtr msg) {onTaskResult(*msg);});
     // new_task 可能一次來很多（整區巡檢點）：佇列要夠深，否則 callback 來不及處理時舊的會被蓋掉
     new_task_sub_ = create_subscription<TaskMsg>(
-      prefix + "/new_task", rclcpp::QoS(256).reliable(),
+      topic("new_task"), rclcpp::QoS(256).reliable(),
       [this](TaskMsg::ConstSharedPtr msg) {onNewTask(*msg);});
     cancel_sub_ = create_subscription<TaskMsg>(
-      prefix + "/cancel_task", rclcpp::QoS(20).reliable(),
+      topic("cancel_task"), rclcpp::QoS(20).reliable(),
       [this](TaskMsg::ConstSharedPtr msg) {onCancelTask(*msg);});
 
     timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms), [this]() {step();});
 
     RCLCPP_INFO(get_logger(),
-      "agent %d（%s）：UDP %s:%u（網卡 %s），session %016llX；話題 %s/{robot_state,exec_state,task_result,"
-      "new_task,cancel_task,assigned_task,assignment_request,assignment_response}；BT 要接受：%s；參與出價：%s",
-      agent_id, uav ? "UAV" : "UGV", udp.group.c_str(), udp.port,
+      "agent %d（%s）：UDP %s:%u（網卡 %s），session %016llX；話題 %s %s %s %s；參與出價：%s",
+      agent_id, agent_type.c_str(), udp.group.c_str(), udp.port,
       udp.interface_ip.empty() ? "系統預設" : udp.interface_ip.c_str(),
-      static_cast<unsigned long long>(comm_->sessionId()), prefix.c_str(),
-      assign.require_accept ? "是" : "否（跳過握手）",
+      static_cast<unsigned long long>(comm_->sessionId()), current_pub_->get_topic_name(),
+      state_sub_ ? state_sub_->get_topic_name() : "（不訂閱 robot_state）",
+      result_sub_->get_topic_name(), new_task_sub_->get_topic_name(),
       participate_ == "always" ? "一律（位置與電量來自參數）" :
-      (uav ? (require_airborne_ ? "robot_state 有在更新、已解鎖且離地" : "robot_state 有在更新、已解鎖") :
-      "robot_state 有在更新"));
+      "robot_state 在 state_timeout 內有更新且 mode = AUTO");
   }
 
   ~CbbaNode() override
@@ -358,7 +342,12 @@ private:
       RCLCPP_INFO(get_logger(), "返航點 map (%.1f, %.1f, %.1f)，電量 %.0f%%",
         state_.home.x, state_.home.y, state_.home.z, state_.battery);
     }
-    last_robot_state_ = msg;
+    if (have_state_ && msg.mode != mode_) {
+      // 格式照機器狗端（伯宇的 e2e 腳本 grep「mode 0 → 1」），名稱補在後面
+      RCLCPP_INFO(get_logger(), "mode %u → %u（%s → %s）", mode_, msg.mode, modeName(mode_),
+        modeName(msg.mode));
+    }
+    mode_ = msg.mode;
     have_state_ = true;
     last_state_ = wallNow();
   }
@@ -371,7 +360,7 @@ private:
     t.type = static_cast<TaskType>(msg.type);
     t.position = {msg.position.x, msg.position.y, msg.position.z};
     // BT 常給地面的座標（z = 0）。低於巡檢高度時改成巡檢高度，否則每段距離都多算到地面的高度差，
-    // 耗電也估錯。要和執行者（task_executor 的 altitude）一致。地面處置任務不改
+    // 耗電也估錯。要和執行者（BT 的巡檢高度）一致。地面處置任務不改
     if (t.type == TaskType::AIR_RECON && t.position.z < recon_altitude_) {
       t.position.z = recon_altitude_;
     }
@@ -392,26 +381,37 @@ private:
     }
   }
 
-  // 只接受目前執行中的正式指派（assigned_task 上的那一個、同一個版本）的回報
+  // 只接受目前 current_task 上的任務的回報；指派版本由節點自己補（BT 不用帶）
   void onTaskResult(const TaskResultMsg & msg)
   {
     const std::string name = taskName(msg.task_id);
     const double now = wallNow();
+    // 格式照機器狗端（e2e 腳本 grep「reason 2，detail「…」」），reason 的名稱只能補在最後
+    RCLCPP_INFO(get_logger(), "task_result %s：success %d，reason %u，detail「%s」（%s）",
+      name.c_str(), msg.success ? 1 : 0, msg.reason, msg.detail.c_str(), reasonName(msg.reason));
     const auto & active = assignments_->active();
-    const ReportCheck check = assignments_->onResult(msg.task_id, msg.assignment_version, msg.success, now);
-    if (check != ReportCheck::ACCEPTED) {
-      RCLCPP_WARN(get_logger(), "任務 %s v%llu 的回報拒絕（%s）：目前執行中的是 %s，任務狀態不變",
-        name.c_str(), static_cast<unsigned long long>(msg.assignment_version), toString(check),
-        active ? (taskName(active->task) + " v" + std::to_string(active->version)).c_str() : "無");
+    if (!active || active->task != msg.task_id) {
+      RCLCPP_WARN(get_logger(), "任務 %s 的回報拒絕：不是目前 current_task 上的任務（目前是 %s），任務狀態不變",
+        name.c_str(), active ? taskName(active->task).c_str() : "無");
       return;
     }
+    // spec §2.3 規則 3：PERMANENT 這台永久不再對它出價，其他（TRANSIENT／PREEMPTED／STOPPED）failure_exclude_sec 秒
+    const double exclude = msg.reason == TaskResultMsg::PERMANENT ? kInf : failure_exclude_sec_;
+    const ReportCheck check = assignments_->onResult(msg.task_id, active->version, msg.success, now, exclude);
+    if (check != ReportCheck::ACCEPTED) {
+      RCLCPP_WARN(get_logger(), "任務 %s 的回報拒絕（%s），任務狀態不變", name.c_str(), toString(check));
+      return;
+    }
+    // 括號內照機器狗端放 detail（比 reason 名稱具體）；BT 沒給 detail 時用 reason 名稱
+    const char * why = msg.detail.empty() ? reasonName(msg.reason) : msg.detail.c_str();
     if (msg.success) {
       reported_at_[msg.task_id] = now;
       RCLCPP_INFO(get_logger(), "任務 %s 完成，等待全隊確認", name.c_str());
-    } else if (msg.detail.empty()) {
-      RCLCPP_WARN(get_logger(), "任務 %s 失敗，交回競標池", name.c_str());
+    } else if (std::isinf(exclude)) {
+      RCLCPP_WARN(get_logger(), "任務 %s 失敗（%s），交回競標池，這台不再接", name.c_str(), why);
     } else {
-      RCLCPP_WARN(get_logger(), "任務 %s 失敗（%s），交回競標池", name.c_str(), msg.detail.c_str());
+      RCLCPP_WARN(get_logger(), "任務 %s 失敗（%s），交回競標池，這台 %.0f s 內不接",
+        name.c_str(), why, exclude);
     }
   }
 
@@ -425,23 +425,15 @@ private:
     }
   }
 
-  // robot_state → 參與出價、AGENT_STATE 的旗標
+  // robot_state → 參與出價（spec §2.3 規則 2、4）。AGENT_STATE 的飛行狀態旗標不再有來源，送 false
   void updateStatus(double now)
   {
-    bool participate = true;
     VehicleStatus status;
+    bool participate = true;
     if (participate_ == "state") {
       const bool fresh = have_state_ && now - last_state_ <= state_timeout_;
-      const auto & m = last_robot_state_;
       status.telemetry_ok = fresh;
-      status.flight_state_valid = fresh && m.flight_state_valid;
-      status.armed = m.armed;
-      status.offboard = m.offboard;
-      status.landed = m.landed;
-      participate = fresh;
-      if (is_uav_) {
-        participate = status.flight_state_valid && m.armed && (!require_airborne_ || !m.landed);
-      }
+      participate = fresh && mode_ == RobotStateMsg::AUTO;
     } else {
       status.telemetry_ok = true;
     }
@@ -453,7 +445,7 @@ private:
   }
 
   // ===========================================================================
-  // 每個 tick：收 UDP → 協定層 → 送 UDP
+  // 每個 tick：收 UDP → 協定層 → 送 UDP → 指派流程 → current_task
   // ===========================================================================
   void step()
   {
@@ -470,57 +462,34 @@ private:
       }
     }
 
-    // BT 的執行狀態（逾時用本機單調時間判斷）→ 指派流程
-    ExecInput exec;
-    exec.fresh = have_exec_ && steadyNow() - exec_rx_ <= exec_timeout_;
-    exec.execution_state = last_exec_.execution_state;
-    exec.preemptible = last_exec_.preemptible;
-    exec.remaining_time = last_exec_.estimated_remaining_time;
-    exec.has_active = last_exec_.has_active;
-    exec.active_task = last_exec_.active_task_id;
-    exec.active_version = last_exec_.active_assignment_version;
-    assignments_->setExec(exec, now);
+    assignments_->setExec(ExecInput{}, now);   // 不握手、沒有 BT 的執行狀態
     assignments_->step(now);
+    assignments_->takeRequests();              // 不握手：沒有要送給 BT 的請求
     publishOutputs(now);
     report(now);
   }
 
-  // 指派流程要送給 BT 的：請求、assigned_task、量測
   void publishOutputs(double now)
   {
-    for (const AssignmentRequest & r : assignments_->takeRequests()) {
-      RequestMsg msg;
-      msg.kind = static_cast<std::uint8_t>(r.kind);
-      msg.preempt = r.preempt;
-      msg.task = toMsg(r.task);
-      msg.task.assignment_version = r.version;
-      request_pub_->publish(msg);
-    }
     if (assignments_->takeAssignedChanged()) {
       TaskMsg msg;
       const auto & active = assignments_->active();
       if (active && comm_->agent().tasks().count(active->task) > 0) {
         const Task & t = comm_->agent().tasks().at(active->task);
         msg = toMsg(t);
-        msg.assignment_version = active->version;
-        RCLCPP_INFO(get_logger(), "指派給 BT：%s v%llu (%.1f, %.1f, %.1f)", taskName(t.id).c_str(),
-          static_cast<unsigned long long>(active->version), t.position.x, t.position.y, t.position.z);
+        RCLCPP_INFO(get_logger(), "指派給 BT：%s (%.1f, %.1f, %.1f)", taskName(t.id).c_str(),
+          t.position.x, t.position.y, t.position.z);
       } else {
         msg.status = TaskMsg::CANCELLED;   // task_id = 0：沒有任務
         msg.status_stamp = toRosTime(now);
         RCLCPP_INFO(get_logger(), "指派給 BT：無");
       }
-      assigned_pub_->publish(msg);
+      current_pub_->publish(msg);
     }
     for (const AssignmentTiming & t : assignments_->takeTimings()) {
       const auto ms = [](double a, double b) {return a >= 0.0 && b >= 0.0 ? (b - a) * 1e3 : -1.0;};
-      const double end = t.running >= 0.0 ? t.running : t.assigned;
-      RCLCPP_INFO(get_logger(),
-        "量測 %s v%llu%s：建立→排第一 %.0f ms、排第一→請求 %.0f ms（assign_hold）、請求→接受 %.0f ms、"
-        "接受→發布 %.0f ms、發布→BT 執行 %.0f ms；建立→%s %.0f ms",
-        taskName(t.task).c_str(), static_cast<unsigned long long>(t.version), t.preempt ? "（中斷）" : "",
-        ms(t.created, t.head), ms(t.head, t.request), ms(t.request, t.accept), ms(t.accept, t.assigned),
-        ms(t.assigned, t.running), t.running >= 0.0 ? "BT 執行" : "發布", ms(t.created, end));
+      RCLCPP_INFO(get_logger(), "量測 %s：建立→排第一 %.0f ms、排第一→發布 %.0f ms（assign_hold）；建立→發布 %.0f ms",
+        taskName(t.task).c_str(), ms(t.created, t.head), ms(t.head, t.assigned), ms(t.created, t.assigned));
     }
   }
 
@@ -547,7 +516,7 @@ private:
         RCLCPP_INFO(get_logger(), "任務 %s 已確認完成（回報後 %.2f s）",
           taskName(id).c_str(), now - it->second);
       } else {
-        RCLCPP_INFO(get_logger(), "任務 %s 已確認完成（收到 TASK_CLOSE）", taskName(id).c_str());
+        RCLCPP_INFO(get_logger(), "任務 %s 已確認完成（收到完成證明）", taskName(id).c_str());
       }
     }
 
@@ -557,18 +526,15 @@ private:
         comm_->aliveNeighbors(now).size());
     }
     last_converged_ = converged;
-    // 鄰居的 AGENT_STATE 旗標有變時印一次（真實的 armed／offboard／landed）
+    // 鄰居開始／停止參與出價時印一次
     for (const auto & [agent, n] : comm_->neighbors()) {
       if (!n.has_status) {
         continue;
       }
-      const std::uint8_t flags = wire::packFlags(n.flags);
-      const auto last = neighbor_flags_.find(agent);
-      if (last == neighbor_flags_.end() || last->second != flags) {
-        neighbor_flags_[agent] = flags;
-        RCLCPP_INFO(get_logger(), "鄰居 %u：參與 %d、遙測 %d、飛行狀態有效 %d、armed %d、offboard %d、landed %d",
-          agent, n.flags.participating, n.flags.telemetry_ok, n.flags.flight_state_valid,
-          n.flags.armed, n.flags.offboard, n.flags.landed);
+      const auto last = neighbor_participating_.find(agent);
+      if (last == neighbor_participating_.end() || last->second != n.flags.participating) {
+        neighbor_participating_[agent] = n.flags.participating;
+        RCLCPP_INFO(get_logger(), "鄰居 %u：%s", agent, n.flags.participating ? "參與出價" : "不參與出價");
       }
     }
     // 鎖著、但持有者失聯的任務：只標記待確認，不重新指派（避免原載具還在執行）
@@ -604,25 +570,20 @@ private:
   }
 
   int lock_fd_{-1};
-  AgentId agent_id_{1};
-  bool is_uav_{true};
+  AgentId agent_id_{50};
   std::string participate_{"state"};
   double state_timeout_{1.5};
-  bool require_airborne_{true};
   double recon_altitude_{5.0};
-  double exec_timeout_{1.5};
+  double failure_exclude_sec_{60.0};
 
   AgentState state_;
   std::unique_ptr<CbbaComm> comm_;
   std::unique_ptr<UdpLink> udp_;
   std::unique_ptr<AssignmentManager> assignments_;
-  ExecStateMsg last_exec_;
-  bool have_exec_{false};
-  double exec_rx_{0.0};
   std::vector<std::pair<TaskId, AgentId>> last_lost_;
   bool have_state_{false};
   double last_state_{0.0};
-  RobotStateMsg last_robot_state_;
+  std::uint8_t mode_{RobotStateMsg::AUTO};
 
   std::vector<TaskId> last_path_;
   bool last_converged_{false};
@@ -632,12 +593,9 @@ private:
   int last_rejected_{0};
   int last_rejected_closes_{0};
   int last_aborted_{0};
-  std::map<AgentId, std::uint8_t> neighbor_flags_;   // 上次印出的鄰居旗標
+  std::map<AgentId, bool> neighbor_participating_;   // 上次印出的鄰居參與狀態
 
-  rclcpp::Publisher<TaskMsg>::SharedPtr assigned_pub_;
-  rclcpp::Publisher<RequestMsg>::SharedPtr request_pub_;
-  rclcpp::Subscription<ResponseMsg>::SharedPtr response_sub_;
-  rclcpp::Subscription<ExecStateMsg>::SharedPtr exec_sub_;
+  rclcpp::Publisher<TaskMsg>::SharedPtr current_pub_;
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;

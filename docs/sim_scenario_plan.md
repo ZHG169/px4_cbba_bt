@@ -1,6 +1,6 @@
 # 模擬任務測試環境（規劃）
 
-2026-10-07 · 狀態：2026-10-10 使用者決定了做法（見「五、決定」），開始實作
+2026-10-07 · 狀態：2026-10-10 使用者決定了做法（見「五、決定」）；**已實作**（見「七、實作」），Gazebo 抽驗和電池設定（B6）還沒做
 
 使用者提出的 Gazebo 測試場景與電池權重測試，以及分析、要先決定的事。
 
@@ -26,7 +26,7 @@
 | AprilTag 辨識＋信心度門檻 | ❌ 還沒開始；Gazebo 場景也還沒有方塊和 tag |
 | 判定火警（BT） | ❌ BT 還沒好 |
 | 廣播地面處置任務 | ✅ 協定已支援：對 `/uavN/new_task` 發 `type = GROUND_INTERVENTION`，無人機不出價，狗接（`cbba_task.sh ground`） |
-| 機器狗接任務 | ✅ 通用 `cbba_node`（`vehicle_type:=ugv`，dog-integration 分支），還沒在真的狗上測 |
+| 機器狗接任務 | ✅ 統一版 `swarm_cbba/cbba_node`（`agent_type: UGV`），還沒在真的狗上測 |
 
 ---
 
@@ -146,7 +146,7 @@
 | terminal 輸入編號插入 | `docker/scripts/patrol_scenario.sh`（sim 容器）：互動輸入 `g`／`1`～`5`／`r`；`insert`、`replay`、`reset` | ✅ tag 生成、刪除、重放在隔離的 Gazebo 測過；發 `new_task` 要接上真的 cbba_node 才測得到 |
 | 離線任務模擬 | `cbba_core/mission_sim.*`：每台跑真的 CbbaComm＋AssignmentManager（協定版本 2 封包）＋假的 BT＋PX4 式電池；`test_mission_sim` 8 項 | ✅ |
 | 權重統計 | `cbba_sim insert <任務點檔>`：每個權重同一組亂數（插入時刻、耗電誤差、網路），輸出 summary／trials／tasks／agents.csv 和 `schedules/trial_NNN.csv`（給 replay） | ✅ 500 次約 13 s |
-| SITL 步驟 | `cbba_core/doc/sitl_test.md` 第 6 節 | 還沒在 SITL 跑 |
+| SITL 步驟 | `cbba_core/doc/sitl_test.md` 第 8 節 | 還沒在 SITL 跑 |
 
 模擬怎麼判斷「接了沒飛到」（`wrong_accepts`）：
 - 電池照 PX4 SITL：**依時間線性下降**，待命也會耗電；出價的能量模型只估「飛行＋停留」，再加上每次試驗每台 ±`--drain-error`（預設 10%）的誤差，
@@ -169,5 +169,5 @@
 - 權重越高，工作越往電量高的 uav1 集中，接錯從 21 降到 15；接錯全部是撤銷、都發生在 uav2、uav3，任務都被別台接手完成。
 - 這個場地（點之間 30～50 m）對 300 s 的續航太小，電池不是主要限制，四類結果看不出差別。要比較權重，
   要讓電池更緊：縮短續航（`--endurance`）、拉長插入時段（`--window`，待命耗電）、加大耗電誤差，或把點移遠。**這幾個值待使用者決定。**
-- Gazebo 只能用不同的 `SIM_BAT_DRAIN` 做出「電量不同」（PX4 的模擬電池都從 100% 開始），對照的離線設定見 `sitl_test.md` 第 6 節。
+- Gazebo 只能用不同的 `SIM_BAT_DRAIN` 做出「電量不同」（PX4 的模擬電池都從 100% 開始），對照的離線設定見 `sitl_test.md` 第 8 節。
 

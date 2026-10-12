@@ -32,14 +32,14 @@ mkdir -p "${LOG_DIR}"
 
 EXECUTOR="${EXECUTOR:-bt}"
 case "${EXECUTOR}" in
-    bt) NEED_PKGS="cbba_core px4_waypoint_node uav_px4_bt apriltag_fire_detector" ;;
-    task_executor) NEED_PKGS="cbba_core px4_waypoint_node" ;;
+    bt) NEED_PKGS="swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector" ;;
+    task_executor) NEED_PKGS="swarm_cbba px4_waypoint_node" ;;
     *) echo "[cbba_uav] EXECUTOR 只能是 bt 或 task_executor"; exit 1 ;;
 esac
 for pkg in ${NEED_PKGS}; do
     if ! ros2 pkg prefix "${pkg}" >/dev/null 2>&1; then
         echo "[cbba_uav] 找不到 ${pkg}，先在 uav1 編譯："
-        echo "  colcon build --symlink-install --packages-select swarm_interfaces cbba_core px4_waypoint_node uav_px4_bt apriltag_fire_detector"
+        echo "  colcon build --symlink-install --packages-select swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector"
         exit 1
     fi
 done
@@ -96,8 +96,10 @@ fi
 ros2 run px4_waypoint_node px4_state_bridge --ros-args -r __node:="uav${UAV_ID}_px4_state_bridge" \
     -p agent_id:="${UAV_ID}" -p px4_ns:="uav${UAV_ID}" 2>&1 | prefix state &
 PIDS+=($!)
-ros2 run cbba_core cbba_node --ros-args -r __node:="uav${UAV_ID}_cbba_node" \
-    -p agent_id:="${UAV_ID}" -p vehicle_type:=uav -p ns:="uav${UAV_ID}" \
+# 統一版 cbba_node（swarm_cbba，2026-10-12）：namespace 給 /uavN、參數用 config/cbba_uav.yaml（和機器狗端相同的寫法）
+ros2 run swarm_cbba cbba_node --ros-args -r __ns:="/uav${UAV_ID}" -r __node:="uav${UAV_ID}_cbba_node" \
+    --params-file "$(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_uav.yaml" \
+    -p agent_id:="${UAV_ID}" \
     -p cruise_speed:="${SPEED}" -p recon_altitude:="${ALT}" \
     -p hover_energy_per_sec:="${HOVER}" -p energy_per_meter:="${PER_M}" "$@" 2>&1 | prefix cbba &
 PIDS+=($!)

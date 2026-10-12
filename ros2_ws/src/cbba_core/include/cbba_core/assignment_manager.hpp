@@ -104,7 +104,9 @@ public:
   void onResponse(TaskId task, std::uint64_t version, bool accepted, RejectReason reason,
     const std::string & detail, double now);
   // BT 的任務結果：要是目前執行中的任務、版本
-  ReportCheck onResult(TaskId task, std::uint64_t version, bool success, double now);
+  // 失敗時 exclude_sec 秒內不再對它出價（kInf = 永久；節點依 TaskResult.reason 決定）
+  ReportCheck onResult(TaskId task, std::uint64_t version, bool success, double now,
+    double exclude_sec = kInf);
 
   std::vector<AssignmentRequest> takeRequests();
   bool takeAssignedChanged();   // assigned_task 要重發（內容是 active()）

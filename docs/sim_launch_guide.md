@@ -10,6 +10,7 @@
 | [C. 巡檢＋隨機插入](#c-巡檢隨機插入patrol_site) | terminal 輸入編號插入、電池權重抽驗 | `patrol_site`＋BT |
 | [D. 弱網](#d-弱網mesh_tc) | 掉包 0～70 %（第 5 週） | 任一個上面的測試＋`mesh_tc.sh` |
 | [E. 離線模擬](#e-離線模擬不開-gazebo) | 電池權重 100 次、收斂統計 | 只要 `cbba-robot` 映像 |
+| [F. 自動整合測試](#f-自動整合測試itest) | 一個指令跑完通訊（C0～C8）或 UAV 整串（U1～U6），自動判斷通過與否 | 主機執行 `docker/itest/itest.py` |
 
 ---
 
@@ -42,7 +43,7 @@ source install/setup.bash     # 已經開著的 terminal 都要重新 source
 | `SIM_BAT_DRAIN` | 900 | PX4 模擬電池的續航（秒）；`cbba_uav.sh` 用它算能量模型。要各台電量不同就各台設不同值 |
 | `SIM_BAT_MIN_PCT` | 20 | PX4 模擬電池最低停在這裡（= BT 返航門檻） |
 | `CBBA_SPEED`、`CBBA_ALTITUDE` | 5 m/s、5 m | cbba_node 的出價和執行者的飛行一致 |
-| `CBBA_WORLD` | （PX4 預設場景） | `fire_site`、`patrol_site`（只對 `px4_sitl.sh 1` 有效） |
+| `CBBA_WORLD` | （PX4 預設場景） | `fire_site`、`patrol_site`：第 1 台設；之後的台不用設，`px4_sitl.sh` 會自動加入正在跑的場景（2026-10-11 起） |
 | `EXECUTOR` | `bt` | `bt` = `uav_px4_bt`＋`apriltag_fire_detector`；`task_executor` = 舊的簡易執行者 |
 
 ---
@@ -55,7 +56,7 @@ source install/setup.bash     # 已經開著的 terminal 都要重新 source
 | N+1 | `sim` | `px4_sitl.sh 1`，再開一個 terminal `px4_sitl.sh 2`… |
 | 最後 | `uav1` | `cbba_task.sh new 1 1 10 5`（uav1 建立任務 00010001 在 (10, 5)） |
 
-確認：每台 `[cbba] 開始參與出價`、`收斂：0 個任務，N−1 個鄰居`。之後照 `sitl_test.md` 第 2～4 節
+確認：每台 `[cbba] 開始參與出價`、`收斂：0 個任務，N−1 個鄰居`。之後照 `sitl_test.md` 第 2、4～6 節
 （分配、`cbba_task.sh fail`、取消、關掉一台 PX4 或整個容器）。
 task_executor 沒有避碰：同高度會撞機，可以每台 `EXEC_ARGS="-p altitude:=5.0／7.0／9.0"` 分層。
 
@@ -77,22 +78,21 @@ task_executor 沒有避碰：同高度會撞機，可以每台 `EXEC_ARGS="-p al
 - 誘餌 tag 7 看得到、但不觸發。
 - `ros2 topic echo /uav1/fire_detection` 看偵測結果（tag_id、confidence、frames、position）。
 
-**假狗**（沒有真的狗、只看地面任務會不會分給狗）：gcs 容器在 mesh 上，可以跑狗的 cbba_node。
-沒有狗的 BT，所以關掉握手：
+**假狗**（沒有真的狗、只看地面任務會不會分給狗）：gcs 容器在 mesh 上，可以跑狗的 cbba_node（和伯宇的用法相同）：
 
 ```bash
-# gcs terminal 1
-ros2 run cbba_core cbba_node --ros-args -r __node:=v60_cbba_node \
-  -p vehicle_type:=ugv -p agent_id:=50 -p require_accept:=false
-# gcs terminal 2：狗的狀態（2 Hz，位置用 map ENU）
+# gcs terminal 1：狗的 CBBA（預設 yaml 就是 cbba_v60.yaml，機號 50）
+ros2 launch swarm_cbba cbba.launch.py namespace:=v60
+# gcs terminal 2：假裝狗的 BT 送狀態（2 Hz，位置用 map ENU，mode 0 = AUTO 才出價）
 ros2 topic pub -r 2 /v60/robot_state swarm_interfaces/msg/RobotState \
-  "{agent_id: 50, position: {x: 0.0, y: -10.0, z: 0.0}, battery: 90.0}"
+  "{agent_id: 50, position: {x: 0.0, y: -10.0, z: 0.0}, battery: 90.0, mode: 0}"
 # gcs terminal 3：看指派給狗的任務
-ros2 topic echo /v60/assigned_task --qos-durability transient_local --qos-reliability reliable
+ros2 topic echo /v60/current_task --qos-durability transient_local --qos-reliability reliable
+# 回報完成（task_id 照 current_task 上的）
+ros2 topic pub --once -w 1 /v60/task_result swarm_interfaces/msg/TaskResult "{task_id: <id>, success: true, reason: 0}"
 ```
 
-火警成立後，狗的 `assigned_task` 應該收到那個 GROUND_INTERVENTION；回報完成照 `ugv_test.md`（要帶 `assignment_version`）。
-要測握手（狗預設 `require_accept` true）就去掉 `-p require_accept:=false`，用 `ugv_test.md` 的假 BT 回覆 `assignment_request`。
+火警成立後，狗的 `current_task` 應該收到那個 GROUND_INTERVENTION。
 
 ## C. 巡檢＋隨機插入（patrol_site）
 
@@ -159,6 +159,18 @@ ros2 run cbba_core cbba_sim sweep random --trials 200 --out ~/cbba_out/sweep
 `docs/sim_scenario_plan.md` 第七節。
 
 ---
+
+## F. 自動整合測試（itest）
+
+只看話題和網路、不看 log，換成別人寫的 CBBA Node／BT 時只改 `docker/itest/config.json`。說明在 `docker/itest/README.md`。
+
+```bash
+cd ~/CBBA_BT                         # 主機，容器要先開好、套件要先編譯
+python3 docker/itest/itest.py comm   # CBBA 之間的通訊，約 2 分鐘
+python3 docker/itest/itest.py uav    # UAV 整串（fire_site），約 8～10 分鐘
+```
+
+結果在 `docker/itest/out/<時間>_<組>/report.md`。容器裡已經有在跑的東西時會停下來，加 `--kill-existing` 先關掉。
 
 ## 結束與清理
 

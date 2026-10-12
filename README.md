@@ -21,27 +21,27 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 - 機間協商走 mesh 上的 **UDP multicast**，協定版本 2（2026-10-09，每筆任務資料帶 task_id；不相容於「機間通訊封包規格」
   2026-10-06，見 `ros2_ws/src/cbba_core/doc/protocol.md`）。DDS 只用在機內（PX4、BT）。可用 `mesh_tc.sh` 模擬丟包與延遲。
 
-每台載具（無人機、機器狗）跑**同一個 `cbba_node`**（`vehicle_type:=uav`／`ugv`），它不依賴 PX4、BT、Nav2，
+每台載具（無人機、機器狗）跑**同一個 `swarm_cbba/cbba_node`**（`agent_type: UAV／UGV`），它不依賴 PX4、BT、Nav2，
 只透過固定格式的話題（`swarm_interfaces`）和機上的 BT 溝通；機間走固定格式的 UDP 封包。
 
 ```
             ┌──────────── 每台載具的機上電腦 ────────────┐
  其他載具 ◄═UDP═► cbba_node ◄─ robot_state ── 狀態轉接（無人機：px4_state_bridge）
  （協定版本 2）       │  ▲
-          assigned_task │  │ task_result、exec_state、new_task
-     （狗：assignment_request／response 接受握手）
+           current_task │  │ task_result、new_task
                       ▼  │
                        BT（無人機：uav_px4_bt；狗：V60 的 BT）→ PX4／Nav2
             └────────────────────────────────────────────┘
 ```
 
-話題與規則見 `ros2_ws/src/cbba_core/README.md`、`swarm_interfaces/README.md`。
+話題與規則見 `ros2_ws/src/swarm_cbba/README.md`（2026-10-12 起照機器狗端的介面）、`swarm_interfaces/README.md`。
+**機器狗端的使用說明**（換哪些套件、怎麼編譯、驗收、和舊版的差異）：`ros2_ws/src/swarm_cbba/README_v60.md`。
 
 ## 目錄
 
 ```
-docs/                         模擬測試的開啟方式（sim_launch_guide.md）、第 4～6 週和程式的差異（week4_6_status.md）、
-                              巡檢＋隨機插入與電池權重測試（sim_scenario_plan.md）、協定版本 2 的變更通知
+docs/                         跨套件的文件 → docs/README.md：模擬測試的開啟方式（sim_launch_guide.md）、
+                              目前進度與缺失（progress.md）、巡檢＋隨機插入與電池權重（sim_scenario_plan.md）、協定版本 2 的變更通知
 docker/                       模擬環境（Dockerfile、啟動腳本、Fast DDS、mesh tc）→ docker/README.md
 ├── gz/                       Gazebo 場景（fire_site、patrol_site）與 AprilTag 模型
 └── scripts/                  cbba_uav.sh、px4_sitl.sh、gz_bridge.sh、cbba_task.sh、patrol_scenario.sh、mesh_tc.sh…
@@ -49,8 +49,8 @@ ros2_ws/src/
 ├── swarm_interfaces/         ROS 訊息（Task 等）→ swarm_interfaces/README.md
 ├── cbba_core/                CBBA 核心、機間封包、協定層、通用 cbba_node（無人機和狗共用、不依賴 PX4）、
 │   │                         離線模擬、單元測試 → cbba_core/README.md
-│   ├── doc/                  封包規格書、參數說明（parameters.md）、SITL 測試步驟（sitl_test.md）、
-│   │                         機器狗的執行與測試（ugv_test.md、ugv_tuning.md）
+│   ├── doc/                  技術文件 → doc/README.md：協定（protocol.md）、參數（parameters.md）、SITL 手動測試（sitl_test.md）、
+│   │                         機器狗（ugv_test.md、ugv_tuning.md）、公式設計、實驗結果、外部規格書
 │   └── test/results/         測試結果（只保留圖片）
 ├── px4_waypoint_node/        PX4 端：takeoff_hover 起飛懸停、task_executor（簡易執行者）、
 │                             px4_state_bridge（PX4 → cbba_node 的 RobotState）→ px4_waypoint_node/README.md
@@ -105,6 +105,9 @@ source install/setup.bash
 cd ~/CBBA_BT/ros2_ws
 colcon test --packages-select cbba_core --event-handlers console_direct+
 
+# cbba_node 的回歸測試（不用 PX4，約 3 分鐘）：機器狗端的 T1～T10、三隻狗搶標（swarm_cbba/README.md）
+bash src/swarm_cbba/test/g2_e2e.sh
+
 SCN=src/cbba_core/scenarios
 ros2 run cbba_core cbba_sim run $SCN/fire_3uav.csv --loss 0 --out /tmp/fire_3uav
 
@@ -127,15 +130,15 @@ python3 src/cbba_core/scripts/animate_results.py mission /tmp/fire_3uav $SCN/fir
 | Ad-hoc mesh 與 tc 弱網環境 | ✅ |
 | 分散式起飛懸停（驗收 PASS，結果見 `cbba_core/test/results/takeoff_hover/`） | ✅ |
 | CBBA 核心（17 條消解規則、連鎖退標、電池計分）＋單元測試 | ✅ |
-| 機間通訊協定版本 2（task_id 識別任務、分批、session）、協定層、UDP | ✅ 真 UDP 整合測試（含正式指派版本、取消權限、BT 接受／搶占／排隊）；SITL ⏳ |
-| 通用 cbba_node（無人機、機器狗共用） | ✅ 真 UDP＋假狗的整合測試；真的狗 ⏳ |
+| 機間通訊協定版本 2（task_id 識別任務、分批、session）、協定層、UDP | ✅ 真 UDP 整合測試、SITL（`docker/itest` comm 8／9，C5 失聯接手還沒實作） |
+| 統一版 cbba_node（`swarm_cbba`，無人機、機器狗共用，照機器狗端的介面） | ✅ `g2_e2e.sh` 58 項（機器狗端的 T1～T10、三隻狗搶標）；真的狗 ⏳ |
 | cbba_node：PX4 SITL 驗證分配、完成確認、失敗交回、墜毀重分配、晚加入、重開機 | ✅（協定版本 1、task_executor） |
-| 無人機行為樹（起飛、CPF 避碰、火警判定、返航） | ✅ 單元測試；SITL ⏳ |
-| AprilTag 火情偵測、Gazebo 場景（fire_site、patrol_site） | ✅ 單元測試、場景載入；SITL ⏳ |
+| 無人機行為樹（備用 BT：起飛、CPF 避碰、火警判定、返航） | ✅ SITL（`docker/itest` uav 6／6）；正式的 UAV BT 照機器狗端範本重寫 ⏳ |
+| AprilTag 火情偵測、Gazebo 場景（fire_site、patrol_site） | ✅ SITL（到達後 1.6～1.9 s 判定、誤差 < 0.5 m、誘餌不觸發） |
 | 巡檢＋隨機插入、電池權重的離線模擬（mission_sim、cbba_sim insert） | ✅ |
-| 全部單元測試 | ✅ 164 項、零警告（2026-10-10） |
+| 全部單元測試 | ✅ 167 項、零警告（2026-10-12） |
 | 能量模型校正（實機 ulog） | ⏳ |
-| 弱網壓測（協定版本 2 的收斂統計、DDS 不經過 mesh） | ⏳ 見 `docs/week4_6_status.md` |
+| 弱網壓測（協定版本 2 的收斂統計、DDS 不經過 mesh） | ⏳ 見 `docs/progress.md` |
 
 ## 授權
 

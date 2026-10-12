@@ -1,5 +1,7 @@
 # CBBA 訊息介面說明（swarm_interfaces v1.0）
 
+> **封存（2026-10-11）**：2026-10-05 的 ROS 訊息介面 v1.0（CBBAMessage、Bid、AgentStamp）。2026-10-09 起機間通訊改成協定版本 2（UDP，見 `../protocol.md`），這些訊息不再使用；機內的話題見 `swarm_interfaces/README.md`。
+
 cbba_core · 2026-10-05
 
 ---
