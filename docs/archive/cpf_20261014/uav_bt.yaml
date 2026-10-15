@@ -1,0 +1,59 @@
+# 無人機 BT 的飛行參數（uav_task_manager_node、uav_bt_node 共用；2026-10-13）
+# 說明、調整方向、症狀對照：uav_px4_bt/doc/parameters.md
+#
+# cbba_uav.sh 會用 --params-file 載入這份，再用 -p 蓋掉 agent_id、cruise_speed（CBBA_SPEED）、altitude（CBBA_ALTITUDE）。
+# colcon build --symlink-install 時 install 裡是連結：改完這份重開 cbba_uav.sh 就生效，不用重新編譯。
+# 臨時改一兩個：EXEC_ARGS="-p cpf.safe_radius:=1.5" cbba_uav.sh
+/**:
+  ros__parameters:
+    # ---------- 節點（只有 uav_task_manager_node） ----------
+    tick_period_ms: 50              # BT tick 週期（ms）；哨兵最壞延遲一個週期
+    min_battery: 20.0               # 電量（%）≤ 這個值就返航（RTL），一旦觸發不恢復
+    return_home_delay: 2.0          # 做完任務、待命幾秒後飛回起飛點上空；負值 = 原地懸停
+    fire_task.monitor_timeout: 120.0  # 看到火警後懸停監控、等地面任務結束最多幾秒；0 = 不等
+
+    # ---------- 高度、到達 ----------
+    altitude: 5.0                   # 巡檢高度（m，map z）；cbba_uav.sh 用 CBBA_ALTITUDE 蓋掉
+    takeoff_tolerance: 0.3          # 起飛：離 altitude 這麼近才算起飛完成（m）
+    reach_tolerance: 0.5            # 到達任務點的水平＋垂直距離（m）
+    fly_timeout_margin: 30.0        # 飛行逾時 = 距離 / 速度 × 2 + 這個（s）；逾時回報 NAV_FAILED(TIMEOUT)
+    fly_timeout_abort: false        # false：逾時只印「飛太久」警告（之後每 10 s 一次）、繼續飛，調 CPF 時用；
+                                    # true：逾時回報失敗、交回 CBBA（正式／itest 要測逾時交還時改回 true）
+
+    # ---------- 速度 ----------
+    cruise_speed: 0.5               # 最大水平速度（m/s）；要和 cbba_node 的 cruise_speed 一致（cbba_uav.sh 用 CBBA_SPEED 兩邊一起給）
+    max_vertical_speed: 0.3         # 最大垂直速度（m/s）
+
+    # ---------- CPF：吸引（往目標飛）----------
+    cpf.k_att: 1.0                  # 1/s：離目標 d 公尺時想要的速度 k_att × d（近目標時）
+    cpf.brake_accel: 0.2            # m/s²：水平剎車曲線，速度 ≤ √(2 × a × 距離)
+    cpf.brake_vertical_accel: 0.2   # m/s²：垂直剎車曲線（起飛、換高度衝過頭就調小）
+
+    # ---------- CPF：避碰 ----------
+    cpf.safe_radius: 1.0            # 期望保持的最小距離（m）；要比出生點間隔（2 m）小
+    cpf.influence_radius: 2.0       # 鄰機正在靠近時，這個距離內就提早閃（m）
+    cpf.closing_speed: 0.15          # 靠近速度 ≥ 這個才算「正在靠近」（m/s）
+    cpf.k_rep: 0.4                  # 距離 = safe_radius 時的排斥速度（m/s）
+    cpf.max_repulsion: 1.0          # 單一鄰機的排斥上限（m/s）
+    cpf.k_tan: 0.8                  # 環流（往右繞）／排斥的比例
+    cpf.horizon: 1.0                # 預測最接近距離的時間範圍（s）
+    cpf.max_extrapolation: 0.5      # 鄰機位置最多用速度外推幾秒
+    cpf.neighbor_timeout: 1.0       # 鄰機的位置廣播超過這麼久沒更新就不算（s）
+
+    # ---------- 運動平滑層（CPF 速度 → 給 PX4 的位置＋速度）----------
+    motion.max_accel: 1.5           # 水平加速度上限（m/s²）
+    motion.max_vertical_accel: 1.0  # 垂直加速度上限（m/s²）
+    motion.leash: 1.5               # 參考位置最多領先實際位置幾公尺
+    motion.hold_radius: 0.2         # 離目標這麼近、沒有鄰機要閃時，直接交給 PX4 位置保持（m）
+    motion.reset_gap: 0.5           # 超過這麼久沒下命令，從目前位置重新開始（s）
+
+    # ---------- 火警（地面處置任務）----------
+    fire_task.value: 100.0          # 建立的地面任務價值
+    fire_task.duration: 20.0        # 地面任務的處置時間（s，給狗）
+    fire_task.deadline: 120.0       # 地面任務的期限（s）
+    fire_task.dedup_radius: 3.0     # 離已回報的火點這麼近（m）視為同一個火點，不再建立
+
+    # ---------- 位置廣播（避碰用，UDP）----------
+    beacon_hz: 10.0
+    beacon_port: 14601
+    position_timeout: 0.5           # PX4 位置超過這麼久沒更新視為無效（s）

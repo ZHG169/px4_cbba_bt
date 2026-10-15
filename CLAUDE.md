@@ -48,6 +48,8 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 - 跑 `uav_px4_bt` 的測試前要 `source` ROS 環境（`test_tree` 要 ament_index）。
 - PX4 SITL 測試步驟：`cbba_core/doc/sitl_test.md`（`cbba_uav.sh`、`cbba_task.sh` 在 `docker/scripts`）。
 - 參數說明：`cbba_core/doc/parameters.md`（全部參數、要互相一致的參數、已知限制）；出價公式的實驗在 `cbba_core/cbba_parameters.md`。
+- 無人機 BT 的飛行參數：`uav_px4_bt/doc/parameters.md`（每個參數的作用、症狀 → 調哪個）；值在 `uav_px4_bt/config/uav_bt.yaml`，
+  `cbba_uav.sh` 用 `--params-file` 載入（install 裡是連結，改完重開就生效）；速度、高度用 `CBBA_SPEED`、`CBBA_ALTITUDE`（cbba_node 一起改）。
 - 自動整合測試 `docker/itest/itest.py`（comm、uav 兩組，只看話題與網路）；要在隔離環境跑時另起一套 compose（不同 project 名稱、網段、domain、鎖目錄）。
 - 多節點整合測試：同一個容器起多個 `swarm_cbba/cbba_node`（各自 `-r __ns:=/uavN -r __node:=uavN_cbba_node`，假的 robot_state 用 `mode: 0`，或 `participate:=always`；程序鎖用 `CBBA_LOCK_DIR` 指到暫存目錄），
   用 `ros2 topic pub` 代替 BT；要測轉接節點時對 `/uavN/fmu/out/*` 發假的 PX4 話題。設 `ROS_DOMAIN_ID` 避免干擾使用者的容器。
@@ -109,10 +111,10 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 | 回報檢查 | task_result 的 task_id 要是目前 current_task 上的任務（版本由節點自己補，BT 不帶，2026-10-12 起）；COMPLETION／TASK_CLOSE 的版本比已知的舊就拒絕（ACK status 2、不結束） | 擋掉任務換掉、X→Y→X 之後、別台的舊回報 |
 | 同時指派 | 同版本時已接受的勝過待接受的，同狀態才比機號 | 剛加入、還不知道鎖定的那台不能蓋掉已接受的 |
 | 鎖定（容量承諾） | 別台「保留」或「執行中」的任務不出價；持有者的核心不讓別台的得標資訊拿走它；待接受不鎖。撤銷、失敗 → 重新開放；完成、取消 → 永久關閉；**持有者失聯 → 照樣鎖著、只標記待確認**，到「失聯接手」的時限才撤銷 | 2026-10-09 使用者確認 |
-| 失聯接手（2026-10-11 定案，**還沒實作**） | 失聯的那台把手上的任務做完（不接新的）；別台在持有者失聯（s 超過 lost_timeout 沒更新）後，**火警（GROUND_INTERVENTION）10 s、巡檢 30 s** 才撤銷鎖定、重新競標（撤銷 = 新版本，執行者 0）；恢復連線後舊持有者的回報版本較舊，照現有的回報檢查拒絕（ACK status 2） | 「通訊斷但還在做」和「墜毀」從外面分不出來：火警寧可重複、巡檢寧可等。時限之後依第 5 週弱網的量測調整；狗照同一套規則，要和伯宇、宜臻對齊 |
+| 失聯接手（2026-10-11 定案，2026-10-12 實作：`CbbaComm::takeOverLost`、參數 `takeover_fire`／`takeover_patrol`） | 失聯的那台把手上的任務做完（「不接新的」沒有另外實作：各機分不出自己是不是失聯的那台）；別台在持有者失聯（s 超過 lost_timeout 沒更新）後，**火警（GROUND_INTERVENTION）10 s、巡檢 30 s** 才撤銷鎖定、重新競標（撤銷 = 新版本，執行者 0）；恢復連線後舊持有者的回報版本較舊，照現有的回報檢查拒絕（ACK status 2） | 「通訊斷但還在做」和「墜毀」從外面分不出來：火警寧可重複、巡檢寧可等。時限之後依第 5 週弱網的量測調整；狗照同一套規則，要和伯宇、宜臻對齊 |
 | BT 接受（握手） | **2026-10-12 起不用**（照機器狗端）：排第一 `assign_hold` 0.4 s 就發 current_task，BT 的哨兵負責中斷。核心的握手程式和測試保留（`require_accept` 固定 false，之後要地面端最終接受權時再打開） | 使用者 2026-10-12 決定照伯宇的介面 |
 | 失敗後的排除（2026-10-12） | TaskResult.reason：PERMANENT → 這台永久不再對它出價；TRANSIENT／PREEMPTED／STOPPED → `failure_exclude_sec`（60 s）後恢復 | spec §2.3 規則 3（機器狗端） |
-| 搶占與排隊 | 優先級：BT 本機安全處置 ＞ 火警（GROUND_INTERVENTION）＞ 巡檢；同級不搶占；已接受的任務釘在路徑前面。2026-10-12 起沒有 ExecState：一律當可中斷、剩餘時間不知道 → **執行中的火警之後不排隊第二個火警**（交給別台，或做完再接） | Accept = F ∧ [Idle ∨ (P_j > P_k ∧ Preemptible)] |
+| 搶占與排隊 | 優先級：BT 本機安全處置 ＞ 火警（GROUND_INTERVENTION）＞ 巡檢；同級不搶占；已接受的任務釘在路徑前面。2026-10-12 起沒有 ExecState：一律當可中斷、剩餘時間不知道 → **執行中的火警之後不排隊第二個火警**（交給別台，或做完再接）；搶占時評分不算被搶占任務的延後、出價不受 bundle 上限（被搶占的會交回重新競標，2026-10-12），巡檢中的 V60 才搶得到身邊的火警 | Accept = F ∧ [Idle ∨ (P_j > P_k ∧ Preemptible)] |
 | TASK_CLOSE 權限 | 完成：actor = origin = 執行者、版本不舊；取消：actor 是建立者或 `cancel_authorities`（全隊一樣）；不合的不套用、不轉送 | 完成由有效執行者回報；取消由建立者或授權管理端發起 |
 | 失敗與關閉分開 | 執行失敗不送 TASK_CLOSE：撤銷指派、任務保留、自己依 reason 暫時或永久不出價，由 CBBA 重新分配 | 之後的 constraint 撤銷也走同一條路 |
 
@@ -126,7 +128,9 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 | 話題（launch 的 namespace 底下） | 方向 | 用法 |
 |---|---|---|
 | `current_task`（Task） | CBBA → BT | 目前要執行的任務（reliable、transient_local）；排第一 `assign_hold` 0.4 s 就發；沒有任務時 task_id = 0、status = CANCELLED |
-| `robot_state`（RobotState） | BT → CBBA | 位置（map ENU）、電量（負值 = 不知道）、`mode`（AUTO／MANUAL／ESTOP）；`state_timeout` 1.5 s 內有更新**而且 mode = AUTO** 才出價，否則手上的任務立刻釋放。無人機由 `px4_state_bridge` 發（在空中 = AUTO）；第一筆當返航點 |
+| `task_closed`（Task） | CBBA → BT | 任務結束（status DONE／CANCELLED），每個任務一次（transient_local、depth 100）；**我們加的**（2026-10-13），狗端不用訂；無人機火警監控用 |
+| `task_announced`（Task） | CBBA → BT | 全隊已知的任務，每個任務一次（transient_local、depth 256）；**我們加的**（2026-10-14），只有 agent_type = UAV 才發；無人機的火點去重複（別台報過的火不再發布、不轉向、不搶著監控） |
+| `robot_state`（RobotState） | BT → CBBA | 位置（map ENU）、電量（負值 = 不知道）、`mode`（AUTO／MANUAL／ESTOP）；`state_timeout` 1.5 s 內有更新**而且 mode = AUTO** 才出價，否則手上的任務立刻釋放。無人機由 `px4_state_bridge` 發（在空中而且爬到巡檢高度（起飛完成）= AUTO，2026-10-12）；第一筆當返航點 |
 | `task_result`（TaskResult） | BT → CBBA | `success`、`detail`（只記 log）、`reason`（失敗後的排除時間）；task_id 要是目前 current_task 上的，否則拒絕 |
 | `new_task`（Task） | BT → CBBA | task_id 建立者必須是自己，不能和已知的重複；佇列深度 256；AIR_RECON 的 z 低於 `recon_altitude` 時改成巡檢高度 |
 | `cancel_task`（Task） | → CBBA | 只看 task_id；要是建立者或 `cancel_authorities`（我們多的，狗端沒用） |
@@ -201,76 +205,140 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 | 週 | 項目 | 程式 | 驗證 |
 |---|---|---|---|
 | 1 | PX4 SITL、XRCE-DDS、起飛懸停 | `docker/`、`takeoff_hover` | 完成（itest U1：3 台起飛） |
-| 1 | 機間訊息、mesh＋`tc` | 協定版本 2、`mesh_tc.sh` | 通訊測試、30%／100% 掉包通過；DDS 漏到 mesh 待修 |
+| 1 | 機間訊息、mesh＋`tc` | 協定版本 2、`mesh_tc.sh` | 通訊測試、30%／100% 掉包通過；DDS 只在機內（2026-10-12） |
 | 2 | 3D 航點、空中出價 | 備用 BT 的 FlyToWaypoint（CPF）、相容表 | itest U2、U5（三台分配；避碰交叉情境還沒測） |
 | 2 | 混合任務只對專長出價 | `types.hpp` 能力檢查 | 真 UDP（假狗）、伯宇的 T1 |
 | 3 | AprilTag 火情確認 | `apriltag_fire_detector`、`fire_site` | itest U3（約 1.6～1.9 s、誤差 < 0.5 m）、U4（誘餌不觸發） |
 | 3 | `ReportFireEvent` 注入地面任務 | 備用 BT | itest U3；狗（假狗）得標 |
 | 2～3 | 巡檢＋隨機插入、電池權重 | `patrol_site`、`patrol_scenario.sh`、`mission_sim`＋`cbba_sim insert` | 離線 100 次×5 權重已跑；Gazebo 抽驗還沒跑 |
 
-正式的 UAV BT 要照伯宇的範本重寫（`docs/handoff_uav_2026-10-11/pkg2_bt_template`），寫好後用同一套 itest 重驗第 2、3 週。
+正式的 UAV BT 改用伯宇 2026-10-12 的骨架（`docs/handoff_uav_2026-10-12/`，見「無人機 BT：改用伯宇的骨架」），寫好後用同一套 itest 重驗第 2、3 週。
 
-## 目前狀態（2026-10-12）
+## 機間 UDP：現在有兩條（2026-10-13 整理）
 
-整體進度與缺失清單：`docs/progress.md`；機間通訊的整理（做簡報用）：`docs/cbba_comm_status_20261012.md`。
+DDS 不走 mesh（`.env` 的 `DDS_OVER_MESH=0`）：ROS 話題（robot_state、current_task、PX4…）只在機內。機間只有這兩條 UDP：
+
+| | CBBA 協定（版本 2） | 飛行層位置廣播（避碰） |
+|---|---|---|
+| 誰送 | `cbba_node`（無人機、V60 都有） | 無人機的 BT（`uav_px4_bt` 的 `flight_beacon`） |
+| 位址 | multicast `239.255.42.99:14600`，magic `0x4342` | 同 group，port `14601`，magic `0x4346` |
+| 內容 | AGENT_STATE（0.5 s）、CBBA_STATE（200 ms＋變動時，不一致時 50 ms 快速重送）、TASK_ANNOUNCE、COMPLETION／ACK／TASK_CLOSE（格式見上節、`wire_*.hpp`） | 42 B、10 Hz：機號、session、序號、旗標（在空中、位置有效、執行任務中）、位置、速度 |
+| 轉送 | TASK_ANNOUNCE、完成三種會轉送（多跳） | 不轉送（避碰只需要直接聽得到的） |
+
+- 實測流量（每台 mesh 收＋送）：待命 3.5 kB/s（原本 DDS 漏到 mesh 時 69 kB/s）；有任務 0% 掉包 6 kB/s；30% 36 kB/s；50% 51 kB/s；
+  位置廣播每台再多約 0.4 kB/s 送、1.3 kB/s 收（3 台）。
+- **伯宇的 BT 沒有任何 UDP**（handoff 2026-10-12 全包搜過）：狗的 BT 只走機內 ROS（current_task、task_result、robot_state、
+  Nav2、雲台 action），機間全靠 cbba_node。
+- **無人機 BT 為什麼有 UDP**：CPF 避碰要鄰機的即時位置與速度（機間資料）。AGENT_STATE 0.5 s 一次、沒有速度（5 m/s 時差 2.5 m）
+  不夠用；跨機走 DDS 又會回到 DDS 漏到 mesh 的問題，所以 10/09 在 BT 裡另開一條。
+- **使用者 2026-10-13 提議過、決定先不做（維持在 BT）**：比照伯宇，BT 只走機內 ROS。做法：位置廣播搬到 **cbba_node**
+  （無人機的 cbba_node 依 `agent_type` 送、收，狗不送），整理成機內話題 `<ns>/neighbors` 給 BT 的 CPF；cbba_node 成為機上唯一碰
+  mesh 的程式，協定版本 2 與 14601 的格式不變。代價：多一次機內 ROS（幾 ms）、要定 neighbors 話題、位置與速度的來源
+  （PX4 或 px4_state_bridge）。
+
+## 無人機 BT：改用伯宇的骨架（2026-10-13，完成；SITL itest uav 6／6、demo 6／6）
+
+伯宇 2026-10-12 的 handoff 在 `docs/handoff_uav_2026-10-12/`（**這份才是要用的 BT**；`UAV_BT_GUIDE.md` v2、整個 `task_manager`
+套件、測資）。骨架：`ReactiveSequence`（急停 → 哨兵 `IsTaskValidAndUnchanged` → `PatrolAllWaypoints`），外部任務（cbba_）
+插在佇列頭、callback 寫黑板後立刻 tick（中斷 0.1 ms）、回報恰好一次、`HandleWaypointFailure` 看 `last_error` 前綴、五條規則（§5）。
+狗和無人機只差葉節點（狗 `GoTo`／`PtzInspect`，無人機 `NavigateTo`／`AirRecon`）。
+
+我們的映像**沒有 `nav2_msgs`**，他的 `task_manager` 照原樣編不起來，所以放進 `uav_px4_bt`（和備用 BT 並存）：
+
+| 檔案 | 內容 | 狀態 |
+|---|---|---|
+| `include/uav_px4_bt/px4_platform.hpp`、`src/px4_platform.cpp` | 從 `uav_bt_node.cpp` 抽出的 PX4＋ROS 介面（`Px4Platform`：PX4 話題、setpoint、位置廣播、task_result、new_task、fire_detection、參數），兩個執行檔共用 | 寫好 |
+| `src/uav_bt_node.cpp` | 備用 BT 改用 `Px4Platform`（行為不變） | 寫好 |
+| `include/uav_px4_bt/skeleton/bt_nodes.hpp` | 伯宇 `bt_nodes.hpp` **原樣切出**通用部分，只拿掉 `GoTo`、`PtzInspect`、`fillPtzGoal`、Nav2／雲台 include（開頭註明來源與改動，他更新時照清單重切） | 寫好 |
+| `include/uav_px4_bt/skeleton/external_task.hpp` | 伯宇 `external_task.hpp`，只改 `makeExternalWaypoint`：目標正上方、tasks = [air_recon（target、duration_sec）, report_result]；`failureReason` 加 `BATTERY_RTL`、`NOT_AIRBORNE` → STOPPED | 寫好 |
+| `include/uav_px4_bt/skeleton/uav_leaves.hpp` | `NavigateTo`（CPF＋運動平滑、飛行途中看到不是目的地的新火點 → 發布地面任務、繼續飛；逾時 `NAV_FAILED(TIMEOUT)`、沒位置／掉 offboard `NAV_NO_ACK`）、`AirRecon`（懸停 duration、穩定後認 `view_radius` 6 m 內的 tag 101 → 地面任務；**週計畫：懸停監控到那個地面任務結束（`task_closed`）或 `fire_task.monitor_timeout` 120 s 才完成**；路上已發布過的同一個火點改成監控那個任務） | 寫好 |
+| `trees/uav_mission.xml` | 伯宇 `mission.xml` 照 GUIDE §3 改：GoTo → NavigateTo、ptz_inspect → air_recon；沒有 DefaultBehavior | 寫好 |
+| `include/uav_px4_bt/skeleton/uav_flight.hpp` | 樹外的飛行 `UavFlight`（不依賴 ROS）：起飛（備用 BT 的 TakeOff）、待命盤旋與讓路（LandOrLoiter）、**做完 `return_home_delay` 2 s 後飛回起飛點上空**、低電量返航（RTL 最多送 3 次）、降落後重新起飛 | 寫好 |
+| `src/uav_task_manager_node.cpp` | 照伯宇 `task_manager_node.cpp` 的 node 層（onCurrentTask、kick、finish、releaseExternal、abortNow、waypointInHand、關機先交還）；起飛完成才 tick 樹；返航 → `BATTERY_RTL`、降落 → `NOT_AIRBORNE` 交還，返航中收到的任務直接回失敗；急停話題 `/<ns>/emergency_stop`（各台分開，急停 = 原地懸停）；robot_state 照舊由 `px4_state_bridge` 發；沒有巡檢 yaml、/start_mission、TF、markers、manual_override、Nav2 reaper | 寫好 |
+| CMake（`px4_platform.cpp` 編進兩個執行檔）、`test/test_skeleton.cpp`（19 項：插隊一拍內 halt、換任務不回報舊的、重送冪等、取消、回報後的取消、路過發現、目的地火警、逾時交還、掉 offboard、急停、外部點幾何、reason、起飛、返航、降落、讓路）、`test/fake_platform.hpp`（和 test_tree 共用）、`cbba_uav.sh` 的 `EXECUTOR=task_manager`（節點 `uavN_task_manager`）、`itest.py --executor task_manager` | | 寫好；隔離編譯零警告、單元測試全過（2026-10-13） |
+
+`UavContext` 加了 `newFire()`、`fire_tasks`／`fireTaskNear()`（火點 → 地面任務）；`UavPlatform::taskClosed()`（`Px4Platform` 訂 `<ns>/task_closed`）。
+使用者 2026-10-13：**UDP 維持在 BT**（位置廣播不搬到 cbba_node）；**依照週計畫**：巡檢點看到火 → 發布地面任務 → 懸停監控到狗處理完 →
+完成 → 回起飛點（10/12 的「路過發現只發布、繼續飛」仍保留在 `NavigateTo`）。
+
+2026-10-13 SITL 發現、已修（比對 PX4 的 ulog：PX4 追得很準，是 BT 送的 setpoint 在擺）：
+- **起飛、懸停晃**（高度 3.2～6.8 m、水平 1.5～2.7 m）：CPF 的排斥是 3D 方向（高度差一點就互相上下推）、待命時「正在靠近」就在 6 m 內排斥＋環流
+  （漂移就觸發、互繞），safe_radius 1.8 m 和出生間隔 2 m 太接近。改成排斥只取水平、待命／起飛時只對執行中的鄰機提早反應、
+  `closing_speed` 0.5 m/s、safe_radius 1.2 m、垂直剎車曲線 `brake_vertical_accel` 0.5 m/s²、平滑層參考位置不越過目標。
+  修後懸停水平 4～7 cm、起飛最高 5.02 m。
+- **U6 沒人接**：懸停監控中的無人機，CBBA 以為停留 5 s 就做完，把新任務排在它後面、出價贏過閒著的。`AssignmentManager` 加
+  `overrun_margin`（10 s）：執行中超過預估就不排在後面（`ExecConstraints::queue_behind_active`），搶占照常。
+- **Gazebo 錄影**：視窗的 VideoRecorder 按鈕要 `/gui/record_video`，gz-sim 8＋MinimalScene 沒人提供；改成場景裡的俯瞰攝影機
+  （`overview_camera`＋`CameraVideoRecorder`，`gen_patrol_site.py` 產生；`/<world>/overview/record_video`），伺服器自己錄。
+- **itest 起火條件**：航線模式要三台同時符合，窗口不到 1 s；改成任一台符合就起火。
+- 注意：容器的主程序是 `sleep infinity`，**不要 `pkill -f "sleep infinity"`**（會把容器停掉，10/13 停過 sim 一次）；
+  `px4_start` 改用 `tail -f /dev/null | px4_sitl.sh`，itest 結束時清掉。
+
+## 目前狀態（2026-10-13）
+
+整體進度與缺失清單：`docs/progress.md`（10/12 更新）；機間通訊的整理（做簡報用）：`docs/cbba_comm_status_20261012.md`。
 
 ### 現況
 
 | 部分 | 狀態 |
 |---|---|
-| 機間通訊（協定版本 2） | 主體完成：擴散、分配、完成確認、失敗交回（reason 排除）、停止參與後接手、重開機、鎖定、指派版本、權限、30% 掉包容錯 |
-| cbba_node ↔ BT 介面 | 2026-10-12 照機器狗端（伯宇）：`swarm_cbba`、swarm_interfaces v1.6、current_task／mode／reason、不握手、assign_hold 0.4 s。伯宇的 BT 不用改，換三個套件重新編譯即可 |
-| 無人機 BT | 備用 BT `uav_px4_bt`（CPF 避碰、火警判定、低電量返航）可用；**正式的 UAV BT 要照伯宇的範本寫**（`docs/handoff_uav_2026-10-11/pkg2_bt_template`：NavigateTo、AirRecon、DefaultBehavior、IsEmergency，內容從 uav_px4_bt 搬） |
-| AprilTag 火警 | `apriltag_fire_detector`，SITL：到達後 1.6～1.9 s 判定 tag 101、誤差 < 0.5 m、誘餌不觸發 |
-| 模擬環境 | docker（sim、uavN、gcs）、`fire_site`／`patrol_site` 場景、`px4_sitl.sh` 多台自動加入同一場景 |
-| 自動測試 | `docker/itest`（只看話題與網路，介面在 config.json）：comm C0～C8、uav U1～U6 |
-| 機器狗端 | 假狗（真 UDP）正確；伯宇的 T1、T2、T9 在我們的節點照跑一致；**還沒在真的狗上測**，等伯宇換成 main 的程式 |
+| 機間通訊（協定版本 2） | 主體完成：擴散、分配、完成確認、失敗交回（reason 排除）、停止參與後接手、**失聯接手**（火警 10 s、巡檢 30 s，10/12）、重開機、鎖定、指派版本、權限、30% 掉包 5 s 內收斂 95% |
+| CBBA 搶占 | 只有地面處置任務是火警（10/09 定案）；10/12 修評分：搶占時不算被搶占任務的延後、出價不受 bundle 上限 → 巡檢中、離火點近的 V60 搶得到（`test_assignment` 驗證） |
+| cbba_node ↔ BT 介面 | 照機器狗端（伯宇）：`swarm_cbba`、swarm_interfaces v1.6、current_task／mode／reason、不握手、assign_hold 0.4 s；log 字串照他的 e2e grep |
+| 無人機 BT | **正式：`uav_task_manager_node`（伯宇骨架，上一節），`cbba_uav.sh` 的 `EXECUTOR=task_manager`、itest 預設**；備用 `uav_bt_node`（`EXECUTOR=bt`，預設仍是 bt）；CPF、運動平滑層兩者共用 |
+| `px4_state_bridge` | 爬到巡檢高度（`auto_min_altitude`，`cbba_uav.sh` 給高度 − 0.5 m）才 mode AUTO：起飛完成才出價 |
+| AprilTag 火警 | 到達後 1.2～1.9 s 判定 tag 101、誤差 < 0.5 m、誘餌不觸發；巡檢點火警 → 懸停監控 → 假狗處理完 → 完成（demo D2～D4）；路過發現 SITL 也看過（10/13） |
+| 模擬環境 | docker（sim、uavN、gcs），DDS 只在機內；`fire_site`、`patrol_site`、`demo_site`（±22 m 展示用）；Gazebo 視窗設定 `docker/gz/gui/cbba_gui.config`（網格、關陰影、俯瞰鏡頭）；錄影用場景的俯瞰攝影機；假狗 `docker/scripts/fake_dog.py`（sim，Gazebo 橘色方塊替身）；火點 `models/fire_block`＋tag 101（`patrol_scenario.sh fire-at`） |
+| 自動測試 | `docker/itest`：comm（C0～C8）、uav（U1～U6）、loss（掉包梯度＋`plot_loss.py`）、demo（週計畫流程＋假狗，D1～D6；Gazebo 錄影＋俯視動畫 `animate_demo.py` → MP4，要主機 ffmpeg；`--executor` 預設 task_manager）；`swarm_cbba/test/g2_e2e.sh`（伯宇的 T1～T10＋E1～E4＋DEMO3，58 項） |
+| 機器狗端 | 假狗（真 UDP；demo 有 cbba_node＋`fake_dog.py` 執行者）正確；**還沒在真的狗上測**，伯宇還在用協定版本 1（互相拒收），要等他換成 main |
 
-最近一次測試（2026-10-12，隔離的 docker 環境，3 台）：167 項單元測試全過、零警告（test_comm、test_assignment 各連跑 20 次）；
-`itest comm` 8／9（C5 失聯接手還沒實作）；`itest uav` 6／6；指派約 0.4 s，PX4 斷線後約 2.4 s 別台接手；
-30% 掉包時任務傳播、完成確認約 0.5～2.8 s（`resend_gap` 1 s）。
+最近的結果（2026-10-13）：單元測試 cbba_core 145、uav_px4_bt 60（cpf 12、motion 8、tree 13、skeleton 23、beacon 4）全過、零警告；
+itest（task_manager）uav 6／6（U6 1.0 s 接手）、demo 6／6（種子 7、21）。
+2026-10-12：單元測試 cbba_core 144、uav_px4_bt 33、apriltag 6；itest comm 9／9（C5 32 s 接手）、
+uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s（`resend_gap` 1 s 一階）、70% 超出設計範圍；
+待命 mesh 3.5 kB/s；demo 的 D1、D2 通過（10/12 19:47 那次；之後的運動、起飛閘門、路過發現版本由使用者測試中）。
 
-**還沒 commit**（2026-10-11～12 的修改：A1、px4_sitl.sh、itest、文件整理、介面對齊、status_timeout）；
-共用的 `ros2_ws/install` 也要重新編譯 6 個套件（swarm_interfaces 變了）。
-`docs/handoff_uav_2026-10-11/`、`docs/messageImage_….jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`（伯宇的測資）
-**不進 repo**（2026-10-12 使用者決定，已加進 `.gitignore`，只留在本機）。
-cbba_node 的回歸測試：`swarm_cbba/test/g2_e2e.sh`（伯宇的 T1～T10＋E1～E4＋DEMO3，58 項，2026-10-12 全過）；
-log 字串已照伯宇的 e2e 腳本 grep 對齊（`mode 0 → 1`、`reason 2，detail「…」`、`失敗（detail）`、`收到完成證明`）。
+**還沒 commit**：GitHub main 停在 `b744f1a`，之後 52 個以上檔案（DDS、失聯接手、CBBA 搶占評分、px4_state_bridge、腳本、
+Gazebo、itest loss／demo、BT 運動與火警、骨架整合、文件）。共用的 `ros2_ws/install` 改 C++ 後要在 uav 容器重新編譯 6 個套件。
+隊友的資料（`docs/handoff_uav_*`、`docs/messageImage_*.jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`）不進 repo（`.gitignore`）。
 
 ### 還沒做的（依建議順序）
 
-1. **DDS 漏到 mesh**：patch 在 scratchpad（`dds_wire_only.patch`：`.env` 加 `DDS_OVER_MESH=0`，uav 的 DDS 只綁線材網卡），
-   隔離環境驗證過，使用者 2026-10-11 說「先分析」、還沒套用。待命時 mesh 約 69 kB/s 大多是 DDS，第 5 週掉包數據的前提。
-2. **失聯接手**：已定案（火警 10 s、巡檢 30 s，見協定的定案表），還沒實作；`itest` C5 驗收。
-3. **第 5 週量測**：itest 加掉包梯度 0／10／30／50／70%、協定版本 2 的收斂率統計、收斂時間與頻寬紀錄、畫圖；之後調 `resend_gap`。
-4. **正式的 UAV BT**（照伯宇的範本）；避碰的刻意交叉測試（itest U5 的航線沒有交錯）。
-5. session 層、認證（只有 `session_registry.hpp` 介面）；新版 CBBA 的其他 constraints（競標前、正式指派前、執行期間）。
-6. 多跳（A→B→C）的 docker 腳本；實機 mesh（multicast 轉送、MTU > 1200 B）；Jetson（arm64）映像、chrony、實體相機與
-   `kCameraToBody`、能量模型校正、共同座標系（實機沒有出生點間隔）、`itest` 的 ssh 版。
-7. 對外：把 `protocol_v2_notice.md` 送給規格作者（版本 2 不相容於規格書；另外要確認座標系、拒絕確認、重送 10 次後、重開機）；
-   給伯宇的說明（main 已照他的格式、`dog-integration` 不用了、行為差異見 `swarm_cbba/README.md`）；架構圖要更新。
+1. 已知：`px4_state_bridge` 在返航（AUTO_RTL）中仍送 AUTO，cbba_node 會繼續派任務，BT 直接回 `BATTERY_RTL` 失敗
+   （STOPPED，60 s 不出價）；要不要讓 bridge 看 offboard 待定。`cbba_uav.sh` 的預設執行者還是 `bt`，要不要改成 task_manager 待定。
+2. 殘留的 Gazebo 伺服器會不理 SIGTERM（itest 已改成 SIGKILL 後備、`px4_sitl.sh` 會提示 `pkill -9`）。
+3. 第 5 週：`resend_gap` 開成 cbba_node 參數、量 1.0／0.5／0.3 s；30% 再量 100 次。
+4. 真的 V60：假狗（`fake_dog.py`）已經完成「發布地面任務 → 狗競標 → 走過去 → 處理完」；巡檢中被火警搶占（狗有自己的巡檢）
+   還沒在 SITL 跑；等伯宇換成 main（協定版本 2）。
+5. session 層、認證；新版 CBBA 的其他 constraints；多跳腳本、實機 mesh、Jetson、chrony、實體相機、能量模型校正、itest ssh 版。
+6. 對外：`protocol_v2_notice.md` 的介面那段要改成現況再寄規格作者；給伯宇的說明；架構圖。
 
 ### 待決定
 
 | 項目 | 狀況 |
 |---|---|
 | 300 ms 全流程 | 目前指派約 0.4 s（assign_hold）；建議只在有競爭、未收斂時才等；預算要和伯宇、宜臻分 |
-| 平板／GCS 的角色 | 要不要跑 cbba_node、能否建任務；被指派的載具不再接任務：已有 `mode = MANUAL`（整台），部分保留可用容量 Q（公式的可行性限制，討論過、沒實作） |
+| BT 的 UDP | 2026-10-13 決定先維持在 BT（`flight_beacon`） |
+| 平板／GCS 的角色 | 要不要跑 cbba_node、能否建任務；部分保留可用容量 Q（討論過、沒實作） |
 | 取消的授權管理端 | `cancel_authorities` 目前是空的 |
 | 電池權重測試的設定 | 續航、插入時段、耗電誤差要多緊（`docs/sim_scenario_plan.md` 第七節） |
-| AirRecon 看到火之後 | 立刻算完成（無人機去下一點）或懸停監控到停留時間（週計畫的「持續監控」，目前的做法） |
+| 失聯的那台「不接新的」 | 各機分不出自己是不是失聯的那台，沒有另外實作 |
 
 ### 歷史紀錄（濃縮）
 
-- 2026-10-07：協定版本 1、task_executor 的第一階段 SITL（分配、完成確認、失敗交回、墜毀、晚加入、重開機）；
-  SITL 電量對齊（PX4 續航 900 s、最低 20%；能量模型懸停 0.111 %/s、每公尺 0.022 %，`cbba_uav.sh` 傳入）。
-- 2026-10-09：通用 cbba_node、協定版本 2、正式指派版本、TASK_CLOSE 權限、程序鎖、BT 接受／搶占／排隊、鎖定；
-  備用 BT、AprilTag 偵測、`fire_site` 場景。
-- 2026-10-10：`patrol_site`、`patrol_scenario.sh`、`mission_sim`＋`cbba_sim insert`（800 個任務全完成，接錯 21 → 15 隨權重下降）。
-- 2026-10-11：SITL 實測協定版本 2＋備用 BT；修 A1（停止參與時照樣送紀錄）、`px4_sitl.sh` 自動加入場景；`docker/itest`；
-  文件整理（docs、cbba_core/doc）；失聯接手規則定案；收到伯宇的 handoff。
-- 2026-10-12：照伯宇的介面改（swarm_cbba、v1.6）；修 `px4_state_bridge` 的 `status_timeout`（2 → 5 s，`vehicle_status`
-  約 1.4～2.6 s 一則，原本一直誤判、反覆撤銷任務）。
+- 2026-10-07：協定版本 1、task_executor 的第一階段 SITL；SITL 電量對齊（PX4 續航 900 s、最低 20%）。
+- 2026-10-09：通用 cbba_node、協定版本 2、正式指派版本、TASK_CLOSE 權限、程序鎖、BT 接受／搶占／排隊、鎖定；備用 BT、AprilTag 偵測、`fire_site`。
+- 2026-10-10：`patrol_site`、`patrol_scenario.sh`、`mission_sim`＋`cbba_sim insert`。
+- 2026-10-11：SITL 實測協定版本 2＋備用 BT；修 A1、`px4_sitl.sh` 自動加入場景；`docker/itest`；失聯接手規則定案；收到伯宇的 handoff（10-11 版）。
+- 2026-10-12：照伯宇的介面改（swarm_cbba、v1.6）；`status_timeout` 2 → 5 s；log 對齊伯宇；`g2_e2e.sh`；DDS 只在機內；失聯接手實作；
+  itest `loss`、`demo`；CBBA 搶占評分修正；`px4_state_bridge` 起飛完成才 AUTO；備用 BT 運動改寫（CPF 剎車曲線、懸停不互推、
+  運動平滑層、位置＋速度前饋）、火警看位置去重、路過發現；`demo_site`、Gazebo 視窗設定、起飛／CBBA 閘門。
+  **使用者定的流程**：多個固定巡檢點 → CBBA 分給 UAV → 飛行途中相機持續偵測 → 路徑經過火點看到 tag 101 → 確認火警 →
+  發布地面處置任務 → V60 競標 → 得標的中斷巡檢前往（路過發現只發布地面任務、繼續飛；`fire_task.divert_on_sight` 預設 false）。
+  試過又退回：「價值 ≥ 100 的空中任務算火警」、無人機發現後改去懸停。
+- 2026-10-13：收到伯宇 handoff 2026-10-12（BT 骨架），整合完成（`uav_task_manager_node`）；整理機間 UDP（維持在 BT）；
+  週計畫流程（巡檢點火警 → 懸停監控 → 狗處理完 → 回起飛點）、`task_closed` 話題、假狗、俯瞰攝影機錄影；修起飛／懸停晃、U6 接手。
+- 2026-10-14：無人機避碰 **CPF → CBF**（`uav_px4_bt/src/cbf.cpp`，參數 `cbf.*`，公式在 `uav_px4_bt/doc/parameters.md` 第五節；CPF 備份在 `docs/archive/cpf_20261014/`）；`fly_timeout_abort`（逾時只警告、繼續飛）；Nav2 導入規劃 `docs/nav2_integration_plan.md`；**路過發現改成轉向**（使用者：週計畫與 BT 規定看到火點要到上空懸停等待）：`NavigateTo` 發布地面任務 → 飛到火點上空懸停監控到 task_closed 或 monitor_timeout → 回航線（`divert="false"` 恢復只發布、繼續飛）；`AirRecon` 看到火也移到火點上空；`demo_site` 的點重擺（G1、G2 同一條線看 CBF，R1 在 G3 航線旁、R2 在 G2 旁 2.5 m）。本文件其他段落的「CPF」指 10/13 以前的做法。
 
 ## C/C++ 格式
 
