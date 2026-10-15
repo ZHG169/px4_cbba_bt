@@ -52,6 +52,9 @@ struct ExecConstraints
   bool preemptible{true};            // 執行中的任務可以安全中斷
   double active_remaining{-1.0};     // 執行中任務的預估剩餘時間（秒）；負值 = 不知道（不知道時不能排隊）
   std::size_t max_queued_fires{1};   // 路徑上除了第一個之外，最多幾個火警（排隊）
+  // false：不排在執行中任務的後面（插到最前面的搶占照常）。執行中的任務超過預估完成時間時（例如無人機懸停監控火點、
+  // 等地面處置），實際還要多久不知道，排在後面的會一直等（2026-10-13 SITL 的 U6）
+  bool queue_behind_active{true};
   double max_queue_wait{120.0};      // 沒有期限的任務最多等多久（秒，從任務建立時算）
 };
 

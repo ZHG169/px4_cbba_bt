@@ -79,6 +79,9 @@ struct InsertionLimits
 {
   std::size_t min_position{0};   // 前面是已接受、不能被插隊的任務
   double head_remaining{-1.0};   // 見 evaluatePath
+  // 插在最前面＝搶占路徑第一個（執行中、可中斷、優先級較低）：被搶占的任務會交回 CBBA 重新競標，
+  // 評分時把它從路徑拿掉（不算「延後它」的損失），否則巡檢中的 V60 對身邊火警的出價永遠比不上閒著、但遠很多的（2026-10-12）
+  bool preempt_drops_head{false};
   // 這個位置可不可以（插入後的路徑評估、位置、插入後的路徑）；沒設定時都可以
   std::function<bool(const PathEval &, std::size_t, const std::vector<Task> &)> allow;
 };

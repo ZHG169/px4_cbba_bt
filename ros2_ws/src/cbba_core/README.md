@@ -53,11 +53,12 @@ cbba_core/
 
 ## 編譯
 
-在 uav 容器裡（所有容器共用編譯結果，不要兩個容器同時編譯）。不依賴 px4_msgs，狗的機上電腦也直接編：
+在 uav 容器裡（所有容器共用編譯結果，不要兩個容器同時編譯）。不依賴 px4_msgs，狗的機上電腦也直接編；
+ROS 節點（cbba_node）在 `swarm_cbba` 套件，要一起編：
 
 ```bash
 cd ~/CBBA_BT/ros2_ws
-colcon build --symlink-install --packages-select swarm_interfaces cbba_core
+colcon build --symlink-install --packages-select swarm_interfaces cbba_core swarm_cbba
 source install/setup.bash
 ```
 
@@ -269,4 +270,3 @@ task,1,AIR_RECON,-15,5,5,60,80,10,fire
 - 沒有飛機接得起的任務沒有提示
 - AGENT_STATE 的執行進度（`progress`）與「跟隨中」旗標，要等 BT 回報
 - 協定版本 2 還沒在 PX4 SITL 跑；和規格書不相容，要和規格作者說明（見 `doc/protocol.md`）
-- docker 的 Fast DDS 設定仍讓 DDS 經過 mesh；要讓 DDS 只留在機內，需把 uav 容器的白名單改成只有線材網卡

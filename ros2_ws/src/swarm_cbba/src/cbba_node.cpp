@@ -11,10 +11,14 @@
 //               new_task     (swarm_interfaces/Task)         本機發現的新任務（task_id 建立者要是自己）
 //               cancel_task  (swarm_interfaces/Task)         取消任務（只看 task_id）：要是建立者或 cancel_authorities
 //   CBBA → BT   current_task (swarm_interfaces/Task)         目前要執行的任務；task_id = 0 表示沒有任務
+//               task_closed  (swarm_interfaces/Task)         任務結束（status DONE／CANCELLED），每個任務一次（2026-10-13，
+//                                                            我們加的、狗端沒有）：無人機發布火警後懸停監控，等地面處置完成才走
+//               task_announced (swarm_interfaces/Task)       全隊已知的任務，每個任務一次（2026-10-14，只有 agent_type = UAV 才發，
+//                                                            狗端沒有這個話題）：無人機的火點去重複要知道別台已經報過的火
 //
 // 參與出價（spec §2.3 規則 2、4）：robot_state 在 state_timeout 內有更新，而且 mode == AUTO。
 //   MANUAL（平板接管）、ESTOP（急停）、沒有 robot_state 時對所有任務出價 0，手上的任務立刻釋放。
-//   無人機的 mode 由 BT 或 px4_state_bridge 決定（已解鎖、離地 = AUTO）。
+//   無人機的 mode 由 BT 或 px4_state_bridge 決定（已解鎖、在空中、爬到巡檢高度 = AUTO）。
 //   participate = always（測試協商用）：一律參與，不訂閱 robot_state，位置與電量用參數 initial_position、battery。
 //
 // 正式指派（流程在 cbba_core/assignment_manager.hpp）：同一任務連續 assign_hold 秒排第一就發 current_task，
@@ -34,6 +38,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -215,6 +220,9 @@ public:
 
     CommConfig comm;
     comm.lost_timeout = declare_parameter<double>("lost_timeout", comm.lost_timeout);
+    // 失聯接手：持有者失聯後多久撤銷它已接受的任務、重新競標（火警寧可重複、巡檢寧可等）。全隊要一樣
+    comm.takeover_fire = declare_parameter<double>("takeover_fire", comm.takeover_fire);
+    comm.takeover_patrol = declare_parameter<double>("takeover_patrol", comm.takeover_patrol);
     comm.max_packet = static_cast<std::size_t>(
       declare_parameter<int>("max_packet", static_cast<int>(comm.max_packet)));
     // 除了建立者，可以取消任務的機號（授權的管理端）。全隊要一樣，收到 TASK_CLOSE 時也用它檢查
@@ -238,6 +246,7 @@ public:
     assign.max_queued_fires = static_cast<std::size_t>(
       declare_parameter<int>("max_queued_fires", static_cast<int>(assign.max_queued_fires)));
     assign.max_queue_wait = declare_parameter<double>("max_queue_wait", assign.max_queue_wait);
+    assign.overrun_margin = declare_parameter<double>("overrun_margin", assign.overrun_margin);
     const int tick_ms = declare_parameter<int>("tick_ms", 10);
 
     state_ = s;
@@ -257,6 +266,13 @@ public:
 
     // ---------- 機內話題（QoS 和機器狗端的 task_manager 一致）----------
     current_pub_ = create_publisher<TaskMsg>(topic("current_task"), rclcpp::QoS(1).reliable().transient_local());
+    // 晚啟動的 BT 也要知道之前結束的任務：transient_local、保留最近 100 個
+    closed_pub_ = create_publisher<TaskMsg>(topic("task_closed"), rclcpp::QoS(100).reliable().transient_local());
+    // 全隊已知的任務（無人機的火點去重複用，2026-10-14）：只有無人機發，狗的 cbba_node 完全不變
+    if (uav) {
+      announced_pub_ = create_publisher<TaskMsg>(topic("task_announced"),
+          rclcpp::QoS(256).reliable().transient_local());
+    }
     if (participate_ == "state") {
       // best effort 的訂閱可以接 reliable 和 best effort 的發布（BT 用 reliable）
       state_sub_ = create_subscription<RobotStateMsg>(
@@ -505,11 +521,20 @@ private:
       RCLCPP_INFO(get_logger(), "路徑：%s", s.empty() ? "（無）" : s.c_str());
       last_path_ = path;
     }
+    // 新知道的任務（自己建立、或收到別台的 TASK_ANNOUNCE）轉給 BT 一次
+    if (announced_pub_) {
+      for (const auto & [id, task] : comm_->agent().tasks()) {
+        if (announced_.insert(id).second) {
+          announced_pub_->publish(toMsg(task));
+        }
+      }
+    }
     // 任務結束（自己收齊確認、或收到別台的 TASK_CLOSE）時印一次
     for (const auto & [id, task] : comm_->agent().tasks()) {
       if (task.status == TaskStatus::OPEN || !closed_.insert(id).second) {
         continue;
       }
+      closed_pub_->publish(toMsg(task));
       if (task.status != TaskStatus::DONE) {
         RCLCPP_INFO(get_logger(), "任務 %s 已取消", taskName(id).c_str());
       } else if (const auto it = reported_at_.find(id); it != reported_at_.end()) {
@@ -537,14 +562,20 @@ private:
         RCLCPP_INFO(get_logger(), "鄰居 %u：%s", agent, n.flags.participating ? "參與出價" : "不參與出價");
       }
     }
-    // 鎖著、但持有者失聯的任務：只標記待確認，不重新指派（避免原載具還在執行）
+    // 鎖著、但持有者失聯的任務：先鎖著（原載具可能還在執行），到失聯接手的時限才撤銷、重新競標
     const auto lost = comm_->lockedByLostAgents(now);
     if (lost != last_lost_) {
-      last_lost_ = lost;
       for (const auto & [task, holder] : lost) {
-        RCLCPP_WARN(get_logger(), "任務 %s 的持有者 agent %u 失聯：待確認，暫不重新指派",
-          taskName(task).c_str(), holder);
+        if (std::find(last_lost_.begin(), last_lost_.end(), std::make_pair(task, holder)) == last_lost_.end()) {
+          RCLCPP_WARN(get_logger(), "任務 %s 的持有者 agent %u 失聯：先鎖著，%.0f s 後沒恢復就重新競標",
+            taskName(task).c_str(), holder, comm_->takeoverLimit(task));
+        }
       }
+      last_lost_ = lost;
+    }
+    for (const auto & [task, holder] : comm_->takeTakeovers()) {
+      RCLCPP_WARN(get_logger(), "失聯接手：任務 %s 的持有者 agent %u 失聯超過 %.0f s，撤銷、重新競標",
+        taskName(task).c_str(), holder, comm_->takeoverLimit(task));
     }
     const auto & stats = comm_->stats();
     if (stats.task_conflicts != last_conflicts_) {
@@ -589,6 +620,7 @@ private:
   bool last_converged_{false};
   std::map<TaskId, double> reported_at_;   // 自己回報完成的時刻
   std::set<TaskId> closed_;                // 已經印過結束的任務
+  std::set<TaskId> announced_;             // 已經發過 task_announced 的任務
   int last_conflicts_{0};
   int last_rejected_{0};
   int last_rejected_closes_{0};
@@ -596,6 +628,8 @@ private:
   std::map<AgentId, bool> neighbor_participating_;   // 上次印出的鄰居參與狀態
 
   rclcpp::Publisher<TaskMsg>::SharedPtr current_pub_;
+  rclcpp::Publisher<TaskMsg>::SharedPtr closed_pub_;
+  rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 只有無人機
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;

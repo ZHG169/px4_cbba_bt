@@ -95,7 +95,18 @@ Insertion bestInsertion(
     if (!eval.feasible || (limits.allow && !limits.allow(eval, pos, candidate))) {
       continue;
     }
-    const double marginal = eval.total_cost - current.total_cost;
+    double marginal = eval.total_cost - current.total_cost;
+    if (pos == 0 && limits.preempt_drops_head && !path.empty()) {
+      // 搶占：被搶占的任務會交回重新競標，比較「拿掉它之後」插入前後的成本
+      std::vector<Task> rest(path.begin() + 1, path.end());
+      std::vector<Task> with = rest;
+      with.insert(with.begin(), task);
+      const PathEval before = evaluatePath(agent, rest, now, params, -1.0);
+      const PathEval after = evaluatePath(agent, with, now, params, -1.0);
+      if (before.feasible && after.feasible) {
+        marginal = after.total_cost - before.total_cost;
+      }
+    }
     if (marginal < best.marginal_cost) {
       best.feasible = true;
       best.position = pos;

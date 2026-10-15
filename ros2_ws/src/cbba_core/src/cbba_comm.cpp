@@ -204,7 +204,48 @@ std::vector<std::pair<TaskId, AgentId>> CbbaComm::lockedByLostAgents(double now)
   return out;
 }
 
-// 別台「保留」或「執行中」的任務交給核心：不出價（持有者失聯也照樣鎖著，失聯接手另外做）
+double CbbaComm::takeoverLimit(TaskId task_id) const
+{
+  const auto task = agent_.tasks().find(task_id);
+  const bool fire = task != agent_.tasks().end() && task->second.type == TaskType::GROUND_INTERVENTION;
+  return fire ? config_.takeover_fire : config_.takeover_patrol;
+}
+
+std::vector<std::pair<TaskId, AgentId>> CbbaComm::takeTakeovers()
+{
+  std::vector<std::pair<TaskId, AgentId>> out;
+  out.swap(takeovers_);
+  return out;
+}
+
+// 失聯接手：持有者失聯超過時限，撤銷它的鎖定（新版本，執行者 0），任務重新競標。
+// 失聯的時刻用持有者最後的 s + lost_timeout（各機看到的差不多，同時撤銷）；沒有它的 s 時（剛開機，
+// 還沒收過它的資訊）用第一次看到「鎖著、持有者失聯」的時刻，不會比別台早撤銷
+void CbbaComm::takeOverLost(double now)
+{
+  std::map<TaskId, double> since;
+  for (const auto & [task_id, holder] : lockedByLostAgents(now)) {
+    const auto first = lost_since_.find(task_id);
+    double t = first != lost_since_.end() ? first->second : now;
+    const auto stamp = agent_.stamps().find(holder);
+    if (stamp != agent_.stamps().end()) {
+      t = std::min(t, stamp->second + config_.lost_timeout);
+    }
+    if (now - t < takeoverLimit(task_id)) {
+      since[task_id] = t;
+      continue;
+    }
+    const std::uint64_t version = std::max(assignment(task_id).version, used_versions_[task_id]) + 1;
+    assignments_[task_id] = Assignment{version, kNoAgent, AssignState::NONE};
+    used_versions_[task_id] = version;
+    dirty_ = true;
+    takeovers_.emplace_back(task_id, holder);
+    ++stats_.takeovers;
+  }
+  lost_since_ = std::move(since);
+}
+
+// 別台「保留」或「執行中」的任務交給核心：不出價（持有者失聯也先鎖著，到時限才由 takeOverLost 撤銷）
 void CbbaComm::updateLocks(double now)
 {
   std::set<TaskId> locked;
@@ -370,8 +411,9 @@ std::vector<Bytes> CbbaComm::poll(double now)
     markChanged(agent_.reevaluate(now));
   }
 
-  // 失聯：太久沒有某台的新資訊，釋放它得標的任務（它已接受的任務照樣鎖著，見 updateLocks）
+  // 失聯：太久沒有某台的新資訊，釋放它得標的任務（它已接受的任務先鎖著，到時限才撤銷，見 takeOverLost）
   markChanged(agent_.releaseStale(now, config_.lost_timeout));
+  takeOverLost(now);
   updateLocks(now);
 
   // 和鄰居同步之後：排隊中的任務廣播出去

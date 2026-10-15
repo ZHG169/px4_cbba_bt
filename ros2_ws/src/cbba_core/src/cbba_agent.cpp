@@ -179,9 +179,13 @@ bool CbbaAgent::buildBundle(double now)
       if (locked_.count(id) > 0) {continue;}     // 別台已接受
       if (std::find(bundle_.begin(), bundle_.end(), id) != bundle_.end()) {continue;}
 
-      Insertion ins = bestInsertion(state_, current_path, task, now, params_, limitsFor(task, path_, now));
+      const InsertionLimits limits = limitsFor(task, path_, now);
+      Insertion ins = bestInsertion(state_, current_path, task, now, params_, limits);
       if (!ins.feasible || !(ins.score > 0.0)) {continue;}
-      const double bid = std::min(ins.score, bid_cap);
+      // 搶占（插在最前面、被搶占的任務會交回重新競標）不受 bundle 前一個任務分數的上限：
+      // 否則巡檢中的 V60 對火警的出價被壓在巡檢的分數以下，永遠贏不了閒著、但遠很多的（2026-10-12）
+      const bool preempt = limits.preempt_drops_head && ins.position == 0;
+      const double bid = preempt ? ins.score : std::min(ins.score, bid_cap);
 
       // 自己的出價要贏過已知的得標價才出價
       const AgentId cur_z = winner(id);
@@ -477,7 +481,7 @@ bool CbbaAgent::canPreempt(const Task & task) const
   if (head == tasks_.end()) {
     return true;
   }
-  const bool higher = taskPriority(task.type) > taskPriority(head->second.type);
+  const bool higher = taskPriority(task) > taskPriority(head->second);
   return exec_.active_pinned ? exec_.preemptible && higher : higher;
 }
 
@@ -494,12 +498,19 @@ InsertionLimits CbbaAgent::limitsFor(
     path.front() == exec_.pinned.front();
   limits.head_remaining = active_head ? exec_.active_remaining : -1.0;
   limits.min_position = canPreempt(task) ? 0 : pinned_in_path;
+  // 真的會搶占（路徑第一個是執行中、可中斷、優先級較低的任務）：評分時不算延後它的損失
+  limits.preempt_drops_head = active_head && exec_.preemptible && !exec_.pinned.empty() &&
+    tasks_.count(exec_.pinned.front()) > 0 &&
+    taskPriority(task) > taskPriority(tasks_.at(exec_.pinned.front()));
 
   const ExecConstraints exec = exec_;
-  const bool fire = taskPriority(task.type) >= kPriorityFire;
+  const bool fire = taskPriority(task) >= kPriorityFire;
   const double deadline = queueDeadline(task) - now;
   limits.allow = [exec, fire, deadline, active_head](
     const PathEval & e, std::size_t pos, const std::vector<Task> & candidate) {
+      if (active_head && pos > 0 && !exec.queue_behind_active) {
+        return false;
+      }
       if (!fire || pos == 0) {
         return true;
       }
@@ -509,7 +520,7 @@ InsertionLimits CbbaAgent::limitsFor(
       }
       std::size_t fires = 0;
       for (std::size_t i = 1; i < candidate.size(); ++i) {
-        fires += taskPriority(candidate[i].type) >= kPriorityFire ? 1 : 0;
+        fires += taskPriority(candidate[i]) >= kPriorityFire ? 1 : 0;
       }
       if (fires > exec.max_queued_fires) {
         return false;
@@ -534,14 +545,16 @@ bool CbbaAgent::setExecConstraints(const ExecConstraints & c, double now)
   // 已接受的任務、能不能中斷、能不能接新任務改了：馬上照新的限制重排（不等每秒的重新評估），
   // 例如 BT 走到可以中斷的地方時，保留的火警要馬上排到前面
   const bool changed = c.pinned != exec_.pinned || c.active_pinned != exec_.active_pinned ||
-    c.preemptible != exec_.preemptible || c.accept_new != exec_.accept_new;
+    c.preemptible != exec_.preemptible || c.accept_new != exec_.accept_new ||
+    c.queue_behind_active != exec_.queue_behind_active;
   exec_ = c;
   if (!changed) {
     return false;
   }
   bool released = false;
-  if (!exec_.accept_new) {
-    // 不能接新任務（故障、BT 執行狀態逾時）：還沒被 BT 接受的出價全部撤回，讓別台接；已接受的由 BT 處理
+  if (!exec_.accept_new || (!exec_.queue_behind_active && exec_.active_pinned)) {
+    // 不能接新任務（故障、BT 執行狀態逾時），或執行中的任務超過預估、不排隊：
+    // 還沒被 BT 接受的出價全部撤回，讓別台接；已接受的由 BT 處理
     std::set<TaskId> unaccepted;
     for (TaskId id : bundle_) {
       if (std::find(exec_.pinned.begin(), exec_.pinned.end(), id) == exec_.pinned.end()) {
@@ -558,12 +571,15 @@ bool CbbaAgent::setLocked(const std::set<TaskId> & locked, double now)
   if (locked == locked_) {
     return false;
   }
+  // 解除鎖定（持有者撤銷、失聯接手）的任務要馬上重新出價，不等下一次 reevaluate
+  const bool unlocked = std::any_of(locked_.begin(), locked_.end(),
+      [&locked](TaskId id) {return locked.count(id) == 0;});
   locked_ = locked;
   bool changed = releaseIf(locked_);
-  if (changed) {
+  if (changed || unlocked) {
     buildBundle(now);
   }
-  return changed;
+  return changed || unlocked;
 }
 
 bool CbbaAgent::suspendTask(TaskId id, double now)

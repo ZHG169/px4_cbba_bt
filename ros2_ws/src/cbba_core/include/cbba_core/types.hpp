@@ -45,13 +45,13 @@ struct Task
   bool explicit_deadline{true};   // false：建立時沒給期限（deadline_sec 是出價用的預設值），排隊用最大等待時間
 };
 
-// 任務優先級（2026-10-09）：本機安全處置（BT 內部，不是 CBBA 任務）＞ 火警處置 ＞ 一般巡檢。
+// 任務優先級（2026-10-09）：本機安全處置（BT 內部，不是 CBBA 任務）＞ 火警處置（GROUND_INTERVENTION）＞ 一般巡檢。
 // 同級不互相搶占。之後要分火警嚴重度時再加欄位
 constexpr int kPriorityPatrol = 1;
 constexpr int kPriorityFire = 2;
-inline int taskPriority(TaskType type)
+inline int taskPriority(const Task & task)
 {
-  return type == TaskType::GROUND_INTERVENTION ? kPriorityFire : kPriorityPatrol;
+  return task.type == TaskType::GROUND_INTERVENTION ? kPriorityFire : kPriorityPatrol;
 }
 
 // 任務 ID = 建立者編號 * 65536 + 流水號

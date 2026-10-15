@@ -96,9 +96,33 @@ void AssignmentManager::updateConstraints(double now)
   c.active_remaining = exec_.fresh ? exec_.remaining_time : -1.0;
   c.max_queued_fires = config_.max_queued_fires;
   c.max_queue_wait = config_.max_queue_wait;
+  // 執行中的任務超過預估還沒完成（例如無人機懸停監控火點、等地面處置）：不知道還要多久，不排在它後面
+  const bool overrun = active_ && !exec_.fresh && now > active_expected_;
+  if (overrun != overrun_) {
+    overrun_ = overrun;
+    if (overrun) {
+      info("執行中的 " + name(active_->task, active_->version) + " 超過預估的完成時間：不再排隊接新任務");
+    }
+  }
+  c.queue_behind_active = !overrun;
   comm_.setExecConstraints(c, now);
   comm_.setExecReport(ExecReport{exec_.fresh, exec_.execution_state, exec_.preemptible,
       exec_.remaining_time});
+}
+
+// 開始執行：記下預估的完成時刻（從目前位置前往＋停留＋overrun_margin）
+void AssignmentManager::startActive(const HeldAssignment & a, double now)
+{
+  active_ = a;
+  active_since_ = now;
+  active_expected_ = now + config_.overrun_margin;
+  const auto it = comm_.agent().tasks().find(a.task);
+  if (it != comm_.agent().tasks().end()) {
+    const AgentState & s = comm_.agent().state();
+    const ScoringParams & p = comm_.agent().params();
+    const double speed = (s.cruise_speed > 0.0 ? s.cruise_speed : p.cruise_speed) * p.speed_margin;
+    active_expected_ += distance(s.position, it->second.position) / std::max(speed, 0.1) + it->second.duration_sec;
+  }
 }
 
 // ===========================================================================
@@ -157,8 +181,7 @@ void AssignmentManager::step(double now)
       // 保留的排到第一：核心已經重新檢查過可行性（期限、電量），轉成執行中，不再問 BT
       const HeldAssignment r = *reserved_;
       if (comm_.confirmAssignment(r.task, r.version, AssignState::ACTIVE)) {
-        active_ = r;
-        active_since_ = now;
+        startActive(r, now);
         reserved_.reset();
         assigned_changed_ = true;
         info("保留的 " + name(r.task, r.version) + " 開始執行");
@@ -178,7 +201,7 @@ void AssignmentManager::step(double now)
     const auto & path = comm_.agent().path();
     for (std::size_t i = 1; i < path.size(); ++i) {
       const auto it = comm_.agent().tasks().find(path[i]);
-      if (it != comm_.agent().tasks().end() && taskPriority(it->second.type) >= kPriorityFire) {
+      if (it != comm_.agent().tasks().end() && taskPriority(it->second) >= kPriorityFire) {
         queued = path[i];
         break;
       }
@@ -293,8 +316,7 @@ void AssignmentManager::accept(const Pending & p, double now)
     assigned_changed_ = true;
     return;
   }
-  active_ = HeldAssignment{p.task, p.version};
-  active_since_ = now;
+  startActive(HeldAssignment{p.task, p.version}, now);
   if (reserved_ && reserved_->task == p.task) {
     reserved_.reset();
   }

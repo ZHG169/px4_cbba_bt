@@ -32,7 +32,8 @@
 //   endAssignment() 產生新版本（執行者 0、狀態「無」），舊的版本作廢、不再使用。
 //   版本放在 CBBA_STATE 的紀錄裡傳遍全隊，各節點取（版本, 執行者, 狀態）較大的那筆。X→Y→X 時 X 第二次的版本一定比第一次大。
 //   鎖定：別台「保留」或「執行中」的任務不出價（待接受不鎖）。持有者撤銷 → 重新開放；完成、取消 → 永久結束；
-//   持有者失聯 → 照樣鎖著（lockedByLostAgents() 列出來待確認），不重新指派，避免原載具還在執行。
+//   持有者失聯 → 先照樣鎖著（lockedByLostAgents() 列出來待確認），避免原載具還在執行；
+//   失聯超過 takeover 時限（火警 takeover_fire、其他 takeover_patrol）才撤銷（失聯接手，見下面）。
 //   回報（reportResult）要帶版本，必須是自己目前的正式指派；完成宣告、TASK_CLOSE 也帶版本，
 //   收到的節點知道更新的版本就拒絕（ACK status 2、不結束任務）。
 //   執行失敗：撤銷指派、任務保留，由 CBBA 重新分配；不送 TASK_CLOSE。
@@ -41,6 +42,14 @@
 // 失聯
 //   某台的 s 超過 lost_timeout 沒更新，各機自己判定失聯，釋放它得標的任務。
 //   某台從參與出價變成不參與時，立即釋放它的任務。
+//
+// 失聯接手（2026-10-11 定案、2026-10-12 實作）
+//   「通訊斷了但還在做」和「墜毀」從外面分不出來，所以已接受（保留、執行中）的任務在持有者失聯後先鎖著，
+//   失聯（s + lost_timeout）之後再過 takeover_fire（GROUND_INTERVENTION，預設 10 s，寧可重複）或
+//   takeover_patrol（其他，30 s，寧可等）才撤銷：產生新版本（執行者 0、狀態「無」），和持有者自己撤銷一樣，
+//   各機各自判定、產生的紀錄相同（版本取大的），任務重新競標。
+//   失聯的持有者照樣把手上的做完；恢復連線後收到新版本，它的指派被取代（AssignmentManager 撤下），
+//   它的回報、完成宣告帶舊版本，被拒絕（ACK status 2），不會把已改派的任務關掉。
 //
 // 重開機：每次建立 CbbaComm 都用新的 session_id（隨機），鄰居看到新的 session 就知道重開機過，
 //   重開機前在網路上延遲的封包會被丟掉；不需要把序號存在非揮發性儲存（版本 1 的 seq_file）。
@@ -79,6 +88,8 @@ struct CommConfig
   double min_gap{0.01};           // 立即發送的最短間隔
   double neighbor_timeout{1.5};   // 多久沒收到某台的封包就不算直接鄰居
   double lost_timeout{1.5};       // 多久沒有某台的新資訊視為失聯（規格：1.5 s）
+  double takeover_fire{10.0};     // 失聯接手：持有者失聯後多久撤銷它已接受的火警（GROUND_INTERVENTION）
+  double takeover_patrol{30.0};   // 失聯接手：其他任務（巡檢）
   double completion_retry{1.0};   // 完成宣告的重送間隔
   int completion_max{10};         // 完成宣告最多重送幾次
   double resend_gap{1.0};         // 補發同一個 TASK_ANNOUNCE／TASK_CLOSE 的最短間隔
@@ -200,6 +211,7 @@ struct CommStats
   int stale_acks{0};            // 收到 status = 2（指派已過期）的確認：完成宣告作廢
   int aborted_completions{0};   // 因為指派過期而作廢的完成宣告
   int rejected_closes{0};       // 不合權限的 TASK_CLOSE（舊版本的完成、沒有授權的取消）
+  int takeovers{0};             // 失聯接手：撤銷失聯持有者的鎖定
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -237,6 +249,10 @@ public:
   Assignment assignment(TaskId id) const;
   // 鎖著、但持有者失聯（s 超過 lost_timeout 沒更新）的任務：任務 → 持有者。只列出、不處理
   std::vector<std::pair<TaskId, AgentId>> lockedByLostAgents(double now) const;
+  // 失聯接手的時限（秒）：火警 takeover_fire，其他 takeover_patrol
+  double takeoverLimit(TaskId id) const;
+  // 上次呼叫之後，因失聯接手撤銷的任務（任務 → 原持有者），給節點印 log
+  std::vector<std::pair<TaskId, AgentId>> takeTakeovers();
 
   // BT 的執行狀態（AGENT_STATE 用）與造成的限制（交給核心）
   void setExecReport(const ExecReport & report) {exec_report_ = report;}
@@ -347,6 +363,9 @@ private:
   std::map<TaskId, std::uint64_t> used_versions_;   // 自己發過的最大版本：作廢的版本不再使用
   ExecReport exec_report_;
   void updateLocks(double now);
+  void takeOverLost(double now);
+  std::map<TaskId, double> lost_since_;   // 鎖著、持有者失聯的任務 → 持有者失聯的時刻
+  std::vector<std::pair<TaskId, AgentId>> takeovers_;
   std::map<TaskId, wire::TaskCloseBody> closes_;
   // 比任務定義先到的 TASK_CLOSE（補發時兩者延遲不同），等任務到了再套用
   std::map<TaskId, wire::TaskCloseBody> early_closes_;

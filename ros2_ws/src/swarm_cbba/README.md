@@ -23,6 +23,8 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | 話題 | 方向 | 型別 | QoS | 說明 |
 |---|---|---|---|---|
 | `current_task` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 1 | 目前要執行的任務；`task_id = 0` 表示沒有任務（取消）。同一任務連續 `assign_hold` 秒排第一才發 |
+| `task_closed` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 100 | 任務結束（`status` DONE／CANCELLED），每個任務一次。2026-10-13 我們加的，狗端不用訂；無人機發布火警後懸停監控，等地面處置完成才走 |
+| `task_announced` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 256 | 全隊已知的任務（自己建立或收到別台的 TASK_ANNOUNCE），每個任務一次。2026-10-14 我們加的，**只有 `agent_type: UAV` 才發**（狗的 cbba_node 沒有這個話題）；無人機的火點去重複要算進別台報過的火 |
 | `robot_state` | BT → CBBA | `swarm_interfaces/RobotState` | BT 發 reliable；CBBA 收 best_effort | 約 2 Hz：位置（map ENU）、電量、`mode` |
 | `task_result` | BT → CBBA | `swarm_interfaces/TaskResult` | reliable | 任務結束時一次：`success`、`detail`（給人看）、`reason` |
 | `new_task` | BT → CBBA | `swarm_interfaces/Task` | reliable | 本機發現的任務（無人機：火點）；`task_id` = 機號 × 65536 + 流水號 |
@@ -32,7 +34,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 
 - **參與出價**：`robot_state` 在 `state_timeout`（1.5 s）內有更新，而且 `mode == AUTO`（spec §2.3 規則 2、4）。
   `MANUAL`（平板接管）、`ESTOP`、沒有 `robot_state` 時對所有任務出價 0，手上的任務立刻釋放（`current_task` 變 0）。
-  無人機的 `mode` 由 `px4_waypoint_node/px4_state_bridge` 決定：已解鎖、在空中 = AUTO。
+  無人機的 `mode` 由 `px4_waypoint_node/px4_state_bridge` 決定：已解鎖、在空中，而且這次起飛後爬到過 `auto_min_altitude`（`cbba_uav.sh` 給巡檢高度 − 0.5 m）= AUTO，起飛完成才出價（2026-10-12）。
 - **回報**：`task_result` 的 `task_id` 要是目前 `current_task` 上的任務，不是就拒絕（log 會寫），任務狀態不變。
   BT 不用帶指派版本；版本只在 CBBA 節點之間（機間封包）用，擋掉別台的舊回報。
 - **失敗**（`success = false`）：任務交回競標池，這台依 `reason` 不再對它出價：
@@ -51,6 +53,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `state_timeout` | 1.5 s | `robot_state` 多久沒更新就不出價 |
 | `assign_hold` | 0.4 s | 排第一多久才發 `current_task`（spec §2.3 規則 1：2 個廣播週期） |
 | `failure_exclude_sec` | 60 s | 失敗（不是 PERMANENT）後多久不再對同一任務出價 |
+| `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他，全隊要一樣） |
 | `recon_altitude` | 5.0 m | AIR_RECON 的巡檢高度 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | UAV：5、0.5、0.2、20；UGV：1、0.1、0.05、20 | 能量模型（狗的是佔位值，見 `cbba_core/doc/ugv_tuning.md`） |
 | `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式，**全隊要一樣**（見 `cbba_core/doc/parameters.md`） |
@@ -83,5 +86,5 @@ PX4 SITL 的整串（起飛、指派、火警、PX4 斷線）在 `docker/itest`�
 
 格式（套件、launch、yaml、話題、訊息、QoS）**完全一樣**。底下換成協定版本 2 的核心，所以分配的行為有幾點不同：
 執行中的任務不會被別台搶走；處理火警時不會被第二個火警打斷（交給別台，沒有別台就等做完）；
-持有者斷線時還沒開始的任務 1.5 s 後釋放、執行中的先鎖著（失聯接手：火警 10 s、巡檢 30 s，還沒實作）；
+持有者斷線時還沒開始的任務 1.5 s 後釋放、執行中的先鎖著，火警 10 s、巡檢 30 s 沒恢復才重新競標（失聯接手）；
 只接受目前 `current_task` 上的任務的回報；任務數量、建立者機號沒有限制（舊版每台約 32 個、機號 > 8 不能建立）。

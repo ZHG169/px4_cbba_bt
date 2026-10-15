@@ -23,6 +23,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `cost_ref` | 50 m | 換場地時，取場地半寬左右 |
 | `battery_weight` | 1.0 | 只在 0～2 之間調；超過 2 沒有額外效果 |
 | `lost_timeout` | 1.5 s | 網路很差、常誤判失聯時加大（全隊要一樣） |
+| `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他）。第 5 週弱網量測後調整（全隊要一樣） |
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
 
@@ -47,7 +48,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `participate` | `state` | `state`＝`robot_state` 在 `state_timeout` 內有更新**而且 `mode == AUTO`** 才參與（2026-10-12 起；無人機的 mode 由 px4_state_bridge 給：在空中 = AUTO）。`always`＝一律參與、不訂閱 `robot_state`，位置和電量用 `initial_position`、`battery`（只用來測協商）。不參與時 CBBA_STATE 沒有 s，紀錄照送，手上的任務立刻釋放 |
+| `participate` | `state` | `state`＝`robot_state` 在 `state_timeout` 內有更新**而且 `mode == AUTO`** 才參與（2026-10-12 起；無人機的 mode 由 px4_state_bridge 給：在空中而且爬到巡檢高度（起飛完成）= AUTO，`auto_min_altitude`）。`always`＝一律參與、不訂閱 `robot_state`，位置和電量用 `initial_position`、`battery`（只用來測協商）。不參與時 CBBA_STATE 沒有 s，紀錄照送，手上的任務立刻釋放 |
 | `state_timeout` | 1.5 s | `robot_state` 這麼久沒更新就停止參與出價。無人機的轉接節點在 PX4 的位置有在更新時就一直送（地面上也送），PX4 斷線時停送 |
 | `initial_position`、`battery` | `[0, 0, 0]`、100 | 只在 `participate:=always` 時用 |
 | `recon_altitude` | uav 5.0 m、ugv 0 | 巡檢任務（AIR_RECON）的高度。BT 常給地面座標（z = 0），z 比它低時改成它；不改的話，每段距離都多算到地面的高度差，耗電也估錯。0 = 不調整。**要和執行者的飛行高度一致** |
@@ -74,6 +75,7 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
 | `max_queued_fires` | 1 | 執行中任務之後最多保留幾個火警 |
 | `max_queue_wait` | 120 s | 沒有期限的任務，排隊時最多等多久（從任務建立時算，不會每輪競標重新起算）。有期限時用期限 |
+| `overrun_margin` | 10 s | 執行中的任務超過「開始時估的前往＋停留時間」再加這麼多秒還沒完成（例如無人機懸停監控火點、等地面處置）：不再排在它後面接新任務，已排隊、還沒開始的撤回給別台；更高優先級的搶占照常（2026-10-13，SITL 的 U6） |
 | `tick_ms` | 10 ms | 主迴圈週期：收 UDP、跑協定、送封包。改大會讓所有反應變慢 |
 | `lock_dir` | `CBBA_LOCK_DIR` → `$XDG_RUNTIME_DIR/cbba` → `/tmp/cbba` | 程序鎖 `agentN.lock` 的目錄（同一機號只能跑一個 cbba_node）。docker 的所有容器共用 `/run/cbba`（主機 `/tmp/cbba_locks`） |
 
@@ -111,6 +113,8 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 | 參數 | 預設 | 說明 |
 |---|---|---|
 | `lost_timeout` | 1.5 s | 某台的時間戳 s 這麼久沒更新就判定失聯，釋放它的任務重新分配（規格的 1.5 s）。CBBA_STATE 每 200 ms 一則，1.5 s 約 7 則都沒收到才判定。**全隊要一樣**，否則對同一台的判斷會不一致 |
+| `takeover_fire` | 10 s | 失聯接手（2026-10-12）：火警（GROUND_INTERVENTION）的持有者已接受（保留、執行中）、失聯後再過這麼久才撤銷、重新競標。「通訊斷了但還在做」和「墜毀」分不出來，火警寧可重複。**全隊要一樣**（各機自己撤銷） |
+| `takeover_patrol` | 30 s | 同上，其他任務（巡檢）：寧可等，避免兩台做同一個巡檢 |
 | `max_packet` | 1200 B | CBBA_STATE 每批（整個 UDP 封包）的上限。任務多時分批，每批 (1200 − 36 − 6 × 機數) / 16 筆；依 mesh 的 MTU 調整 |
 | `cancel_authorities` | `[]` | 除了任務的建立者，可以取消任何任務的機號（授權的管理端）。**全隊要一樣**：收到取消的 TASK_CLOSE 時也用它檢查，不一樣的話有的節點會拒絕取消 |
 
@@ -228,7 +232,7 @@ BT（或 `cbba_task.sh`）建立任務時給的值，也是出價的一部分：
 
 | 一致的範圍 | 參數 | 不一致會怎樣 |
 |---|---|---|
-| 全隊（含機器狗） | `udp_group`、`udp_port`、`lost_timeout`、`cancel_authorities`、協定版本 | 收不到彼此、對同一台的失聯判斷不同、有的節點拒絕取消；版本 1 和版本 2 的節點互相拒收 |
+| 全隊（含機器狗） | `udp_group`、`udp_port`、`lost_timeout`、`takeover_fire`、`takeover_patrol`、`cancel_authorities`、協定版本 | 收不到彼此、對同一台的失聯判斷不同、有的節點拒絕取消；版本 1 和版本 2 的節點互相拒收 |
 | 全隊 | 機號不重複 | 兩台宣布同一個 task_id（log 會印「task_id 衝突」） |
 | 每台的 CBBA 與執行者 | `cruise_speed` ↔ 執行者速度 | 到達時間估錯，期限判斷不準 |
 | 每台的 CBBA 與執行者 | `recon_altitude` ↔ 執行者飛行高度 | 距離、耗電估錯 |

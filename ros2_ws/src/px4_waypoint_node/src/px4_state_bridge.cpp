@@ -9,8 +9,10 @@
 // PX4 的位置有在更新（position_timeout 內）就一直送，地面上、未解鎖時也送。
 // 位置沒在更新（PX4 斷線）就停止送，cbba_node 在 state_timeout（1.5 s）後停止參與出價、釋放任務。
 //
-// mode（RobotState v1.2，2026-10-12 照機器狗端的介面）：飛行狀態有效、已解鎖、沒有 landed（＝在空中）時 AUTO，
-// 否則 MANUAL。cbba_node 只在 AUTO 時出價（spec §2.3 規則 2），所以無人機起飛後才參與、降落後立刻停止。
+// mode（RobotState v1.2，2026-10-12 照機器狗端的介面）：飛行狀態有效、已解鎖、沒有 landed（＝在空中），
+// 而且這次起飛後爬到過 auto_min_altitude（起飛完成）時 AUTO，否則 MANUAL。cbba_node 只在 AUTO 時出價
+// （spec §2.3 規則 2），所以無人機起飛完成後才參與（不會一離地、還在爬升就被派任務）、降落後立刻停止。
+// 到過高度之後只要還在空中就維持 AUTO（避碰、懸停時高度晃動不會反覆切換）。auto_min_altitude = 0 時離地就算。
 //
 // 飛行狀態（決定 mode 用，不送出去）：
 //   armed     = arming_state == ARMING_STATE_ARMED
@@ -73,6 +75,8 @@ public:
     agent_id_ = static_cast<std::uint8_t>(agent_id);
     const std::string ns = declare_parameter<std::string>("px4_ns", envOr("UAV_NS", ""));
     position_timeout_ = declare_parameter<double>("position_timeout", 0.5);
+    // 起飛完成的高度（出生點以上，公尺）：cbba_uav.sh 給巡檢高度 − 0.5
+    auto_min_altitude_ = declare_parameter<double>("auto_min_altitude", 0.0);
     // vehicle_status 只在改變時和低頻送（SITL 實測間隔 1.4～2.6 s）：2 s 會一直誤判成無效、mode 在 AUTO／MANUAL
     // 之間跳，cbba_node 跟著撤銷又接回任務（2026-10-12 itest 發現）。PX4 斷線靠位置的 position_timeout（0.5 s）判斷
     status_timeout_ = declare_parameter<double>("status_timeout", 5.0);
@@ -172,10 +176,19 @@ private:
     msg.position.z = z_;
     msg.battery = battery_;
     const bool airborne = valid && armed_ && !landed_;
-    msg.mode = airborne ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
-    if (airborne != airborne_) {
-      airborne_ = airborne;
-      RCLCPP_INFO(get_logger(), airborne ? "在空中：mode AUTO（可以接任務）" : "不在空中：mode MANUAL（不接任務）");
+    climbed_ = airborne && (climbed_ || z_ >= auto_min_altitude_);
+    const bool ready = airborne && climbed_;
+    msg.mode = ready ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
+    const int phase = !airborne ? 0 : (ready ? 2 : 1);
+    if (phase != phase_) {
+      phase_ = phase;
+      if (phase == 2) {
+        RCLCPP_INFO(get_logger(), "起飛完成（%.1f m）：mode AUTO（可以接任務）", z_);
+      } else if (phase == 1) {
+        RCLCPP_INFO(get_logger(), "離地、爬升中：mode MANUAL（到 %.1f m 才接任務）", auto_min_altitude_);
+      } else {
+        RCLCPP_INFO(get_logger(), "不在空中：mode MANUAL（不接任務）");
+      }
     }
     state_pub_->publish(msg);
   }
@@ -201,7 +214,9 @@ private:
   double z_{0.0};
   bool sending_{false};
   bool valid_{false};
-  bool airborne_{false};
+  double auto_min_altitude_{0.0};
+  bool climbed_{false};    // 這次起飛後爬到過 auto_min_altitude
+  int phase_{-1};          // 0 地面、1 爬升中、2 起飛完成（只用來印 log）
 
   rclcpp::Subscription<VehicleLocalPosition>::SharedPtr position_sub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr status_sub_;

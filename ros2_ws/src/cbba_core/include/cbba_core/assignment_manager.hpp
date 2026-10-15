@@ -55,6 +55,8 @@ struct AssignmentConfig
   double accept_timeout{3.0};     // 故障處理的上限，不是正常的反應時間
   std::size_t max_queued_fires{1};
   double max_queue_wait{120.0};
+  // 執行中的任務超過「開始時估的前往＋停留時間」再加這麼多秒還沒完成：不再排隊接新任務（2026-10-13）
+  double overrun_margin{10.0};
 };
 
 enum class RequestKind : std::uint8_t { ACTIVATE = 1, RESERVE = 2, RELEASE = 3 };
@@ -130,6 +132,7 @@ private:
   void startRequest(RequestKind kind, TaskId task, bool preempt, double head_since, double now);
   void accept(const Pending & p, double now);
   void release(TaskId task, std::uint64_t version);
+  void startActive(const HeldAssignment & a, double now);
   void abandonPending(const std::string & why);
   void updateConstraints(double now);
   bool inPath(TaskId task) const;
@@ -148,6 +151,8 @@ private:
   std::optional<HeldAssignment> reserved_;
   std::optional<Pending> pending_;
   double active_since_{0.0};
+  double active_expected_{0.0};    // 執行中任務預估的完成時刻（開始時估）
+  bool overrun_{false};
   double last_mismatch_warn_{-1e9};
 
   TaskId candidate_{0};

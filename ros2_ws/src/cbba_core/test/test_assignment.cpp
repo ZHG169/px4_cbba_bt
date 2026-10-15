@@ -385,7 +385,7 @@ TEST(Assignment, AcceptedTaskIsLockedUntilRevokedOrClosed)
 
 TEST(Assignment, LostHolderStaysLockedPendingConfirmation)
 {
-  // 持有者失聯：標記待確認、照樣鎖著，不重新指派（避免原載具還在執行）
+  // 持有者失聯：失聯接手的時限（火警 10 s）以內標記待確認、照樣鎖著，不重新指派（避免原載具還在執行）
   Team team;
   team.addUav(1, {0, 0, 5});
   team.addDog(50, {0, 20, 0});
@@ -402,6 +402,141 @@ TEST(Assignment, LostHolderStaysLockedPendingConfirmation)
   EXPECT_EQ(lost.front(), std::make_pair(f, AgentId{50}));
   EXPECT_EQ(team.requestsOf(51, RequestKind::ACTIVATE, f), 0);
   EXPECT_TRUE(team.swarm.node(1).taskOpen(f));
+}
+
+TEST(Assignment, LostHolderFireTakenOverAfterTimeout)
+{
+  // 失聯接手（2026-10-11 定案）：火警的持有者失聯（1.5 s）後再 10 s 還沒恢復 → 撤銷鎖定（新版本）、別台接手
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 20, 0});
+  team.addDog(51, {0, -20, 0});
+  team.swarm.run(2.0);
+  const TaskId f = makeTaskId(1, 1);
+  team.swarm.node(1).addLocalTask(groundTask(1, 1, 2, 18, team.swarm.now()), team.swarm.now());
+  team.swarm.run(1.5);
+  ASSERT_TRUE(activeIs(team.mgr(50), f));
+  const std::uint64_t v = team.mgr(50).active()->version;
+
+  team.swarm.setOnline(50, false);
+  team.swarm.run(1.5 + 8.0);   // 失聯後 8 s：還鎖著
+  EXPECT_TRUE(team.swarm.node(51).agent().locked(f));
+  EXPECT_EQ(team.requestsOf(51, RequestKind::ACTIVATE, f), 0);
+  EXPECT_EQ(team.swarm.node(1).stats().takeovers, 0);
+
+  team.swarm.run(3.0);         // 超過 10 s
+  EXPECT_TRUE(activeIs(team.mgr(51), f));
+  EXPECT_GT(team.swarm.node(1).assignment(f).version, v);
+  EXPECT_EQ(team.swarm.node(1).assignment(f).assignee, 51);
+  EXPECT_EQ(team.swarm.node(1).stats().takeovers, 1);
+  EXPECT_EQ(team.swarm.node(51).stats().takeovers, 1);
+  EXPECT_TRUE(team.swarm.node(1).lockedByLostAgents(team.swarm.now()).empty());
+  EXPECT_TRUE(team.mgr(50).active());   // 失聯的那台照樣做手上的（它不知道被接手）
+}
+
+TEST(Assignment, LostHolderPatrolWaitsLonger)
+{
+  // 巡檢寧可等：持有者失聯後 takeover_patrol（30 s）才接手，火警的 10 s 不適用
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 20, 0});
+  team.addDog(51, {0, -20, 0});
+  team.swarm.run(2.0);
+  const TaskId p = makeTaskId(1, 1);
+  Task patrol = groundTask(1, 1, 2, 18, team.swarm.now());
+  patrol.type = TaskType::PATROL;
+  team.swarm.node(1).addLocalTask(patrol, team.swarm.now());
+  team.swarm.run(1.5);
+  ASSERT_TRUE(activeIs(team.mgr(50), p));
+
+  team.swarm.setOnline(50, false);
+  team.swarm.run(1.5 + 25.0);
+  EXPECT_TRUE(team.swarm.node(51).agent().locked(p));
+  EXPECT_EQ(team.requestsOf(51, RequestKind::ACTIVATE, p), 0);
+  team.swarm.run(7.0);
+  EXPECT_TRUE(activeIs(team.mgr(51), p));
+}
+
+TEST(Assignment, LostHolderBackBeforeTimeoutKeepsTask)
+{
+  // 時限內恢復連線（短暫斷線）：不接手，任務還是原持有者的
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 20, 0});
+  team.addDog(51, {0, -20, 0});
+  team.swarm.run(2.0);
+  const TaskId f = makeTaskId(1, 1);
+  team.swarm.node(1).addLocalTask(groundTask(1, 1, 2, 18, team.swarm.now()), team.swarm.now());
+  team.swarm.run(1.5);
+  ASSERT_TRUE(activeIs(team.mgr(50), f));
+  const std::uint64_t v = team.mgr(50).active()->version;
+
+  team.swarm.setOnline(50, false);
+  team.swarm.run(6.0);
+  team.swarm.setOnline(50, true);
+  team.swarm.run(12.0);
+  EXPECT_TRUE(activeIs(team.mgr(50), f));
+  EXPECT_EQ(team.mgr(50).active()->version, v);
+  EXPECT_EQ(team.requestsOf(51, RequestKind::ACTIVATE, f), 0);
+  EXPECT_EQ(team.swarm.node(1).stats().takeovers, 0);
+  EXPECT_TRUE(team.swarm.consistent());
+}
+
+TEST(Assignment, LostHolderBackAfterTakeoverIsSuperseded)
+{
+  // 接手之後舊持有者恢復連線：它的指派被新版本取代（撤下），它的舊版本回報被拒，不會把別台在做的任務關掉
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 20, 0});
+  team.addDog(51, {0, -20, 0});
+  team.swarm.run(2.0);
+  const TaskId f = makeTaskId(1, 1);
+  team.swarm.node(1).addLocalTask(groundTask(1, 1, 2, 18, team.swarm.now()), team.swarm.now());
+  team.swarm.run(1.5);
+  ASSERT_TRUE(activeIs(team.mgr(50), f));
+  const std::uint64_t old = team.mgr(50).active()->version;
+
+  team.swarm.setOnline(50, false);
+  team.swarm.run(13.0);
+  ASSERT_TRUE(activeIs(team.mgr(51), f));
+
+  team.swarm.setOnline(50, true);
+  team.swarm.run(1.0);
+  EXPECT_FALSE(team.mgr(50).active());
+  EXPECT_EQ(team.swarm.node(50).reportResult(f, true, old, team.swarm.now()), ReportCheck::STALE);
+  team.swarm.run(2.0);
+  EXPECT_TRUE(activeIs(team.mgr(51), f));
+  EXPECT_TRUE(team.swarm.node(1).taskOpen(f));
+  EXPECT_TRUE(team.swarm.consistent());
+}
+
+TEST(Assignment, PatrollingDogNearFireBeatsIdleFarDog)
+{
+  // 2026-10-12：巡檢中的 V60 離火點 6 m、另一隻閒著但在 45 m 外：近的那隻要得標、中斷巡檢前往火點
+  // （巡檢交回重新競標）。修正前近的那隻的出價被 bundle 上限壓在巡檢分數以下、評分又算了「延後巡檢」的損失，
+  // 輸給遠的那隻
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 0, 0}, 100.0, false);
+  team.addDog(51, {-40, 0, 0}, 100.0, false);
+  team.swarm.run(2.0);
+  const TaskId patrol = makeTaskId(50, 1);
+  Task p = groundTask(50, 1, 30, 0, team.swarm.now());
+  p.type = TaskType::PATROL;
+  p.value = 80.0;
+  team.swarm.node(50).addLocalTask(p, team.swarm.now());
+  team.swarm.run(1.5);
+  ASSERT_TRUE(activeIs(team.mgr(50), patrol));
+  const std::uint64_t v = team.mgr(50).active()->version;
+
+  const TaskId fire = makeTaskId(1, 1);
+  team.swarm.node(1).addLocalTask(groundTask(1, 1, 5, 4, team.swarm.now()), team.swarm.now());
+  team.swarm.run(2.0);
+  EXPECT_TRUE(activeIs(team.mgr(50), fire));                          // 近的那隻中斷巡檢、前往火點
+  EXPECT_FALSE(team.mgr(51).active() && team.mgr(51).active()->task == fire);
+  EXPECT_GT(team.swarm.node(1).assignment(patrol).version, v);        // 巡檢這次的指派撤銷
+  EXPECT_TRUE(team.swarm.node(1).taskOpen(patrol));                   // 巡檢還在（交回重新競標）
+  EXPECT_TRUE(team.swarm.consistent());
 }
 
 TEST(Assignment, HolderThatStopsParticipatingReleasesItsLock)
@@ -497,4 +632,38 @@ TEST(Assignment, FaultAfterTimeoutDoesNotResumeIntoRequest)
   EXPECT_EQ(team.requestsOf(50, RequestKind::ACTIVATE, f), 1);
   EXPECT_FALSE(team.mgr(50).active());
   EXPECT_TRUE(team.swarm.node(50).agent().path().empty());
+}
+
+TEST(Assignment, OverrunningActiveStopsQueueingButStillPreemptable)
+{
+  // 執行中的巡檢超過預估（前往＋停留＋overrun_margin）還沒完成（例如無人機懸停監控火點、等地面處置）：
+  // 排在它後面的任務撤回、交給別台；更高優先級的火警照樣可以搶占（2026-10-13 SITL 的 U6）
+  Team team;
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {0, 0, 0}, 100.0, false);
+  team.addDog(51, {30, 0, 0}, 100.0, false);
+  team.bt(50).fresh = false;   // 節點 2026-10-12 起沒有 BT 的執行狀態
+  team.bt(51).fresh = false;
+  team.swarm.run(2.0);
+  const auto patrol = [&](std::uint16_t seq, double x) {
+      Task t = newTask(1, seq, x, 0.0, team.swarm.now(), 80.0, 300.0);
+      t.type = TaskType::PATROL;
+      t.position.z = 0.0;
+      team.swarm.node(1).addLocalTask(t, team.swarm.now());
+    };
+  patrol(1, 2.0);
+  team.swarm.run(1.0);
+  ASSERT_TRUE(activeIs(team.mgr(50), makeTaskId(1, 1)));
+  patrol(2, 4.0);
+  team.swarm.run(2.0);
+  const auto & path50 = team.swarm.node(50).agent().path();
+  ASSERT_EQ(path50.size(), 2u);   // 還沒超過預估：排在執行中的後面
+  EXPECT_EQ(path50[1], makeTaskId(1, 2));
+  team.swarm.run(18.0);           // 2 m／0.8 m/s＋5 s＋10 s 之後
+  EXPECT_EQ(team.swarm.node(50).agent().path().size(), 1u);
+  EXPECT_TRUE(activeIs(team.mgr(51), makeTaskId(1, 2)));
+  // 火警：照樣搶占超過預估的巡檢
+  team.swarm.node(1).addLocalTask(groundTask(1, 3, 1.0, 0.0, team.swarm.now()), team.swarm.now());
+  team.swarm.run(2.0);
+  EXPECT_TRUE(activeIs(team.mgr(50), makeTaskId(1, 3)));
 }
