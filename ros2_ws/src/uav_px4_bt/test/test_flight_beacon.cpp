@@ -82,7 +82,7 @@ TEST(FlightBeacon, TableKeepsLatestPerSender)
 
 TEST(FlightBeacon, TableDropsStaleAndGrounded)
 {
-  // 逾時的、在地面上的、位置無效的都不給 CPF
+  // 逾時的、在地面上的、位置無效的都不給 CBF
   NeighborTable table(1);
   Beacon ground = make(3, 1, 1, 0);
   ground.airborne = false;

@@ -1,4 +1,4 @@
-// 飛行層的位置廣播（避碰用，2026-10-09）：每台無人機 10 Hz 送自己的位置與速度，收到的鄰機給 CPF 用。
+// 飛行層的位置廣播（避碰用，2026-10-09）：每台無人機 10 Hz 送自己的位置與速度，收到的鄰機給 CBF 用。
 //
 // 和 CBBA 的協定版本 2 分開（不同的 UDP 埠、不同的 magic），CBBA 的封包格式、機器狗都不受影響：
 //   - AGENT_STATE 每 0.5 s 一次、沒有速度，5 m/s 時位置差到 2.5 m，不夠避碰用
@@ -18,7 +18,7 @@
 #include <optional>
 #include <vector>
 
-#include "uav_px4_bt/cpf.hpp"
+#include "uav_px4_bt/cbf.hpp"
 
 namespace uav_px4_bt
 {

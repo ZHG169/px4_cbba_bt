@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "uav_px4_bt/cpf.hpp"
+#include "uav_px4_bt/cbf.hpp"
 
 namespace uav_px4_bt
 {
@@ -48,6 +48,13 @@ struct FireObservation
   double received{0.0};       // 收到的時間（platform 的 now）
 };
 
+// 全隊已知的地面處置任務（cbba_node 的 task_announced，2026-10-14）：火點去重複要算進別台報過的
+struct KnownGroundTask
+{
+  std::uint32_t task_id{0};
+  Vec3 position;              // 火點（map ENU，z = 0）
+};
+
 // swarm_interfaces/ExecState 的值
 enum class ExecMode : std::uint8_t { IDLE = 0, NAVIGATING = 1, EXECUTING = 2, NON_INTERRUPTIBLE = 3, STOPPING = 4, FAULT = 5 };
 
@@ -60,6 +67,7 @@ struct ExecStatus
   std::uint64_t active_version{0};
 };
 
+constexpr std::uint8_t kTaskAirRecon = 1;
 constexpr std::uint8_t kTaskGroundIntervention = 2;
 
 class UavPlatform
@@ -72,8 +80,11 @@ public:
   virtual std::vector<Neighbor> neighbors() const = 0;  // 位置廣播收到的鄰機
   virtual std::vector<FireObservation> fireObservations() const = 0;
 
-  // 速度命令（map ENU）：每個 tick 由目前在跑的動作節點設定；節點層照 setpoint 頻率送給 PX4
+  // 速度命令（map ENU，沒有位置）：起飛前送零速度等用；每個 tick 由目前在跑的動作節點設定
   virtual void setVelocity(const Vec3 & velocity) = 0;
+  // 位置＋速度前饋（map ENU）：一般的移動、懸停（UavContext::moveTo 經過運動平滑層之後）；
+  // 這個 tick 沒有動作節點設定時，節點層保持上一次的位置（速度 0）
+  virtual void setSetpoint(const Vec3 & position, const Vec3 & velocity) = 0;
   virtual void requestOffboardAndArm() = 0;             // 呼叫的人負責節流
   virtual void requestReturnToLaunch() = 0;
   virtual void stopOffboard() = 0;                      // 不再送 offboard setpoint（交給 PX4 的自動模式）
@@ -83,6 +94,10 @@ public:
   virtual std::uint32_t createTask(std::uint8_t type, const Vec3 & position, double value,
     double duration, double deadline) = 0;
   virtual void setExecStatus(const ExecStatus & status) = 0;
+  // 任務已經結束（cbba_node 的 task_closed：完成或取消）。2026-10-13：火警懸停監控等地面處置完成用
+  virtual bool taskClosed(std::uint32_t /*task_id*/) const {return false;}
+  // 全隊已知的地面處置任務（含別台建立的）。2026-10-14：別台報過的火不再發布、不轉向
+  virtual std::vector<KnownGroundTask> groundTasks() const {return {};}
   virtual void log(const std::string & text) = 0;
 };
 

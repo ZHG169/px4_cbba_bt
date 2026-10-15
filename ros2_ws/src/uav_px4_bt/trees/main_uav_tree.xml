@@ -25,8 +25,9 @@
                                      blackboard_task="{current_uav_task}"/>
             <Fallback name="TaskOrFailure">
               <Sequence name="AirReconSequence">
-                <!-- 1. CPF 避碰、飛抵目標空域 -->
-                <FlyToWaypoint task="{active_uav_task}" altitude="{altitude}"/>
+                <!-- 1. CBF 避碰、飛抵目標空域 -->
+                <!--    飛行途中也看 tag 101：路過發現火警就丟出地面處置任務、繼續飛 -->
+                <FlyToWaypoint task="{active_uav_task}" altitude="{altitude}" watch_fire_tag="101" min_confidence="0.85"/>
                 <!-- 2～3. 下視相機驗證 AprilTag 火情標籤 → 向全網注入地面處置任務；沒有火警就繼續 -->
                 <Fallback name="FireCheck">
                   <Sequence name="FireConfirmed">

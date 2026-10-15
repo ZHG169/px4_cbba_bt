@@ -48,21 +48,74 @@ double remainingHover(const UavContext & ctx, const AssignedTask & t)
 // ===========================================================================
 // UavContext
 // ===========================================================================
-double UavContext::moveTo(const Vec3 & goal)
+double UavContext::moveTo(const Vec3 & goal, bool yield_to_busy)
 {
   const VehicleState v = platform.vehicle();
-  const CpfOutput out = cpfVelocity(v.position, v.velocity, goal, platform.neighbors(), config.cpf);
-  platform.setVelocity(out.velocity);
+  const CbfOutput out = cbfVelocity(v.position, goal, platform.neighbors(), config.cbf, yield_to_busy);
+  const Setpoint sp = motion_.step(platform.timeNow(), v.position, v.velocity, out.velocity, goal,
+      out.active_neighbors > 0);
+  platform.setSetpoint(sp.position, sp.velocity);
   // 一次「接近」（最近鄰機 < 1.5 × safe_radius）結束時印這次的最近距離：懸停時鄰機在影響範圍內、
   // 互相推開到平衡點是正常的，不印
-  const bool close = out.min_distance >= 0.0 && out.min_distance < 1.5 * config.cpf.safe_radius;
+  const bool close = out.min_distance >= 0.0 && out.min_distance < 1.5 * config.cbf.safe_radius;
   if (close) {
     encounter_min_ = encounter_min_ < 0.0 ? out.min_distance : std::min(encounter_min_, out.min_distance);
   } else if (encounter_min_ >= 0.0) {
-    platform.log(fmt("避碰：這次最接近鄰機 %.2f m（安全距離 %.1f m）", encounter_min_, config.cpf.safe_radius, 0));
+    platform.log(fmt("避碰：這次最接近鄰機 %.2f m（安全距離 %.1f m）", encounter_min_, config.cbf.safe_radius, 0));
     encounter_min_ = -1.0;
   }
   return norm(goal - v.position);
+}
+
+bool UavContext::fireReported(const Vec3 & p) const
+{
+  return fireTaskNear(p).has_value();
+}
+
+bool UavContext::ownFireTask(std::uint32_t task_id) const
+{
+  return std::find(fire_tasks.begin(), fire_tasks.end(), task_id) != fire_tasks.end();
+}
+
+std::optional<FireObservation> UavContext::newFire(unsigned tag, double min_conf, int min_frames,
+  double max_age) const
+{
+  const double now = platform.timeNow();
+  for (const FireObservation & o : platform.fireObservations()) {
+    if (o.tag_id == tag && now - o.received <= max_age && o.frames >= min_frames && o.confidence >= min_conf &&
+      !fireReported(o.position))
+    {
+      return o;
+    }
+  }
+  return std::nullopt;
+}
+
+std::uint32_t UavContext::reportFire(const Vec3 & p)
+{
+  // 地面處置任務：地面上的點（z = 0），無人機不出價、機器狗接
+  const std::uint32_t id = platform.createTask(kTaskGroundIntervention, {p.x, p.y, 0.0},
+      config.fire_task_value, config.fire_task_duration, config.fire_task_deadline);
+  reported_fires.push_back(p);
+  fire_tasks.push_back(id);
+  platform.log("廣播地面處置任務 " + taskName(id) + fmt("：(%.1f, %.1f)", p.x, p.y, 0));
+  return id;
+}
+
+std::optional<std::uint32_t> UavContext::fireTaskNear(const Vec3 & p) const
+{
+  for (std::size_t i = 0; i < reported_fires.size() && i < fire_tasks.size(); ++i) {
+    if (std::hypot(reported_fires[i].x - p.x, reported_fires[i].y - p.y) <= config.fire_dedup_radius) {
+      return fire_tasks[i];
+    }
+  }
+  // 別台報過的（cbba_node 的 task_announced，2026-10-14）：BT 的 blackboard 只在這台，別台的要從 CBBA 來
+  for (const KnownGroundTask & g : platform.groundTasks()) {
+    if (std::hypot(g.position.x - p.x, g.position.y - p.y) <= config.fire_dedup_radius) {
+      return g.task_id;
+    }
+  }
+  return std::nullopt;
 }
 
 void UavContext::setExec(ExecMode mode, double remaining, const AssignedTask * active)
@@ -285,6 +338,10 @@ public:
     return {
       BT::InputPort<AssignedTask>("task"),
       BT::InputPort<double>("altitude", 5.0, "飛行高度（公尺）"),
+      BT::InputPort<unsigned>("watch_fire_tag", 101u, "飛行途中也看這個火警 tag（0 = 不看）"),
+      BT::InputPort<double>("min_confidence", 0.85, "confidence 達到才判定火警"),
+      BT::InputPort<int>("min_frames", 5, "confidence 至少要用幾張影像算"),
+      BT::InputPort<double>("max_age", 0.5, "偵測結果多舊以內才算"),
     };
   }
 
@@ -298,8 +355,8 @@ public:
     task_ = *task;
     ctx.waypoint = waypointOf(task_, getInput<double>("altitude").value_or(5.0));
     const double d = norm(ctx.waypoint - ctx.platform.vehicle().position);
-    deadline_ = ctx.platform.timeNow() + d / std::max(ctx.config.cpf.max_speed, 0.1) * 2.0 +
-      ctx.config.fly_timeout_margin;
+    start_ = ctx.platform.timeNow();
+    deadline_ = start_ + d / std::max(ctx.config.cbf.max_speed, 0.1) * 2.0 + ctx.config.fly_timeout_margin;
     ctx.platform.log("前往 " + taskName(task_.task_id) +
       fmt("：(%.1f, %.1f, %.1f)", ctx.waypoint.x, ctx.waypoint.y, ctx.waypoint.z));
     last_log_ = ctx.platform.timeNow();
@@ -311,15 +368,24 @@ public:
     UavContext & ctx = ctxOf(*this);
     const double d = ctx.moveTo(ctx.waypoint);
     const double now = ctx.platform.timeNow();
-    ctx.setExec(ExecMode::NAVIGATING, d / std::max(ctx.config.cpf.max_speed, 0.1) + task_.duration, &task_);
+    ctx.setExec(ExecMode::NAVIGATING, d / std::max(ctx.config.cbf.max_speed, 0.1) + task_.duration, &task_);
+    if (watchFire(ctx, now)) {
+      return BT::NodeStatus::FAILURE;
+    }
     if (d < ctx.config.reach_tolerance) {
       ctx.arrival = now;
       ctx.platform.log("到達 " + taskName(task_.task_id) + fmt("，停留 %.1f s", task_.duration, 0, 0));
       return BT::NodeStatus::SUCCESS;
     }
     if (now > deadline_) {
-      ctx.platform.log("前往 " + taskName(task_.task_id) + fmt(" 逾時（剩 %.1f m）", d, 0, 0));
-      return BT::NodeStatus::FAILURE;
+      if (ctx.config.fly_timeout_abort) {
+        ctx.platform.log("前往 " + taskName(task_.task_id) + fmt(" 逾時（剩 %.1f m）", d, 0, 0));
+        return BT::NodeStatus::FAILURE;
+      }
+      // 調 CBF 時（fly_timeout_abort = false）：只印警告、繼續飛，每 kSlowWarnPeriod 秒印一次
+      ctx.platform.log("飛太久：前往 " + taskName(task_.task_id) +
+        fmt(" 已 %.1f s（逾時 %.1f s），剩 %.1f m，繼續飛", now - start_, deadline_ - start_, d));
+      deadline_ = now + kSlowWarnPeriod;
     }
     if (now - last_log_ >= 2.0) {
       last_log_ = now;
@@ -331,7 +397,52 @@ public:
   void onHalted() override {}
 
 private:
+  // 路過發現：飛行途中下視相機看到火警 tag（還沒回報過的火點）→ 地面處置任務（給 V60 競標），繼續飛自己的任務。
+  // fire_divert_on_sight：另外建立火點監控任務（AIR_RECON，停留 fire_monitor_sec），手上的任務回報失敗 FIRE_FOUND
+  // （PREEMPTED：交回 CBBA 改派），之後原地懸停到 CBBA 派下監控任務（離火點最近、又空著的通常是自己）。
+  // 不由 BT 自己脫隊飛過去：CBBA 會以為它還空著、照樣派任務給它，那個任務就卡住。
+  // 位置是飛行中算的（沒有先懸停穩定），可能差一點；到了火點、懸停後看到的同一個火點不會再報。
+  // 回傳是否要結束這次飛行（改去懸停時：FlyToWaypoint 回傳 FAILURE，失敗分支看到已回報不會再報一次）
+  bool watchFire(UavContext & ctx, double now)
+  {
+    const unsigned tag = getInput<unsigned>("watch_fire_tag").value_or(101u);
+    if (tag == 0) {
+      return false;
+    }
+    const double min_conf = getInput<double>("min_confidence").value_or(0.85);
+    const int min_frames = getInput<int>("min_frames").value_or(5);
+    const double max_age = getInput<double>("max_age").value_or(0.5);
+    for (const FireObservation & o : ctx.platform.fireObservations()) {
+      if (o.tag_id != tag || now - o.received > max_age || o.frames < min_frames ||
+        o.confidence < min_conf || ctx.fireReported(o.position))
+      {
+        continue;
+      }
+      // 火點就是這次的目的地（被派去火警點）：到達、懸停穩定後由 DetectAprilTagFire 判定，途中不處理
+      if (std::hypot(o.position.x - ctx.waypoint.x, o.position.y - ctx.waypoint.y) <= ctx.config.fire_dedup_radius) {
+        continue;
+      }
+      ctx.platform.log("飛行途中發現火警：tag " + std::to_string(tag) +
+        fmt("，confidence %.2f，位置 (%.1f, %.1f)", o.confidence, o.position.x, o.position.y));
+      ctx.reportFire(o.position);
+      if (!ctx.config.fire_divert_on_sight) {
+        continue;   // 繼續飛自己的任務
+      }
+      const std::uint32_t monitor = ctx.platform.createTask(kTaskAirRecon, {o.position.x, o.position.y, 0.0},
+          ctx.config.fire_monitor_value, ctx.config.fire_monitor_sec, ctx.config.fire_task_deadline);
+      ctx.platform.log("建立火點監控任務 " + taskName(monitor) + fmt("（停留 %.0f s）；放下 ", ctx.config.fire_monitor_sec, 0, 0) +
+        taskName(task_.task_id) + "，交回 CBBA");
+      ctx.platform.reportResult(task_, false, "FIRE_FOUND");
+      ctx.markReported(task_);
+      return true;
+    }
+    return false;
+  }
+
+  static constexpr double kSlowWarnPeriod = 10.0;
+
   AssignedTask task_;
+  double start_{0.0};
   double deadline_{0.0};
   double last_log_{0.0};
 };
@@ -386,8 +497,9 @@ public:
       {
         continue;
       }
-      if (ctx.reported_fire_tags.count(tag) > 0) {
-        ctx.platform.log("看到火警 tag " + std::to_string(tag) + "，已經回報過，不再建立任務");
+      if (ctx.fireReported(o.position)) {
+        ctx.platform.log("看到火警 tag " + std::to_string(tag) +
+          fmt("，(%.1f, %.1f) 已經回報過，不再建立任務", o.position.x, o.position.y, 0));
         return BT::NodeStatus::FAILURE;
       }
       setOutput("fire_pose", o.position);
@@ -428,11 +540,7 @@ public:
     if (!pose || !tag) {
       return BT::NodeStatus::FAILURE;
     }
-    // 地面處置任務：地面上的點（z = 0），無人機不出價、機器狗接
-    const std::uint32_t id = ctx.platform.createTask(kTaskGroundIntervention, {pose->x, pose->y, 0.0},
-        ctx.config.fire_task_value, ctx.config.fire_task_duration, ctx.config.fire_task_deadline);
-    ctx.reported_fire_tags.insert(*tag);
-    ctx.platform.log("廣播地面處置任務 " + taskName(id) + fmt("：(%.1f, %.1f)", pose->x, pose->y, 0));
+    ctx.reportFire(*pose);
     return BT::NodeStatus::SUCCESS;
   }
 };
@@ -523,7 +631,7 @@ public:
     const VehicleState v = ctx.platform.vehicle();
     bool yield = false;
     for (const Neighbor & n : ctx.platform.neighbors()) {
-      yield = yield || (n.busy && norm(n.position - v.position) < ctx.config.cpf.influence_radius);
+      yield = yield || (n.busy && norm(n.position - v.position) < ctx.config.cbf.influence_radius);
     }
     if (yield) {
       hold_ = v.position;
@@ -532,7 +640,7 @@ public:
       }
     }
     yielding_ = yield;
-    ctx.moveTo(hold_);
+    ctx.moveTo(hold_, true);
     ctx.setExec(ExecMode::IDLE, -1.0, nullptr);
     return BT::NodeStatus::RUNNING;
   }

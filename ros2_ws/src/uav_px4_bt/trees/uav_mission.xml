@@ -1,0 +1,69 @@
+<!--
+  無人機的任務樹（2026-10-12）：機器狗端（伯宇）的 task_manager 骨架 bt/mission.xml，照 UAV_BT_GUIDE v2 §3 改三處：
+    1. VisitOneWaypoint：GoTo（Nav2）→ NavigateTo（PX4，CBF 避碰、運動平滑、飛行途中看火警：
+       看到就發布地面任務、轉向火點上空懸停監控、再回航線；divert="false" 改成只發布、繼續飛）
+    2. RunOneTask 的 Switch2：ptz_inspect / PtzInspect → air_recon / AirRecon（懸停、認 tag 101、發布地面處置任務、
+       懸停監控到地面任務結束；fire_monitor_timeout 由 node 的參數 fire_task.monitor_timeout 給）
+    3. 沒有 DefaultBehavior：佇列空 → 樹結束 → node 層待命盤旋（讓路給執行中的鄰機）；起飛、低電量返航也在 node 層
+  其餘（安全守門、哨兵、HandleWaypointFailure、HandleTaskFailure、MarkMissionAborted）不動。
+  葉節點在 include/uav_px4_bt/skeleton/uav_leaves.hpp，骨架節點在 skeleton/bt_nodes.hpp。
+-->
+<root BTCPP_format="4" main_tree_to_execute="MissionTree">
+
+<BehaviorTree ID="MissionTree">
+  <ReactiveSequence name="安全守門">
+    <Inverter>
+      <IsEmergency/>
+    </Inverter>
+    <IsTaskValidAndUnchanged current="{current_task_id}" active="{active_task_id}"/>
+    <SubTree ID="PatrolAllWaypoints" _autoremap="true"/>
+  </ReactiveSequence>
+</BehaviorTree>
+
+
+<BehaviorTree ID="PatrolAllWaypoints">
+  <Fallback name="中止也要留記錄">
+    <LoopWaypoint queue="{waypoints}" value="{wp}" if_empty="SUCCESS">
+      <SubTree ID="VisitOneWaypoint" _autoremap="true"/>
+    </LoopWaypoint>
+    <MarkMissionAborted/>
+  </Fallback>
+</BehaviorTree>
+
+
+<BehaviorTree ID="VisitOneWaypoint">
+  <Fallback name="VisitOrSkipWaypoint">
+
+    <Sequence name="DoWaypointWork">
+      <NavigateTo waypoint="{wp}" altitude="{altitude}" monitor_timeout="{fire_monitor_timeout}"/>
+      <LoadTasks waypoint="{wp}" tasks="{tasks}"/>
+      <LoopTask queue="{tasks}" value="{task}" if_empty="SUCCESS">
+        <Fallback name="RunOrHandleFailure">
+          <Sequence name="RunOneTaskSeq">
+            <SplitTask task="{task}" action="{task_action}"/>
+            <SubTree ID="RunOneTask" _autoremap="true"/>
+          </Sequence>
+          <HandleTaskFailure waypoint="{wp}" task="{task}"/>
+        </Fallback>
+      </LoopTask>
+    </Sequence>
+
+    <HandleWaypointFailure waypoint="{wp}" current="{current_task_id}" active="{active_task_id}"/>
+
+  </Fallback>
+</BehaviorTree>
+
+
+<BehaviorTree ID="RunOneTask">
+  <Switch2 variable="{task_action}"
+           case_1="air_recon"
+           case_2="report_result">
+
+    <AirRecon         task="{task}" monitor_timeout="{fire_monitor_timeout}"/>
+    <ReportTaskResult task="{task}" current="{current_task_id}" active="{active_task_id}"/>
+
+    <UnknownTask action="{task_action}"/>
+  </Switch2>
+</BehaviorTree>
+
+</root>

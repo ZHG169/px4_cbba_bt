@@ -10,72 +10,13 @@
 #include <behaviortree_cpp/bt_factory.h>
 
 #include "uav_px4_bt/bt_nodes.hpp"
+#include "fake_platform.hpp"
 
 using namespace uav_px4_bt;
 
 namespace
 {
-struct Result
-{
-  std::uint32_t task_id;
-  std::uint64_t version;
-  bool success;
-  std::string detail;
-};
-
-struct Created
-{
-  std::uint8_t type;
-  Vec3 position;
-};
-
-class FakePlatform : public UavPlatform
-{
-public:
-  double timeNow() const override {return t;}
-  VehicleState vehicle() const override {return v;}
-  std::vector<Neighbor> neighbors() const override {return nbrs;}
-  std::vector<FireObservation> fireObservations() const override {return fires;}
-  void setVelocity(const Vec3 & cmd) override {velocity_cmd = cmd;}
-  void requestOffboardAndArm() override {++arm_requests; v.armed = true; v.offboard = true;}
-  void requestReturnToLaunch() override {++rtl_requests; v.offboard = false;}
-  void stopOffboard() override {offboard = false;}
-  void reportResult(const AssignedTask & task, bool success, const std::string & detail) override
-  {
-    results.push_back({task.task_id, task.version, success, detail});
-  }
-  std::uint32_t createTask(std::uint8_t type, const Vec3 & p, double, double, double) override
-  {
-    created.push_back({type, p});
-    return 0x00018000u + static_cast<std::uint32_t>(created.size());
-  }
-  void setExecStatus(const ExecStatus & s) override {exec = s;}
-  void log(const std::string &) override {}
-
-  // 一個 tick 之後的動態
-  void advance(double dt)
-  {
-    if (v.armed && v.offboard && !stuck) {
-      v.velocity = v.velocity + (velocity_cmd - v.velocity) * (dt / 0.3);
-      v.position = v.position + v.velocity * dt;
-      v.landed = v.position.z < 0.1;
-    }
-    t += dt;
-  }
-
-  double t{100.0};
-  VehicleState v;
-  Vec3 velocity_cmd;
-  bool stuck{false};
-  bool offboard{true};
-  int arm_requests{0};
-  int rtl_requests{0};
-  std::vector<FireObservation> fires;
-  std::vector<Neighbor> nbrs;
-  std::vector<Result> results;
-  std::vector<Created> created;
-  ExecStatus exec;
-};
+using uav_px4_bt::test::FakePlatform;
 
 class TreeTest : public ::testing::Test
 {
@@ -130,13 +71,13 @@ protected:
     return t;
   }
 
-  FireObservation fire(std::uint32_t tag, double confidence, int frames)
+  FireObservation fire(std::uint32_t tag, double confidence, int frames, Vec3 position = {10.3, -0.2, 0.3})
   {
     FireObservation o;
     o.tag_id = tag;
     o.confidence = confidence;
     o.frames = frames;
-    o.position = {10.3, -0.2, 0.3};
+    o.position = position;
     o.received = platform.t;
     return o;
   }
@@ -193,7 +134,7 @@ TEST_F(TreeTest, ExecutesAssignmentAndReportsWithVersion)
 TEST_F(TreeTest, FireConfirmedCreatesGroundTaskOnce)
 {
   // 到達後看到 tag 101（confidence 0.9、10 張）→ 懸停穩定 1 s 後才判定 → 建立 GROUND_INTERVENTION（地面 z = 0）；
-  // 同一個 tag 只報一次
+  // 同一個火點只報一次
   ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
   assigned = task(0x00010001, 10, 0, 2.0, 1);
   ASSERT_TRUE(runUntil([&] {return ctx->arrival >= 0.0;}, 15.0));
@@ -216,6 +157,118 @@ TEST_F(TreeTest, FireConfirmedCreatesGroundTaskOnce)
   platform.fires = {fire(101, 0.95, 10)};
   ASSERT_TRUE(runUntil([&] {return platform.results.size() == 2;}, 10.0));
   EXPECT_EQ(platform.created.size(), 1u);
+}
+
+TEST_F(TreeTest, FireAtAnotherPlaceIsReportedAgain)
+{
+  // 火點都貼 tag 101：另一個地點（超過 fire_dedup_radius 3 m）的火警要再建立一個地面任務（2026-10-12 前只看 tag 編號，
+  // 第二個火點不會報）；回到第一個火點附近（3 m 內）則不再報
+  ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
+  assigned = task(0x00010001, 10, 0, 2.0, 1);
+  ASSERT_TRUE(runUntil([&] {return ctx->arrival >= 0.0;}, 15.0));
+  // 到達後才看得到（飛行途中看到會走「路過發現」，見 FireSeenOnTheWayDivertsToMonitor）；
+  // 偵測結果一直在更新（max_age 0.5 s，懸停穩定 1 s 後才判斷）
+  auto seen = [&](Vec3 p, std::size_t n) {
+      return runUntil([&] {
+               platform.fires.clear();
+               if (ctx->arrival >= 0.0) {
+                 platform.fires = {fire(101, 0.9, 10, p)};
+               }
+               return platform.results.size() == n;
+             }, 20.0);
+    };
+  ASSERT_TRUE(seen({10.3, -0.2, 0.3}, 1));
+  ASSERT_EQ(platform.created.size(), 1u);
+
+  assigned = task(0x00010002, 0, 12, 2.0, 1);
+  ASSERT_TRUE(runUntil([&] {return ctx->arrival >= 0.0;}, 15.0));
+  ASSERT_TRUE(seen({0.2, 12.1, 0.3}, 2));
+  ASSERT_EQ(platform.created.size(), 2u);
+  EXPECT_NEAR(platform.created[1].position.y, 12.1, 1e-9);
+
+  assigned = task(0x00010003, 11, 1, 2.0, 1);
+  ASSERT_TRUE(runUntil([&] {return ctx->arrival >= 0.0;}, 15.0));
+  ASSERT_TRUE(seen({11.5, 1.0, 0.3}, 3));   // 第一個火點 1.6 m 內
+  EXPECT_EQ(platform.created.size(), 2u);
+}
+
+TEST_F(TreeTest, FireSeenOnTheWayIsReportedAndFlightContinues)
+{
+  // 路過發現（2026-10-12，預設）：飛往 (30, 0) 的途中看到 tag 101 → 馬上建立地面處置任務（給 V60 競標），
+  // 繼續飛完自己的任務；到達後不再報同一個火點
+  ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
+  assigned = task(0x00010001, 30, 0, 1.0, 1);
+  ASSERT_TRUE(runUntil([&] {return platform.v.position.x > 8.0;}, 20.0));
+  ASSERT_TRUE(runUntil([&] {
+      platform.fires = {fire(101, 0.9, 8, {12.0, 0.4, 0.3})};
+      return !platform.created.empty();
+    }, 5.0));
+  EXPECT_LT(ctx->arrival, 0.0);                       // 還在飛
+  ASSERT_EQ(platform.created.size(), 1u);
+  EXPECT_EQ(platform.created[0].type, kTaskGroundIntervention);
+  EXPECT_NEAR(platform.created[0].position.x, 12.0, 1e-9);
+  ASSERT_TRUE(runUntil([&] {
+      platform.fires = {fire(101, 0.9, 8, {12.0, 0.4, 0.3})};
+      return !platform.results.empty();
+    }, 30.0));
+  EXPECT_TRUE(platform.results[0].success);
+  EXPECT_NEAR(platform.v.position.x, 30.0, 1.0);
+  EXPECT_EQ(platform.created.size(), 1u);
+}
+
+TEST_F(TreeTest, FireSeenOnTheWayDivertsToMonitorWhenEnabled)
+{
+  // fire_divert_on_sight = true：地面處置任務＋火點監控任務（AIR_RECON，停留 20 s），
+  // 手上的任務回報失敗 FIRE_FOUND、原地懸停；CBBA 派下監控任務 → 飛到火點上空懸停到時間、回報完成；不重複報火警
+  ctx->config.fire_divert_on_sight = true;
+  ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
+  assigned = task(0x00010001, 30, 0, 1.0, 1);
+  ASSERT_TRUE(runUntil([&] {return platform.v.position.x > 8.0;}, 20.0));
+  ASSERT_LT(ctx->arrival, 0.0);
+  const Vec3 fire_at{12.0, 0.4, 0.3};
+  ASSERT_TRUE(runUntil([&] {
+      platform.fires = {fire(101, 0.9, 8, fire_at)};
+      return !platform.created.empty();
+    }, 5.0));
+  ASSERT_EQ(platform.created.size(), 2u);
+  EXPECT_EQ(platform.created[0].type, kTaskGroundIntervention);
+  EXPECT_NEAR(platform.created[0].position.x, 12.0, 1e-9);
+  EXPECT_EQ(platform.created[1].type, kTaskAirRecon);
+  EXPECT_DOUBLE_EQ(platform.created[1].duration, 20.0);
+  ASSERT_EQ(platform.results.size(), 1u);
+  EXPECT_FALSE(platform.results[0].success);
+  EXPECT_EQ(platform.results[0].detail, "FIRE_FOUND");
+
+  // cbba_node 還沒撤下之前：不再往 (30, 0) 飛
+  const double x_stop = platform.v.position.x;
+  run(2.0);
+  EXPECT_LT(platform.v.position.x, x_stop + 2.0);
+  EXPECT_EQ(platform.results.size(), 1u);
+
+  // CBBA 派下監控任務（離火點最近、空著的是自己）
+  assigned = task(platform.created[1].task_id, fire_at.x, fire_at.y, 20.0, 1);
+  ASSERT_TRUE(runUntil([&] {
+      platform.fires = {fire(101, 0.9, 8, fire_at)};
+      return platform.results.size() == 2;
+    }, 60.0));
+  EXPECT_TRUE(platform.results[1].success);
+  EXPECT_NEAR(platform.v.position.x, 12.0, 1.0);
+  EXPECT_EQ(platform.created.size(), 2u);              // 同一個火點不再報
+}
+
+TEST_F(TreeTest, FireAtDestinationIsJudgedOnArrival)
+{
+  // 被派去火警點（目的地就是火點）：途中就看得到 tag 101，但不走「路過發現」（不建立監控任務、不放下這個任務），
+  // 到達、懸停穩定後才判定 → 一個地面處置任務，停留後回報完成
+  ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
+  assigned = task(0x00010001, 20, 0, 3.0, 1);
+  ASSERT_TRUE(runUntil([&] {
+      platform.fires = {fire(101, 0.9, 8, {20.3, -0.2, 0.3})};
+      return !platform.results.empty();
+    }, 40.0));
+  EXPECT_TRUE(platform.results[0].success);
+  ASSERT_EQ(platform.created.size(), 1u);
+  EXPECT_EQ(platform.created[0].type, kTaskGroundIntervention);
 }
 
 TEST_F(TreeTest, WrongTagOrLowConfidenceIsNotFire)
@@ -312,15 +365,15 @@ TEST_F(TreeTest, FlyTimeoutReportsFailure)
 
 TEST_F(TreeTest, LoiterYieldsToBusyNeighbor)
 {
-  // 待命時，執行任務中的鄰機停在 1.5 m 外：被推開、在新位置待命（鄰機走了也不回原點）；
-  // 待命的鄰機（不是執行中）只會互相推到平衡點，不改待命點
+  // 待命時，執行任務中的鄰機在 1.5 m 外、1 m/s 飛過來：讓開、在新位置待命（鄰機走了也不回原點）；
+  // 待命的鄰機（不是執行中）3 m 外懸停：CBF 不推，不改待命點（2026-10-14 CPF → CBF：只限制靠近的速度）
   ASSERT_TRUE(runUntil([&] {return ctx->airborne;}, 15.0));
   run(1.0);
   const Vec3 start = platform.v.position;
-  platform.nbrs = {Neighbor{2, start + Vec3{1.5, 0, 0}, {}, 0.05, true}};
+  platform.nbrs = {Neighbor{2, start + Vec3{1.5, 0, 0}, {-1.0, 0, 0}, 0.05, true}};
   run(6.0);
   const double moved = norm(platform.v.position - start);
-  EXPECT_GT(moved, 3.0);
+  EXPECT_GT(moved, 0.4);
   platform.nbrs.clear();
   run(3.0);
   EXPECT_NEAR(norm(platform.v.position - start), moved, 0.5);
