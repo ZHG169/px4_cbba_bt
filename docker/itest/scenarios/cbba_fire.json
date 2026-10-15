@@ -1,0 +1,28 @@
+{
+  "_說明": "CBBA 出價自然產生的交會＋火警（2026-10-14 第二版）：A（G1 (0, −6)，停 20 s）、B（G2 (0, −14)）、C（G3）同時建立，R2 (2.5, −14) 一開始起火（不建成任務）。G1、G2 在出生點那條南北線往南的延長線上，誰拿 B 航線都正對 A。依評分（距離 × 到達時間 ÷ 期限）預期：A → uav1（成本 15）、B → uav2（107；uav1 把 B 排在 A 前後要 172 以上、uav3 135）、C → uav3。uav2 往南先跟在 uav1 後面、再正對懸停的 uav1 → CBF 往右繞；到 B 懸停時看到旁邊 2.5 m 的 R2 → 發布地面任務 → 移到火點上空監控到假狗處理完。用法：python3 docker/itest/itest.py demo --scenario cbba_fire",
+  "tasks": [
+    {
+      "name": "A",
+      "point": "G1",
+      "duration": 20
+    },
+    {
+      "name": "B",
+      "point": "G2",
+      "duration": 4
+    },
+    {
+      "name": "C",
+      "point": "G3",
+      "duration": 4
+    }
+  ],
+  "fires": [
+    {
+      "name": "F_R2",
+      "point": "R2",
+      "at": 0
+    }
+  ],
+  "timeout": 200
+}

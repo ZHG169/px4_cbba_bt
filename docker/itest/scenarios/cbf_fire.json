@@ -1,0 +1,25 @@
+{
+  "_說明": "CBF＋火警（插入時機固定）：R2 (2.5, −14) 一開始起火（不建成任務）；A 在 G1 (0, −6) 懸停 25 s；A 的執行者到點後插入 B（G2 (0, −14)）。飛 B 的那台正對著懸停在 A 的那台飛過去（CBF），到 B 懸停時看到旁邊 2.5 m 的 R2 → 發布地面任務 → 移到火點上空監控 → 假狗處理完 → 完成 B → 回起飛點。要看 CBBA 同時出價的版本用 cbba_fire。用法：python3 docker/itest/itest.py demo --scenario cbf_fire",
+  "tasks": [
+    {
+      "name": "A",
+      "point": "G1",
+      "duration": 25
+    },
+    {
+      "name": "B",
+      "point": "G2",
+      "duration": 4,
+      "after_arrival": "A",
+      "delay": 1
+    }
+  ],
+  "fires": [
+    {
+      "name": "F_R2",
+      "point": "R2",
+      "at": 0
+    }
+  ],
+  "timeout": 200
+}

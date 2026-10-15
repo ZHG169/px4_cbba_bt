@@ -86,6 +86,9 @@ if pgrep -f "gz[ ]sim" >/dev/null 2>&1; then
     done
     if [ -z "${RUNNING_WORLD}" ]; then
         echo "[px4_sitl] Gazebo 在跑，但 30 s 內讀不到世界名稱（gz topic -l 沒有 /world/<名稱>/clock）"
+        echo "[px4_sitl] 多半是上一次殘留、已經卡住的 Gazebo（不理一般的 pkill），而且這種情況不會開視窗。先強制關掉再重開："
+        pgrep -af "gz[ ]sim" | sed 's/^/[px4_sitl]   /'
+        echo "[px4_sitl]   pkill -9 -f \"gz sim\"     （還在的話在主機 docker restart cbba_sim）"
         exit 1
     fi
     if [ -n "${CBBA_WORLD:-}" ] && [ "${CBBA_WORLD}" != "${RUNNING_WORLD}" ]; then
@@ -107,7 +110,17 @@ if [ -n "${CBBA_WORLD:-}" ] && ! pgrep -f "gz[ ]sim" >/dev/null 2>&1; then
     echo "[px4_sitl] 開啟場景 ${WORLD_FILE}"
     gz sim --verbose=1 -r -s "${WORLD_FILE}" > /tmp/gz_server.log 2>&1 &
     if [ -z "${HEADLESS:-}" ]; then
-        gz sim -g > /dev/null 2>&1 &
+        # 專案的視窗設定（docker/gz/gui/cbba_gui.config）：地面網格、俯瞰鏡頭（依場景，西南方往東北看）；
+        # 錄影用場景裡的俯瞰攝影機（overview_camera，gen_patrol_site.py）
+        case "${CBBA_WORLD}" in
+            patrol_site) CAMERA_POSE="-60 -55 55 0 0.57 0.76" ;;
+            demo_site)   CAMERA_POSE="-22 -24 20 0 0.52 0.78" ;;
+            fire_site)   CAMERA_POSE="-28 -30 28 0 0.61 0.77" ;;
+            *)           CAMERA_POSE="-30 -30 30 0 0.6 0.785" ;;
+        esac
+        GUI_CONFIG="/tmp/cbba_gui_${CBBA_WORLD}.config"
+        sed "s|@CAMERA_POSE@|${CAMERA_POSE}|" "${CBBA_GZ_DIR}/gui/cbba_gui.config" > "${GUI_CONFIG}"
+        gz sim -g --gui-config "${GUI_CONFIG}" > /tmp/gz_gui.log 2>&1 &
     fi
     for _ in $(seq 1 60); do
         gz topic -l 2>/dev/null | grep -q "^/world/${CBBA_WORLD}/clock" && break

@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """由 worlds/patrol_site_points.csv 產生 worlds/patrol_site.sdf（巡檢＋隨機插入測試場景，2026-10-10）。
 
-綠色平台（G）一開始就貼著 tag；紅色方塊（R）先不貼，插入時由 patrol_scenario.sh 用 Gazebo 的
+綠色平台（G）一開始就貼著 tag；灰色方塊（R，2026-10-12 前是紅色）先不貼，插入時由 patrol_scenario.sh 用 Gazebo 的
 /world/patrol_site/create 生成 tag（Gazebo 執行中不容易切換模型的顯示，生成、刪除比較簡單）。
 tag 的高度要和 patrol_scenario.sh 的 TAG_Z_RED 一致。
+火警是另外生成的紅色方塊（models/fire_block）＋tag 101，起火時才出現（patrol_scenario.sh fire-at），場景裡沒有紅色。
 
-用法：python3 docker/gz/gen_patrol_site.py
+用法：python3 docker/gz/gen_patrol_site.py              patrol_site（預設）
+      python3 docker/gz/gen_patrol_site.py demo_site    worlds/demo_site_points.csv → worlds/demo_site.sdf
+                                                        （展示用的小場景：點都在 ±22 m 內，鏡頭拉近時無人機看得清楚）
 """
+import argparse
 import csv
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-POINTS = HERE / "worlds" / "patrol_site_points.csv"
-OUT = HERE / "worlds" / "patrol_site.sdf"
 
 GREEN = "0.1 0.7 0.2 1"
-RED = "0.8 0.1 0.1 1"
+GRAY = "0.55 0.55 0.55 1"
 PAD_H = 0.05      # 綠色平台高度
-BOX_H = 0.3       # 紅色方塊高度（tag 貼在頂面上方 2 mm，避免 z-fighting）
+BOX_H = 0.3       # 灰色方塊高度（tag 貼在頂面上方 2 mm，避免 z-fighting）
 
 
-def read_points():
-    with POINTS.open(encoding="utf-8") as f:
+def read_points(path):
+    with path.open(encoding="utf-8") as f:
         rows = [line for line in f if line.strip() and not line.startswith("#")]
     return list(csv.DictReader(rows))
 
@@ -50,8 +52,51 @@ def tag(name, tag_id, x, y, z):
 """
 
 
+# 俯瞰錄影攝影機（2026-10-13）：視窗的 VideoRecorder 按鈕在 gz-sim 8＋MinimalScene 沒有人提供 /gui/record_video 服務，
+# 錄不到。改成場景裡的固定攝影機＋CameraVideoRecorder 系統，由伺服器自己錄（不用開視窗也能錄）：
+#   gz service -s /<world>/overview/record_video --reqtype gz.msgs.VideoRecord --reptype gz.msgs.Boolean \
+#     --timeout 5000 --req 'start: true, format: "mp4", save_filename: "/某處/gazebo.mp4"'     （停止：stop: true）
+# 位置和視窗的俯瞰鏡頭相同（px4_sitl.sh 的 CAMERA_POSE：西南方往東北看）
+# demo_site 2026-10-14 改成正上方往下看（俯視，影像上方 = 北 +y、右邊 = 東 +x）：pitch π/2 往下、yaw π/2 讓影像上方朝北；
+# 30 m 高、水平視角 1.4 rad（80°）約看 50 m × 28 m（x −24～26、y −15.7～12.7），點都在 ±22 m 內；x500 約 18 px
+OVERVIEW_POSE = {"demo_site": "1 -1.5 30 0 1.5708 1.5708", "patrol_site": "-60 -55 55 0 0.57 0.76"}
+OVERVIEW_FOV = {"demo_site": 1.4}
+
+
+def overview_camera(world):
+    pose = OVERVIEW_POSE.get(world, "-30 -30 30 0 0.6 0.785")
+    return f"""    <model name="overview_camera">
+      <static>true</static>
+      <pose>{pose}</pose>
+      <link name="link">
+        <sensor name="overview" type="camera">
+          <always_on>true</always_on>
+          <update_rate>15</update_rate>
+          <topic>/{world}/overview/image</topic>
+          <camera>
+            <horizontal_fov>{OVERVIEW_FOV.get(world, 1.05)}</horizontal_fov>
+            <image><width>1280</width><height>720</height><format>R8G8B8</format></image>
+            <clip><near>0.1</near><far>500</far></clip>
+          </camera>
+          <plugin filename="gz-sim-camera-video-recorder-system" name="gz::sim::systems::CameraVideoRecorder">
+            <service>/{world}/overview/record_video</service>
+            <use_sim_time>true</use_sim_time>
+            <fps>15</fps>
+            <bitrate>4000000</bitrate>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+"""
+
+
 def main():
-    points = read_points()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("world", nargs="?", default="patrol_site")
+    world = ap.parse_args().world
+    points_csv = HERE / "worlds" / f"{world}_points.csv"
+    out = HERE / "worlds" / f"{world}.sdf"
+    points = read_points(points_csv)
     body = []
     for p in points:
         name, x, y, tag_id = p["point"], p["x"], p["y"], p["tag"]
@@ -59,18 +104,19 @@ def main():
             body.append(block(f"pad_{name}", x, y, 1.5, PAD_H, GREEN))
             body.append(tag(f"tag_{name}", tag_id, x, y, PAD_H + 0.002))
         else:
-            body.append(block(f"box_{name}", x, y, 1.4, BOX_H, RED))
+            body.append(block(f"box_{name}", x, y, 1.4, BOX_H, GRAY))
     listing = "\n".join(f"    {p['point']}  ({p['x']}, {p['y']})  tag {p['tag']}" for p in points)
-    OUT.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+    out.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!--
   巡檢＋隨機插入測試場景（docs/sim_scenario_plan.md）。由 docker/gz/gen_patrol_site.py 從
-  patrol_site_points.csv 產生，不要直接改這個檔案。
-  綠色平台 G＝一開始就知道的巡檢任務（tag 一直貼著）；紅色方塊 R＝隨機插入的候選（插入時 patrol_scenario.sh 生成 tag）。
+  {world}_points.csv 產生，不要直接改這個檔案。
+  綠色平台 G＝一開始就知道的巡檢任務（tag 一直貼著）；灰色方塊 R＝隨機插入的候選（插入時 patrol_scenario.sh 生成 tag）。
+  火警（紅色方塊＋tag 101）起火時才由 patrol_scenario.sh fire-at 生成。
 {listing}
-  座標 = map ENU。用法：在 sim 容器 CBBA_WORLD=patrol_site px4_sitl.sh 1
+  座標 = map ENU。用法：在 sim 容器 CBBA_WORLD={world} px4_sitl.sh 1
 -->
 <sdf version="1.9">
-  <world name="patrol_site">
+  <world name="{world}">
     <physics type="ode">
       <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
@@ -82,8 +128,8 @@ def main():
     <scene>
       <grid>false</grid>
       <ambient>0.4 0.4 0.4 1</ambient>
-      <background>0.7 0.7 0.7 1</background>
-      <shadows>true</shadows>
+      <background>0.62 0.78 0.93 1</background>
+      <shadows>false</shadows>
     </scene>
     <model name="ground_plane">
       <static>true</static>
@@ -99,7 +145,7 @@ def main():
     </model>
     <light name="sunUTC" type="directional">
       <pose>0 0 500 0 -0 0</pose>
-      <cast_shadows>true</cast_shadows>
+      <cast_shadows>false</cast_shadows>
       <intensity>1</intensity>
       <direction>0.001 0.625 -0.78</direction>
       <diffuse>0.904 0.904 0.904 1</diffuse>
@@ -114,10 +160,10 @@ def main():
       <elevation>0</elevation>
     </spherical_coordinates>
 
-{"".join(body)}  </world>
+{overview_camera(world)}{"".join(body)}  </world>
 </sdf>
 """, encoding="utf-8")
-    print(f"[gen_patrol_site] {len(points)} 個點 -> {OUT}")
+    print(f"[gen_patrol_site] {len(points)} 個點 -> {out}")
 
 
 if __name__ == "__main__":

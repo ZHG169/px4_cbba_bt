@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  巡檢＋隨機插入測試場景（docs/sim_scenario_plan.md）。由 docker/gz/gen_patrol_site.py 從
+  demo_site_points.csv 產生，不要直接改這個檔案。
+  綠色平台 G＝一開始就知道的巡檢任務（tag 一直貼著）；灰色方塊 R＝隨機插入的候選（插入時 patrol_scenario.sh 生成 tag）。
+  火警（紅色方塊＋tag 101）起火時才由 patrol_scenario.sh fire-at 生成。
+    G1  (0, -6)  tag 0
+    G2  (0, -14)  tag 1
+    G3  (-14, -12)  tag 2
+    R1  (-9, -2)  tag 3
+    R2  (2.5, -14)  tag 4
+    R3  (-12, 12)  tag 5
+    R4  (0, -8)  tag 6
+    R5  (-20, 4)  tag 7
+  座標 = map ENU。用法：在 sim 容器 CBBA_WORLD=demo_site px4_sitl.sh 1
+-->
+<sdf version="1.9">
+  <world name="demo_site">
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.62 0.78 0.93 1</background>
+      <shadows>false</shadows>
+    </scene>
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>1 1</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>500 500</size></plane></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.8 0.8 0.8 1</diffuse><specular>0.8 0.8 0.8 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 -0 0</pose>
+      <cast_shadows>false</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.904 0.904 0.904 1</diffuse>
+      <specular>0.271 0.271 0.271 1</specular>
+      <attenuation><range>2000</range><linear>0</linear><constant>1</constant><quadratic>0</quadratic></attenuation>
+    </light>
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <model name="overview_camera">
+      <static>true</static>
+      <pose>1 -1.5 30 0 1.5708 1.5708</pose>
+      <link name="link">
+        <sensor name="overview" type="camera">
+          <always_on>true</always_on>
+          <update_rate>15</update_rate>
+          <topic>/demo_site/overview/image</topic>
+          <camera>
+            <horizontal_fov>1.4</horizontal_fov>
+            <image><width>1280</width><height>720</height><format>R8G8B8</format></image>
+            <clip><near>0.1</near><far>500</far></clip>
+          </camera>
+          <plugin filename="gz-sim-camera-video-recorder-system" name="gz::sim::systems::CameraVideoRecorder">
+            <service>/demo_site/overview/record_video</service>
+            <use_sim_time>true</use_sim_time>
+            <fps>15</fps>
+            <bitrate>4000000</bitrate>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+    <model name="pad_G1">
+      <static>true</static>
+      <pose>0 -6 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>model://tag36h11_0</uri>
+      <name>tag_G1</name>
+      <pose>0 -6 0.052 0 0 0</pose>
+    </include>
+    <model name="pad_G2">
+      <static>true</static>
+      <pose>0 -14 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>model://tag36h11_1</uri>
+      <name>tag_G2</name>
+      <pose>0 -14 0.052 0 0 0</pose>
+    </include>
+    <model name="pad_G3">
+      <static>true</static>
+      <pose>-14 -12 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>model://tag36h11_2</uri>
+      <name>tag_G3</name>
+      <pose>-14 -12 0.052 0 0 0</pose>
+    </include>
+    <model name="box_R1">
+      <static>true</static>
+      <pose>-9 -2 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="box_R2">
+      <static>true</static>
+      <pose>2.5 -14 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="box_R3">
+      <static>true</static>
+      <pose>-12 12 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="box_R4">
+      <static>true</static>
+      <pose>0 -8 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="box_R5">
+      <static>true</static>
+      <pose>-20 4 0.150 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
+          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

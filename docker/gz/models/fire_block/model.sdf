@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- 火警點：紅色方塊，起火時才生成（docker/scripts/patrol_scenario.sh fire-at）；tag 101 另外生成在頂面上方 2 mm -->
+<sdf version="1.9">
+  <model name="fire_block">
+    <static>true</static>
+    <link name="link">
+      <pose>0 0 0.16 0 0 0</pose>
+      <collision name="collision"><geometry><box><size>1.6 1.6 0.32</size></box></geometry></collision>
+      <visual name="visual">
+        <geometry><box><size>1.6 1.6 0.32</size></box></geometry>
+        <material>
+          <ambient>0.85 0.1 0.08 1</ambient><diffuse>0.85 0.1 0.08 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular><emissive>0.35 0.03 0.02 1</emissive>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

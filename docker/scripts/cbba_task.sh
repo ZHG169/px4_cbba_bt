@@ -16,7 +16,8 @@
 #    cbba_task.sh cancel <N> <task_id>          uavN 取消任務（要是建立者或 cancel_authorities）
 #    cbba_task.sh watch <N>                     看 uavN 目前被指派的任務（current_task）
 #
-#  建議在 uavN 自己的容器執行（話題只走機內）。
+#  <N> 是哪一台，就要在 uavN 自己的容器（或 sim 容器）執行：DDS 只在機內（.env 的 DDS_OVER_MESH=0，
+#  2026-10-12 起），在別台的容器發不到 /uavN/…，ros2 topic pub -w 1 會一直等訂閱者、看起來像沒反應。
 # ============================================================
 set -euo pipefail
 

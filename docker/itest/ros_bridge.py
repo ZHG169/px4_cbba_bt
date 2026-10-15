@@ -43,7 +43,9 @@ class Bridge(Node):
         self.last_pos = {}          # 位置每台最多 5 Hz 寫一次
         ids = cfg["vehicles"]["ids"]
         topics = cfg["topics"]
-        watch = ["assigned", "result", "new_task"] + (["px4_position", "px4_status"] if with_px4 else [])
+        watch = ["assigned", "result", "new_task"] + (["closed"] if "closed" in topics else []) + \
+            (["px4_position", "px4_status"] if with_px4 else []) + \
+            (["px4_battery"] if with_px4 and "px4_battery" in topics else [])
         self.subs = []
         for vid in ids:
             ns = cfg["vehicles"]["ns"].format(id=vid)
@@ -53,6 +55,11 @@ class Bridge(Node):
                 msg_type = get_message(spec["type"])
                 self.subs.append(self.create_subscription(
                     msg_type, name, lambda m, k=kind, v=vid: self.on_msg(k, v, m), qos_of(spec)))
+        # 機器狗（2026-10-13，demo 的假狗）：robot_state → {"kind": "dog", "x", "y"}，最多 5 Hz
+        dog = cfg.get("dog", {}).get("state_topic")
+        if dog and "robot_state" in topics:
+            self.subs.append(self.create_subscription(
+                get_message(topics["robot_state"]["type"]), dog, self.on_dog, qos_of(topics["robot_state"])))
         self.create_timer(0.02, self.poll)
         self.emit({"kind": "ready", "vehicles": ids, "px4": with_px4})
 
@@ -72,10 +79,25 @@ class Bridge(Node):
             self.emit({"kind": "pos", "uav": vid,
                        "x": msg.y, "y": (vid - 1) * spacing + msg.x, "z": -msg.z})
             return
+        if kind == "px4_battery":
+            # 電量（2026-10-14，demo 動畫顯示）：每台最多 1 Hz；remaining 0～1，沒接上 / 不知道時不記
+            now = time.time()
+            if now - self.last_pos.get(("bat", vid), 0.0) < 1.0 or not msg.connected or msg.remaining < 0.0:
+                return
+            self.last_pos[("bat", vid)] = now
+            self.emit({"kind": "battery", "uav": vid, "pct": round(float(msg.remaining) * 100.0, 1)})
+            return
         if kind == "px4_status":
             self.emit({"kind": "status", "uav": vid, "armed": msg.arming_state == 2, "nav": msg.nav_state})
             return
         self.emit({"kind": kind, "uav": vid, "msg": message_to_ordereddict(msg)})
+
+    def on_dog(self, msg):
+        now = time.time()
+        if now - self.last_pos.get("dog", 0.0) < 0.2:
+            return
+        self.last_pos["dog"] = now
+        self.emit({"kind": "dog", "x": msg.position.x, "y": msg.position.y})
 
     def publisher(self, topic, type_name, spec):
         key = (topic, type_name)

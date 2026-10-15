@@ -1,0 +1,12 @@
+{
+  "_說明": "CBBA 正常分配下的 CBF（2026-10-15）：G1、G2、G3 都停 4 s、同時建立，R4 (0, −8)（G1 旁 2 m、在 G1 → G2 的直線上）一開始起火。預期：CBBA 把 G1、G2 排給同一台（順路最便宜）；那台到 G1 看到 R4 → 發布地面任務 → 移到 R4 上空監控到假狗處理完；超過預估（飛行＋停留＋overrun_margin 10 s）後還沒做的 G2 交回重新出價 → 起飛點上閒著的那台沿 x = 0 往南飛，正對懸停在 R4 上空的那台 → CBF 往右繞；到 G2 看到 R4 的火已經有人報過，不監控。用法：python3 docker/itest/itest.py demo --scenario cbba_overrun",
+  "tasks": [
+    {"name": "G1", "point": "G1", "duration": 4},
+    {"name": "G2", "point": "G2", "duration": 4},
+    {"name": "G3", "point": "G3", "duration": 4}
+  ],
+  "fires": [
+    {"name": "F_R4", "point": "R4", "at": 0}
+  ],
+  "timeout": 200
+}

@@ -5,6 +5,11 @@
 #
 #  每台無人機有自己的線材網路 sim_uavN_net，彼此之間「沒有線」，
 #  只能透過 mesh_net 溝通 —— 這樣 tc 才會作用在無人機之間的所有流量上
+#
+#  DDS（ROS 2）只在機內：uavN 的 Fast DDS 只綁線材網卡、只探索 sim（PX4 SITL、Gazebo 的相機），
+#  mesh 上只有 cbba_node 的 UDP（協定版本 2）和 BT 的避碰廣播，tc 只影響機間協商。
+#  DDS_OVER_MESH=1（.env）恢復 2026-10-10 以前的行為：uav、gcs 的 DDS 也經過 mesh（從 gcs 用 ros2 指令監看各台時用，
+#  但 PX4 的話題也會被 tc 影響、吃 mesh 頻寬）
 # ============================================================
 import pathlib
 import sys
@@ -34,6 +39,7 @@ if not 1 <= n <= 9:
     sys.exit("[gen_compose] UAV_COUNT 必須在 1~9 之間")
 
 base = env.get("NET_BASE", "172.30")
+dds_over_mesh = env.get("DDS_OVER_MESH", "0") == "1"
 uavs = range(1, n + 1)
 
 mesh_subnet = f"{base}.0.0/24"
@@ -154,8 +160,8 @@ for i in uavs:
       UAV_NS: uav{i}
       WIRE_IP: {uav_wire(i)}
       MESH_IP: {uav_mesh(i)}
-      LOCAL_IPS: {ips([uav_wire(i), uav_mesh(i)])}
-      PEER_IPS: {ips([sim_wire(i)] + others + [gcs_mesh])}
+      LOCAL_IPS: {ips([uav_wire(i), uav_mesh(i)] if dds_over_mesh else [uav_wire(i)])}
+      PEER_IPS: {ips([sim_wire(i)] + others + [gcs_mesh] if dds_over_mesh else [sim_wire(i)])}
     volumes:
       - ..:/home/ncrl/CBBA_BT
       - /tmp/cbba_locks:/run/cbba
@@ -187,7 +193,7 @@ w(f"""
       CBBA_ROLE: gcs
       MESH_IP: {gcs_mesh}
       LOCAL_IPS: {ips([gcs_mesh])}
-      PEER_IPS: {ips(uav_mesh(i) for i in uavs)}
+      PEER_IPS: {ips([uav_mesh(i) for i in uavs] if dds_over_mesh else [])}
     volumes:
       - ..:/home/ncrl/CBBA_BT
       - /tmp/cbba_locks:/run/cbba
@@ -212,7 +218,7 @@ for i in uavs:
 """)
 
 OUT_FILE.write_text("".join(out), encoding="utf-8")
-print(f"[gen_compose] UAV_COUNT={n} -> {OUT_FILE.name}")
+print(f"[gen_compose] UAV_COUNT={n}，DDS {'也經過 mesh' if dds_over_mesh else '只在機內（不經過 mesh）'} -> {OUT_FILE.name}")
 for i in uavs:
     print(f"[gen_compose]   uav{i}: 線 {uav_wire(i)}  mesh {uav_mesh(i)}")
 print(f"[gen_compose]   gcs : mesh {gcs_mesh}")

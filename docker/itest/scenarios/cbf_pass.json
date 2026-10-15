@@ -1,0 +1,19 @@
+{
+  "_說明": "CBF 展示（插入時機固定）：A 在 G1 (0, −6) 懸停 25 s；A 的執行者到點後插入 B（G2 (0, −14)，和 G1 都在出生點那條線往南的延長線上）。飛 B 的那台正對著懸停在 A 的那台飛過去（去程），做完回起飛點時再經過一次。看 D7、gazebo.mp4。要看 CBBA 同時出價的版本用 cbba_fire。用法：python3 docker/itest/itest.py demo --scenario cbf_pass",
+  "tasks": [
+    {
+      "name": "A",
+      "point": "G1",
+      "duration": 25
+    },
+    {
+      "name": "B",
+      "point": "G2",
+      "duration": 4,
+      "after_arrival": "A",
+      "delay": 1
+    }
+  ],
+  "fires": [],
+  "timeout": 120
+}

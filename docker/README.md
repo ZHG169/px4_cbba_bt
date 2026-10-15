@@ -14,6 +14,10 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 
 每台無人機有**自己的線材網路**，無人機之間沒有線，只能走 mesh，所以 tc 會作用在無人機之間的所有流量上。
 
+**DDS（ROS 2 話題）只在機內**（預設 `DDS_OVER_MESH=0`，2026-10-12 起）：uavN 的 Fast DDS 只綁線材網卡、只探索 sim
+（PX4 SITL、Gazebo 相機）。mesh 上只有 cbba_node 的 UDP（協定版本 2）和 BT 的避碰廣播（`flight_beacon`，也是 UDP），
+tc 只影響機間協商，PX4 的話題不受影響。之前 DDS 也經過 mesh，待命時 mesh 約 69 kB/s 大多是 DDS。
+
 ## 設定：只改 `.env`
 
 | 變數 | 說明 |
@@ -21,6 +25,7 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 | `UAV_COUNT` | 無人機數量（1~9）。改完執行 `./start.sh` 就會生效 |
 | `NET_BASE` | IP 前綴，預設 `172.30`，其他 IP 依規則自動算出 |
 | `PX4_SIM_MODEL` | 機型，例如 `gz_x500_mono_cam_down`、`gz_x500` |
+| `DDS_OVER_MESH` | `0`（預設）DDS 只在機內；`1` uav、gcs 的 DDS 也走 mesh（要從 gcs 用 `ros2` 指令看各台的話題時才開，PX4 的話題也會被 tc 影響）。改完 `./start.sh` 重建容器 |
 
 IP 規則（`NET_BASE=172.30`）：
 
@@ -91,10 +96,11 @@ source install/setup.bash
 ros2 topic echo /uav1/fmu/out/vehicle_status_v1 --once
 ```
 
-**③ mesh 看得到所有無人機（gcs）**
+**③ DDS 只在機內（gcs）**
 ```bash
 ros2 topic list | grep fmu/out/vehicle_status
-# 應該看到 /uav1/... 和 /uav2/...
+# 預設（DDS_OVER_MESH=0）什麼都看不到：各台的話題只在自己的 uav 容器和 sim 裡（itest 從 sim 監看）。
+# DDS_OVER_MESH=1 時應該看到 /uav1/... 和 /uav2/...
 ```
 
 **④ 起飛（sim 裡對應那台的 pxh>）**
@@ -140,11 +146,12 @@ param set COM_RCL_EXCEPT 4
 ## 換成實機
 
 每台機上設定兩個環境變數，`fastdds/profile.xml.template` 不用改：
-- `LOCAL_IPS`：自己的網卡 IP（例如無線網卡）
-- `PEER_IPS`：其他機器的 IP
+- `LOCAL_IPS`：DDS 要用的網卡 IP。照模擬的做法只放機內的網卡（和飛控、相機之間），**不放無線網卡**，
+  機間只有 cbba_node 的 UDP（`MESH_IP` 指定網卡）
+- `PEER_IPS`：DDS 要探索的機內設備 IP
 
 Agent 改用序列埠：`MicroXRCEAgent serial --dev /dev/ttyXXX -b 921600`
 
 ## 之後加入機器狗
 
-在 `gen_compose.py` 加一個 `dog` 服務（自己的 `sim_dog_net`，mesh IP 用 `172.30.0.50`），並把它的 mesh IP 加進各容器的 `PEER_IPS`。
+在 `gen_compose.py` 加一個 `dog` 服務（自己的 `sim_dog_net`，mesh IP 用 `172.30.0.50`），CBBA 走 mesh 的 UDP，不用改 DDS 設定（`DDS_OVER_MESH=1` 時才要把它的 mesh IP 加進各容器的 `PEER_IPS`）。

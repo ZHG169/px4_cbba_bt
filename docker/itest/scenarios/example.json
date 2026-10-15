@@ -1,0 +1,12 @@
+{
+  "_說明": "自訂情境的範例（2026-10-14）。tasks：巡檢任務（不一定是火警點）；fires：起火點（紅色方塊＋tag 101，不建成任務，有起火點時會開假狗）。座標用 point（demo_site_points.csv 的名稱）或 x、y（map ENU，公尺）。插入時機三選一：at（開始後幾秒，預設 0）、after_arrival（那個任務的執行者到點 1 m 內）、after_done（那個任務回報完成）；再等 delay 秒。duration：停留秒數（預設 5）。creator：建立者機號（預設輪流）。timeout：整個情境最長幾秒（預設 config 的 demo.timeout）。exec_args：額外給 BT 的參數（接在 config 的 demo.exec_args 後面）。用法：python3 docker/itest/itest.py demo --scenario example",
+  "tasks": [
+    {"name": "P1", "x": 12, "y": -4, "duration": 6},
+    {"name": "P2", "point": "G3", "duration": 5, "at": 3},
+    {"name": "P3", "x": -6, "y": 14, "duration": 4, "after_done": "P1", "delay": 2}
+  ],
+  "fires": [
+    {"name": "F1", "point": "R1", "at": 0}
+  ],
+  "timeout": 200
+}
