@@ -25,7 +25,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `lost_timeout` | 1.5 s | 網路很差、常誤判失聯時加大（全隊要一樣） |
 | `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他）。第 5 週弱網量測後調整（全隊要一樣） |
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
-| `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
+| `failure_exclude_sec` | 60 s | task_result 失敗且 reason 是 TRANSIENT、STOPPED 時，這台多久不再對同一個任務出價（PERMANENT 永久；PREEMPTED 看 `preempt_exclude_sec`） |
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 
@@ -50,7 +50,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `participate` | `state` | `state`＝`robot_state` 在 `state_timeout` 內有更新**而且 `mode == AUTO`** 才參與（2026-10-12 起；無人機的 mode 由 px4_state_bridge 給：在空中而且爬到巡檢高度（起飛完成）= AUTO，`auto_min_altitude`）。`always`＝一律參與、不訂閱 `robot_state`，位置和電量用 `initial_position`、`battery`（只用來測協商）。不參與時 CBBA_STATE 沒有 s，紀錄照送，手上的任務立刻釋放 |
+| `participate` | `state` | `state`＝`robot_state` 在 `state_timeout` 內有更新**而且 `mode == AUTO`** 才參與（2026-10-12 起；無人機的 robot_state 由 px4_state_bridge 發，mode 2026-10-17 起由正式 BT 決定（`bt_mode`：起飛完成、BT 在控制 = AUTO；被接管、失效保護、返航 = MANUAL）；備用 BT 時 bridge 自己判斷：在空中、爬到 `auto_min_altitude`、offboard = AUTO）。`always`＝一律參與、不訂閱 `robot_state`，位置和電量用 `initial_position`、`battery`（只用來測協商）。不參與時 CBBA_STATE 沒有 s，紀錄照送，手上的任務立刻釋放 |
 | `state_timeout` | 1.5 s | `robot_state` 這麼久沒更新就停止參與出價。無人機的轉接節點在 PX4 的位置有在更新時就一直送（地面上也送），PX4 斷線時停送 |
 | `initial_position`、`battery` | `[0, 0, 0]`、100 | 只在 `participate:=always` 時用 |
 | `recon_altitude` | uav 5.0 m、ugv 0 | 巡檢任務（AIR_RECON）的高度。BT 常給地面座標（z = 0），z 比它低時改成它；不改的話，每段距離都多算到地面的高度差，耗電也估錯。0 = 不調整。**要和執行者的飛行高度一致** |
@@ -74,7 +74,7 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 | 參數 | 預設 | 說明 |
 |---|---|---|
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
-| `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
+| `failure_exclude_sec` | 60 s | task_result 失敗且 reason 是 TRANSIENT、STOPPED 時，這台多久不再對同一個任務出價（PERMANENT 永久；PREEMPTED 看 `preempt_exclude_sec`） |
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 | `max_queued_fires` | 1 | 執行中任務之後最多保留幾個火警 |

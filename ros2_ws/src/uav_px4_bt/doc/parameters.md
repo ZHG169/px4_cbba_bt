@@ -158,7 +158,7 @@ h_j = |p − p_j|² − r²                    r = safe_radius（讓路時 yield
 |---|---|---|
 | `cruise_speed` | cbba_node（出價估時間）、BT | 兩邊相同：`CBBA_SPEED` |
 | `recon_altitude` | cbba_node（AIR_RECON 的 z 太低時抬高） | BT 的 `altitude`：`CBBA_ALTITUDE` |
-| `auto_min_altitude` | `px4_state_bridge`（爬到這個高度才 mode AUTO、才出價） | `cbba_uav.sh` 給 altitude − 0.5 m |
+| `auto_min_altitude` | `px4_state_bridge`，**只在備用 BT 時用**（爬到這個高度才 mode AUTO）；正式 BT 時 mode 照 BT（起飛完成 = altitude ± `takeoff_tolerance`） | `cbba_uav.sh` 給 altitude − 0.5 m |
 | `overrun_margin` | cbba_node（執行中超過預估多久就不排隊接新任務，10 s） | 懸停監控時，排在後面的任務在這之後交給別台 |
 | `safety_reserve`、能量模型 | cbba_node（`cbba_uav.sh` 依 `SIM_BAT_DRAIN` 算） | BT 的 `min_battery` |
 | `UAV_SPAWN_SPACING` | `docker/.env`（出生點間隔 2 m） | 要 > `cbf.safe_radius` |

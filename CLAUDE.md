@@ -300,7 +300,7 @@ itest（task_manager）uav 6／6（U6 1.0 s 接手）、demo 6／6（種子 7、
 uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s（`resend_gap` 1 s 一階）、70% 超出設計範圍；
 待命 mesh 3.5 kB/s；demo 的 D1、D2 通過（10/12 19:47 那次；之後的運動、起飛閘門、路過發現版本由使用者測試中）。
 
-**commit**：GitHub main 在 `676d2ee`（2026-10-17，使用者自己 push）。`uav_bt.yaml` 的 `cbf.brake_vertical_accel`
+**commit**：GitHub main 在 `db56cf9`（2026-10-17，使用者自己 push；之後還有 README、文件的修正）。`uav_bt.yaml` 的 `cbf.brake_vertical_accel`
 0.2 → 0.1（使用者調的，10/17 commit）。宜臻的「CBBA 任務失敗排除與人工接管：實作說明.md」在 repo 根目錄、沒進 repo（隊友的資料）。
 共用的 `ros2_ws/install` 改 C++ 後要在 uav 容器重新編譯 6 個套件。
 隊友的資料（`docs/handoff_uav_*`、`docs/messageImage_*.jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`）不進 repo（`.gitignore`）。

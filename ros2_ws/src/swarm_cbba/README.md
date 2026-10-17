@@ -86,7 +86,7 @@ bash src/swarm_cbba/test/g2_e2e.sh      # log 在 /tmp/cbba_g2（OUT= 可改）
 
 和正在跑的節點隔離：`ROS_DOMAIN_ID` 93、UDP port 14693、程序鎖 `/tmp/cbba_g2_lock`；節點名稱 `g2t_*`，結束時只關自己開的。
 假的 robot_state 用一支 python publisher、mode 從檔案讀（切 mode 不能重開 `ros2 topic pub`：重開要 1～2 s，
-超過 `state_timeout`，會變成逾時釋放而不是 MANUAL 釋放）。2026-10-12：58 項全過。
+超過 `state_timeout`，會變成逾時釋放而不是 MANUAL 釋放）。2026-10-12：58 項全過；2026-10-17 起 59 項（E1 多檢查「失敗 1 次，估計成功率 0.50」）。
 
 PX4 SITL 的整串（起飛、指派、火警、PX4 斷線）在 `docker/itest`（`python3 docker/itest/itest.py uav`）。
 

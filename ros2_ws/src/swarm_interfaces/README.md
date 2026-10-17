@@ -13,7 +13,7 @@
 > | 話題 | 型別 | 方向 |
 > |---|---|---|
 > | `current_task` | `Task`（task_id = 0 表示沒有任務） | CBBA → BT（reliable、transient_local） |
-> | `robot_state` | `RobotState`（header、agent_id、position map ENU、battery 0～100，負值 = 不知道、**mode**：AUTO／MANUAL／ESTOP） | BT → CBBA，約 2 Hz；只有 AUTO 參與出價。無人機由 `px4_state_bridge` 從 PX4 轉換（在空中而且爬到巡檢高度（起飛完成）= AUTO） |
+> | `robot_state` | `RobotState`（header、agent_id、position map ENU、battery 0～100，負值 = 不知道、**mode**：AUTO／MANUAL／ESTOP） | BT → CBBA，約 2 Hz；只有 AUTO 參與出價。無人機由 `px4_state_bridge` 從 PX4 轉換；mode 2026-10-17 起由正式 BT 決定（`/uavN/bt_mode`：起飛完成、BT 在控制 = AUTO，被接管、PX4 失效保護、返航 = MANUAL） |
 > | `task_result` | `TaskResult`（task_id、success、detail、**reason**：NONE／PERMANENT／TRANSIENT／PREEMPTED／STOPPED） | BT → CBBA，任務結束時一次（reliable）；task_id 要是目前 current_task 上的 |
 > | `new_task` | `Task` | BT → CBBA（任何機號都能建立任務） |
 > | `cancel_task` | `Task`（只看 task_id） | → CBBA，取消任務：要是建立者或 cancel_authorities |

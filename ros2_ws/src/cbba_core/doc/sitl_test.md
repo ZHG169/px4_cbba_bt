@@ -45,7 +45,8 @@ colcon build --symlink-install --packages-select swarm_interfaces cbba_core swar
 1. `[state] 開始送 robot_state`、`[state] 飛行狀態有效`、`[state] 不在空中：mode MANUAL（不接任務）`
 2. `[cbba] 返航點 map (…)`（第一筆 robot_state 的位置，地面的出生點）
 3. `[bt] 解鎖、offboard：爬升到 5.0 m` → `[bt] 到達 5.0 m，等待指派`
-4. `[state] 離地、爬升中：mode MANUAL（到 4.5 m 才接任務）` → `[state] 起飛完成（4.5 m）：mode AUTO（可以接任務）`
+4. 備用 BT：`[state] 離地、爬升中：mode MANUAL（到 4.5 m 才接任務）` → `[state] 起飛完成（4.5 m）、offboard：mode AUTO（可以接任務）`；
+   正式 BT（`EXECUTOR=task_manager`，2026-10-17 起）：`[bt] mode → AUTO` → `[state] BT 的 mode：AUTO（可以接任務）`
    → `[cbba] 開始參與出價`（還在爬升時不出價，不會一離地就被派任務）
 5. `[cbba] 收斂：0 個任務，N−1 個鄰居`；別台起飛後 `[cbba] 鄰居 N：參與出價`
 

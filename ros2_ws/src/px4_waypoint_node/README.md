@@ -90,6 +90,9 @@ ros2 run px4_waypoint_node px4_state_bridge --ros-args -r __node:=uav1_px4_state
 | `position_timeout` | 0.5 s | PX4 的位置這麼久沒更新就停止送（PX4 斷線） |
 | `status_timeout` | 5.0 s | `vehicle_status` 這麼久沒更新，飛行狀態就無效（mode 送 MANUAL）。PX4 只低頻送 vehicle_status，2 s 會誤判（2026-10-12 改） |
 | `rate_hz` | 10 | 發送頻率 |
+| `bt_mode_topic` | 空 | 有設時 mode 照抄正式 BT 送的值（std_msgs/UInt8，`cbba_uav.sh` 在 `EXECUTOR=task_manager` 時給 `/uavN/bt_mode`）；空 = 自己判斷（備用 BT） |
+| `bt_mode_timeout` | 1.5 s | 這麼久沒收到 BT 的 mode（BT 沒開、當掉）就送 MANUAL |
+| `auto_min_altitude` | 0 | 自己判斷時：這次起飛後爬到這個高度才算起飛完成（`cbba_uav.sh` 給巡檢高度 − 0.5 m） |
 | `spawn_enu` | (0, (id−1)·`UAV_SPAWN_SPACING`, 0) | 出生點（map ENU），要和 px4_sitl.sh、task_executor 一致 |
 
 | RobotState 欄位 | 來源 |
@@ -100,8 +103,11 @@ ros2 run px4_waypoint_node px4_state_bridge --ros-args -r __node:=uav1_px4_state
 | 飛行狀態有效 | 收到過 `vehicle_status` 和 `vehicle_land_detected`，而且 `vehicle_status` 在 `status_timeout` 內有更新。逾時後 armed 等保留最後的值但不算數 |
 
 - PX4 的位置有在更新就一直送，**地面上、未解鎖時也送**。
-- `mode`（2026-10-12 起，照機器狗端的 RobotState）：飛行狀態有效、已解鎖、沒有 landed（在空中）時 AUTO，否則 MANUAL。
-  cbba_node 只在 AUTO 時出價，所以起飛後才參與、降落後立刻停止。上面幾個飛行狀態只用來決定 mode，不送出去。
+- `mode`（照機器狗端的 RobotState；cbba_node 只在 AUTO 時出價）：
+  - **正式 BT（`bt_mode_topic` 有設，2026-10-17 起）**：照抄 BT 送的值。起飛完成（巡檢高度 ± `takeoff_tolerance`）、BT 在控制 = AUTO；
+    地上、爬升中、被遙控器／地面站接管、PX4 失效保護、低電量返航 = MANUAL；急停 = ESTOP。BT 改變時立刻送一筆。
+  - **自己判斷（備用 BT）**：飛行狀態有效、已解鎖、沒有 landed、這次起飛後爬到過 `auto_min_altitude`，**而且 offboard**（2026-10-17：
+    被接管、失效保護、返航時 offboard 都會掉）時 AUTO，否則 MANUAL。上面幾個飛行狀態只用來決定 mode，不送出去。
 - PX4 斷線（位置沒在更新）時停止送，cbba_node 在 `state_timeout`（1.5 s）後停止參與出價、釋放任務。
 - cbba_node 收到的第一筆位置當返航點（只用在出價時估返航的耗電），也就是地面的出生點。
 - 電池沒連上時電量送 −1，cbba_node 沿用上一筆。

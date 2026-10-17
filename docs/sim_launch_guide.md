@@ -71,7 +71,7 @@ source install/setup.bash     # 已經開著的 terminal 都要重新 source（�
 | `EXECUTOR` | `bt` | `bt` = `uav_px4_bt`＋`apriltag_fire_detector`；`task_executor` = 舊的簡易執行者 |
 
 **每台開好之後要看到**（細節見 `sitl_test.md` 第 1 節）：`[bt] 到達 5.0 m，等待指派` →
-`[state] 起飛完成（4.5 m）：mode AUTO（可以接任務）` → `[cbba] 開始參與出價`（爬到巡檢高度才出價） → `[cbba] 收斂：0 個任務，N−1 個鄰居`。
+`[state] BT 的 mode：AUTO（可以接任務）`（正式 BT；備用 BT 是 `[state] 起飛完成（4.5 m）、offboard：mode AUTO`） → `[cbba] 開始參與出價`（起飛完成才出價） → `[cbba] 收斂：0 個任務，N−1 個鄰居`。
 
 ---
 

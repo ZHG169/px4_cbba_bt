@@ -123,7 +123,7 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 - `deadline_sec` 是 `120.0`（你預期 `119.98`）：新協定不再把時間取整到 ms。
 - `指派給 BT` 後面多印座標。
 
-你的 T1～T10 和 DEMO3 我們寫成了一支腳本 `test/g2_e2e.sh`（不用 BT，約 3 分鐘，58 項），另外加了 E1～E4 驗下一節的差異：
+你的 T1～T10 和 DEMO3 我們寫成了一支腳本 `test/g2_e2e.sh`（不用 BT，約 3 分鐘，59 項；2026-10-17 E1 多檢查失敗次數），另外加了 E1～E4 驗下一節的差異：
 `bash src/swarm_cbba/test/g2_e2e.sh`（ROS_DOMAIN_ID 93、UDP port 14693，不會干擾正在跑的節點）。
 
 **跑你的 `e2e_cbba_node.sh`（G3）時**：狗的 node 要加 `-p failure_exclude_sec:=1e9 -p preempt_exclude_sec:=1e9`（或寫進 yaml；
@@ -141,7 +141,7 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 | 4 | 回報不是目前指派的任務 | 只要任務還沒結束都接受 | **拒絕**（log 會寫），避免把已改派給別台的任務關掉。照你範本的寫法（任務被換掉時不回報）很少遇到 |
 | 5 | 任務數量、建立者 | 每台約 32 個；機號 > 8（狗）不能建立 | 沒有限制，狗也能建立任務 |
 
-另外：平板接管時，你的 BT 會先回報手上的 CBBA 任務失敗（`PREEMPTED`），所以**解除接管後 60 s 內，狗不會接回同一個任務**（你的規則 3）。
+另外：平板接管時，你的 BT 會先回報手上的 CBBA 任務失敗（`PREEMPTED`）。接管期間 mode = MANUAL 不出價；**2026-10-17 起 PREEMPTED 只排除 5 s**（`preempt_exclude_sec`），接管做完、回到 AUTO 後，那個任務還沒人接的話就能接回（原本 60 s）。PREEMPTED 不算失敗次數。
 
 ## 7. 常見問題
 
