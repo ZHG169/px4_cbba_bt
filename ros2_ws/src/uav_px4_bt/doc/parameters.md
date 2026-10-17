@@ -64,8 +64,8 @@ u_nom 大小 = min(cruise_speed, k_att × 距離, √(2 × brake_accel × 距離
 | 參數 | 預設 | 作用 | 調大 | 調小 |
 |---|---|---|---|---|
 | `cbf.k_att` | 1.0 1/s | 最後幾公尺的收斂 | 收得快，可能衝過頭 | 最後一段慢 |
-| `cbf.brake_accel` | 1.2 m/s² | 水平剎車曲線 | 晚剎車，容易衝過頭 | 早剎車、比較穩，飛得比較久 |
-| `cbf.brake_vertical_accel` | 0.5 m/s² | 垂直剎車曲線 | 爬升快，容易衝過頭 | 爬升、換高度比較慢 |
+| `cbf.brake_accel` | 0.2 m/s² | 水平剎車曲線 | 晚剎車，容易衝過頭 | 早剎車、比較穩，飛得比較久 |
+| `cbf.brake_vertical_accel` | 0.1 m/s² | 垂直剎車曲線 | 爬升快，容易衝過頭 | 爬升、換高度比較慢；巡檢高度 25 m 以上時爬升可能超過 20 s，會出現「爬升 20 s 還沒到」的警告 |
 
 `brake_accel` 要 ≤ `motion.max_accel`，`brake_vertical_accel` 要 ≤ `motion.max_vertical_accel`。
 
@@ -168,7 +168,7 @@ h_j = |p − p_j|² − r²                    r = safe_radius（讓路時 yield
 
 | 症狀 | 先看 | 調整 |
 |---|---|---|
-| 起飛衝過頭、換高度上下擺 | `cbf.brake_vertical_accel`、`motion.max_vertical_accel` | 剎車調小（0.5 → 0.3） |
+| 起飛衝過頭、換高度上下擺 | `cbf.brake_vertical_accel`、`motion.max_vertical_accel` | 剎車調小（例如 0.2 → 0.1，2026-10-17 改成 0.1） |
 | 到點衝過頭再拉回 | `cbf.brake_accel`、`cbf.k_att` | 調小 |
 | 懸停時幾台互推、晃 | `cbf.safe_radius`、`cbf.yield_radius` | safe_radius、yield_radius 要 < 出生間隔（待命的被執行中的推開） |
 | 交會時太近（log「避碰：這次最接近鄰機 x m」） | `cbf.gamma`、`cbf.safe_radius` | gamma 調小、safe_radius 調大 |

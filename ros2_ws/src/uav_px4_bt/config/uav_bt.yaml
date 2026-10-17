@@ -27,7 +27,7 @@
     # ---------- CBF：名目速度（往目標飛）----------
     cbf.k_att: 1.0                  # 1/s：離目標 d 公尺時想要的速度 k_att × d（近目標時）
     cbf.brake_accel: 0.2            # m/s²：水平剎車曲線，速度 ≤ √(2 × a × 距離)
-    cbf.brake_vertical_accel: 0.2   # m/s²：垂直剎車曲線（起飛、換高度衝過頭就調小）
+    cbf.brake_vertical_accel: 0.1   # m/s²：垂直剎車曲線（起飛、換高度衝過頭就調小）
 
     # ---------- CBF：避碰（h = |p − p_j|² − safe_radius²，ḣ ≥ −γ h；公式見 doc/parameters.md 第五節）----------
     cbf.safe_radius: 1.0            # d_s：水平距離不小於這個（m）；要比出生點間隔（2 m）小
