@@ -56,6 +56,9 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 - 火警：飛行途中或到點懸停時看到 tag 101 → 發布地面處置任務 → **飛到火點上空懸停監控**，等地面任務結束（狗處理完）
   或 `fire_task.monitor_timeout` → 回原本的航線或完成；別台已經報過的火不再發布、不轉向。
 - 起飛、待命盤旋、讓路、做完回起飛點、低電量返航在樹外（`skeleton/uav_flight.hpp`）。
+- 被遙控器、地面站接管（切出 offboard）時，目前只印警告、行為不變（2026-10-17）：爬升 20 s 沒到巡檢高度、
+  在空中被切出 offboard、切回 offboard 時高度和巡檢高度差超過 `takeoff_tolerance`。這段期間 `px4_state_bridge`
+  仍送 mode AUTO；mode 改由 BT 決定、接管解除後要不要等地面站放回，正在和機器狗端討論。
 
 ## 目錄
 
@@ -146,7 +149,7 @@ ros2 run cbba_core cbba_sim run $SCN/fire_3uav.csv --loss 0 --out /tmp/fire_3uav
 ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points.csv --out /tmp/insert
 ```
 
-## 目前進度（2026-10-15）
+## 目前進度（2026-10-17）
 
 | 項目 | 狀態 |
 |---|---|
@@ -159,6 +162,7 @@ ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points
 | AprilTag 火情偵測、Gazebo 場景（fire_site、patrol_site、demo_site）、俯視錄影 | ✅ |
 | 動態重新分配（執行超時交還、PX4 斷線接手） | ✅ itest U6、`--scenario cbba_overrun` |
 | 展示與測試工具：情境檔、兩個 terminal 手動／隨機插入、俯視動畫（電量長條）、D7 CBF 距離 | ✅ |
+| 無人機被人工接管（切出 offboard）時停止出價 | ⏳ 先印警告（`UavFlight`）；mode 由誰決定和機器狗端討論中 |
 | 機器狗 | 假狗（`fake_dog.py`）✅；真的 V60 ⏳ 等伯宇換成協定版本 2 |
 | Nav2 接入模擬（伯宇的 task_manager＋Nav2 取代假狗） | ⏳ 規劃見 `docs/nav2_integration_plan.md` |
 | 能量模型校正（實機 ulog）、Jetson、實機 mesh | ⏳ |

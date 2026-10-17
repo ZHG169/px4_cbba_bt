@@ -4,6 +4,7 @@
 // 20 Hz tick；假平台見 fake_platform.hpp。
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -489,6 +490,12 @@ protected:
     return false;
   }
 
+  long countLogs(const std::string & key) const
+  {
+    return std::count_if(platform.logs.begin(), platform.logs.end(),
+             [&](const std::string & l) {return l.find(key) != std::string::npos;});
+  }
+
   FakePlatform platform;
   std::unique_ptr<UavContext> ctx;
   std::unique_ptr<UavFlight> flight;
@@ -593,4 +600,42 @@ TEST_F(FlightTest, NegativeDelayStaysWhereItFinished)
   flight->leaveHold();
   runUntil([](FlightEvent) {return false;}, 10.0);
   EXPECT_NEAR(platform.v.position.x, 12.0, 0.3);
+}
+
+TEST_F(FlightTest, SlowClimbWarnsOnce)
+{
+  // 解鎖、offboard 之後爬不上去：20 s 後警告一次，一直不算起飛完成
+  platform.stuck = true;
+  EXPECT_FALSE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 30.0));
+  EXPECT_EQ(flight->phase(), FlightPhase::GROUND);
+  EXPECT_EQ(countLogs("還沒到"), 1);
+}
+
+TEST_F(FlightTest, TakeoverWarnsAndRejoinsWithAltitudeDiff)
+{
+  // 在空中被切出 offboard → 警告、仍是 AIRBORNE；被拉到 2 m 再切回 → 警告高度差、直接接回（行為不變）
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  EXPECT_EQ(countLogs("不是 offboard"), 0);
+  platform.v.offboard = false;
+  EXPECT_EQ(step(), FlightEvent::NONE);
+  EXPECT_EQ(step(), FlightEvent::NONE);
+  EXPECT_EQ(countLogs("不是 offboard"), 1);
+  EXPECT_EQ(flight->phase(), FlightPhase::AIRBORNE);
+  platform.v.position.z = 2.0;
+  platform.v.offboard = true;
+  EXPECT_EQ(step(), FlightEvent::NONE);
+  EXPECT_EQ(countLogs("切回 offboard，高度"), 1);
+  EXPECT_EQ(flight->phase(), FlightPhase::AIRBORNE);
+}
+
+TEST_F(FlightTest, RejoinAtAltitudeIsNotWarned)
+{
+  // 接管期間高度沒變：切回 offboard 只印一般訊息
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  platform.v.offboard = false;
+  step();
+  platform.v.offboard = true;
+  step();
+  EXPECT_EQ(countLogs("切回 offboard，高度"), 0);
+  EXPECT_EQ(countLogs("切回 offboard（高度"), 1);
 }

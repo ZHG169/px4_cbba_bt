@@ -7,6 +7,11 @@
 //            （停在被推開的位置，鄰機離開後再繼續飛回去）。GUIDE §3 的 DefaultBehavior 不放進樹，樹跑完就結束、回報照骨架的流程
 //   返航     在空中、電量 ≤ min_battery → 停止 offboard、PX4 RTL（指令可能掉：每 2 s 再送，最多 3 次），之後一直是 RTL
 //   不在空中 起飛完成後上鎖或降落 → 回到起飛（和備用 BT 的 TakeOff 一樣會重新起飛）
+//   高度警告（2026-10-17，只印 log、行為不變；被接管時 mode 怎麼送還在和機器狗端討論）：
+//            - 爬升 kClimbWarnSec 秒還沒到 altitude ± takeoff_tolerance：一直不算起飛完成、不 tick 樹
+//              （px4_state_bridge 的門檻是 altitude − 0.5 m，兩邊可能不一致）
+//            - 在空中被切出 offboard（遙控器、地面站接管）：BT 照舊當作在空中，robot_state 仍是 AUTO
+//            - 切回 offboard：不重新起飛、不重新確認高度，直接接回；高度和 altitude 差超過 takeoff_tolerance 時警告
 //
 // 不依賴 ROS：透過 UavContext（UavPlatform）讀狀態、下命令，test_skeleton 用假平台測。
 #pragma once
@@ -57,6 +62,7 @@ public:
           takeoff_start_ = -1.0;
           return FlightEvent::LANDED;
         }
+        noticeOffboard(v);
         // 一旦觸發就不再恢復，電量讀數上下跳時不會來回切換
         if (v.battery >= 0.0 && v.battery <= min_battery_) {
           char b[96];
@@ -125,6 +131,7 @@ private:
       takeoff_start_ = now;
       last_request_ = -1e9;
       have_climb_xy_ = false;
+      climb_warned_ = false;
     }
     if (!v.valid || !v.ready) {
       ctx_.platform.setVelocity({});
@@ -142,12 +149,20 @@ private:
     if (!have_climb_xy_) {
       climb_xy_ = v.position;
       have_climb_xy_ = true;
+      climb_start_ = now;
       char b[64];
       std::snprintf(b, sizeof(b), "解鎖、offboard：爬升到 %.1f m", altitude_);
       ctx_.platform.log(b);
     }
     ctx_.moveTo({climb_xy_.x, climb_xy_.y, altitude_}, true);   // 起飛也算待命：旁邊一起爬升的不提早互推
     if (std::fabs(v.position.z - altitude_) >= ctx_.config.takeoff_tolerance) {
+      if (!climb_warned_ && now - climb_start_ >= kClimbWarnSec) {
+        climb_warned_ = true;
+        char w[256];
+        std::snprintf(w, sizeof(w), "警告：爬升 %.0f s 還沒到 %.1f m（現在 %.2f m，誤差 %.1f m 內才算起飛完成）："
+          "不 tick 樹", kClimbWarnSec, altitude_, v.position.z, ctx_.config.takeoff_tolerance);
+        ctx_.platform.log(w);
+      }
       return false;
     }
     char b[64];
@@ -160,8 +175,32 @@ private:
     ctx_.airborne = true;
     phase_ = FlightPhase::AIRBORNE;
     hold_valid_ = false;
+    offboard_ = true;
     return true;
   }
+
+  // 被接管的現象先印出來，行為不變（見開頭「高度警告」）
+  void noticeOffboard(const VehicleState & v)
+  {
+    if (v.offboard == offboard_) {
+      return;
+    }
+    offboard_ = v.offboard;
+    char b[256];
+    const double dz = v.position.z - altitude_;
+    if (!v.offboard) {
+      std::snprintf(b, sizeof(b), "警告：在空中但不是 offboard（遙控器或地面站接管？），高度 %.2f m："
+        "BT 照舊當作在空中，robot_state 仍是 AUTO", v.position.z);
+    } else if (std::fabs(dz) >= ctx_.config.takeoff_tolerance) {
+      std::snprintf(b, sizeof(b), "警告：切回 offboard，高度 %.2f m 和巡檢高度 %.1f m 差 %+.2f m："
+        "不重新起飛、直接接回", v.position.z, altitude_, dz);
+    } else {
+      std::snprintf(b, sizeof(b), "切回 offboard（高度 %.2f m）：直接接回", v.position.z);
+    }
+    ctx_.platform.log(b);
+  }
+
+  static constexpr double kClimbWarnSec = 20.0;   // 5 m 的巡檢高度正常幾秒就到
 
   UavContext & ctx_;
   double altitude_;
@@ -173,6 +212,9 @@ private:
   double last_request_{-1e9};
   bool have_climb_xy_{false};
   Vec3 climb_xy_;
+  double climb_start_{0.0};
+  bool climb_warned_{false};
+  bool offboard_{true};               // 在空中時上一次看到的 offboard（只用來印警告）
 
   int rtl_sent_{0};
   double rtl_last_{0.0};

@@ -175,7 +175,8 @@ h_j = |p − p_j|² − r²                    r = safe_radius（讓路時 yield
 | 交會前一下子急剎 | `cbf.influence_radius` | 調大（看上面的下限公式） |
 | 對飛時卡在中間 | `cbf.k_tan` | 調大 |
 | 閃避時機身傾斜大、看起來很急 | `motion.max_accel`、`motion.leash` | 調小 |
-| 起飛一直不算完成（沒有「到達 5.0 m」） | `takeoff_tolerance` | 調大 |
+| 起飛一直不算完成（沒有「到達 5.0 m」；爬升 20 s 後會印「警告：爬升 20 s 還沒到 …」） | `takeoff_tolerance` | 調大 |
+| 「警告：在空中但不是 offboard」／「警告：切回 offboard，高度 … 差 …」 | 不是參數（被遙控器、地面站接管） | 只是提示，行為不變；接管期間 robot_state 仍是 AUTO（待和機器狗端定） |
 | 常常回報 `NAV_FAILED(TIMEOUT)` | `fly_timeout_margin`、`cruise_speed` | margin 調大 |
 | 火點判定太慢或誤判 | 樹的 `settle_sec`、`min_confidence`、`min_frames` | 慢：settle 調小；誤判：門檻調高 |
 | 看到旁邊別的點的火 | 樹的 `view_radius` | 調小 |
@@ -190,3 +191,4 @@ setpoint 穩、實際位置跟不上 → 調 PX4 的 `MPC_*`。
 - CBF 的公式（只看水平、往右繞、λ／ρ 的分攤）、運動平滑層的「參考位置不越過目標」：`src/cbf.cpp`、`src/motion.cpp`。
 - 航向固定在第一次收到位置時的方向（下視相機的影像方向不會一直轉）：`src/px4_platform.cpp`。
 - 外部任務的幾何（目標正上方、`air_recon` → `report_result`）：`skeleton/external_task.hpp`。
+- 高度與接管警告（爬升 `kClimbWarnSec` 20 s、高度差門檻沿用 `takeoff_tolerance`）：`skeleton/uav_flight.hpp`。

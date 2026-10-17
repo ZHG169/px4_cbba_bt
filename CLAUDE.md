@@ -305,7 +305,10 @@ Gazebo、itest loss／demo、BT 運動與火警、骨架整合、文件）。共
 ### 還沒做的（依建議順序）
 
 1. 已知：`px4_state_bridge` 在返航（AUTO_RTL）中仍送 AUTO，cbba_node 會繼續派任務，BT 直接回 `BATTERY_RTL` 失敗
-   （STOPPED，60 s 不出價）；要不要讓 bridge 看 offboard 待定。`cbba_uav.sh` 的預設執行者還是 `bt`，要不要改成 task_manager 待定。
+   （STOPPED，60 s 不出價）；要不要讓 bridge 看 offboard 待定。
+   2026-10-17：使用者和機器狗端討論 mode（傾向 B：BT 決定 mode、`px4_state_bridge` 照舊發 robot_state；接管解除照狗直接放行、不 latch），
+   行為先不改，`UavFlight` 只加警告：爬升 20 s 沒到巡檢高度、在空中被切出 offboard、切回 offboard 時高度和巡檢高度差超過 `takeoff_tolerance`。
+   `cbba_uav.sh` 的預設執行者還是 `bt`，要不要改成 task_manager 待定。
 2. 殘留的 Gazebo 伺服器會不理 SIGTERM（itest 已改成 SIGKILL 後備、`px4_sitl.sh` 會提示 `pkill -9`）。
 3. 第 5 週：`resend_gap` 開成 cbba_node 參數、量 1.0／0.5／0.3 s；30% 再量 100 次。
 4. 真的 V60：假狗（`fake_dog.py`）已經完成「發布地面任務 → 狗競標 → 走過去 → 處理完」；巡檢中被火警搶占（狗有自己的巡檢）

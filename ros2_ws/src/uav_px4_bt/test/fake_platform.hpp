@@ -53,7 +53,7 @@ public:
   void setExecStatus(const ExecStatus & s) override {exec = s;}
   bool taskClosed(std::uint32_t id) const override {return closed.count(id) > 0;}
   std::vector<KnownGroundTask> groundTasks() const override {return ground;}
-  void log(const std::string &) override {}
+  void log(const std::string & text) override {logs.push_back(text);}
 
   // 一個 tick 之後的動態
   void advance(double dt)
@@ -80,6 +80,7 @@ public:
   ExecStatus exec;
   std::set<std::uint32_t> closed;   // cbba_node 的 task_closed
   std::vector<KnownGroundTask> ground;   // cbba_node 的 task_announced（地面處置任務）
+  std::vector<std::string> logs;
 };
 
 }  // namespace uav_px4_bt::test
