@@ -7,7 +7,9 @@
 // 機內（DDS），話題在 /<namespace> 底下：
 //   BT → CBBA   robot_state  (swarm_interfaces/RobotState)   位置（map ENU）、電量、mode；約 2 Hz
 //               task_result  (swarm_interfaces/TaskResult)   任務結束時一次；success = false 交回競標池，
-//                                                            reason 決定這台多久不再對它出價（PERMANENT 永久，其他 failure_exclude_sec）
+//                                                            reason 決定這台多久不再對它出價（PERMANENT 永久、PREEMPTED
+//                                                            preempt_exclude_sec、其他 failure_exclude_sec）；TRANSIENT 另外累計
+//                                                            失敗次數，之後對它的出價打折（成功率 1/(1+f)，2026-10-17）
 //               new_task     (swarm_interfaces/Task)         本機發現的新任務（task_id 建立者要是自己）
 //               cancel_task  (swarm_interfaces/Task)         取消任務（只看 task_id）：要是建立者或 cancel_authorities
 //   CBBA → BT   current_task (swarm_interfaces/Task)         目前要執行的任務；task_id = 0 表示沒有任務
@@ -18,7 +20,8 @@
 //
 // 參與出價（spec §2.3 規則 2、4）：robot_state 在 state_timeout 內有更新，而且 mode == AUTO。
 //   MANUAL（平板接管）、ESTOP（急停）、沒有 robot_state 時對所有任務出價 0，手上的任務立刻釋放。
-//   無人機的 mode 由 BT 或 px4_state_bridge 決定（已解鎖、在空中、爬到巡檢高度 = AUTO）。
+//   無人機的 robot_state 由 px4_state_bridge 發；mode 由正式 BT 決定（/uavN/bt_mode：起飛完成、BT 在控制 = AUTO，
+//   被接管、PX4 失效保護、返航 = MANUAL，2026-10-17），備用 BT 時 bridge 自己判斷（在空中、起飛完成、offboard）。
 //   participate = always（測試協商用）：一律參與，不訂閱 robot_state，位置與電量用參數 initial_position、battery。
 //
 // 正式指派（流程在 cbba_core/assignment_manager.hpp）：同一任務連續 assign_hold 秒排第一就發 current_task，
@@ -189,6 +192,10 @@ public:
     recon_altitude_ = declare_parameter<double>("recon_altitude", 5.0);
     // 失敗（reason 不是 PERMANENT）後多久不再對同一個任務出價（spec §2.3 規則 3）
     failure_exclude_sec_ = declare_parameter<double>("failure_exclude_sec", 60.0);
+    // PREEMPTED（被接管 PREEMPTED_BY_MANUAL；無人機的備用 BT 路過發現火警 FIRE_FOUND）的排除時間，預設和
+    // failure_exclude_sec 一樣。cbba_v60.yaml、cbba_uav.yaml 設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的
+    // 空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時）
+    preempt_exclude_sec_ = declare_parameter<double>("preempt_exclude_sec", failure_exclude_sec_);
 
     AgentState s;
     s.id = agent_id_;
@@ -217,6 +224,8 @@ public:
     scoring.cost_ref = declare_parameter<double>("cost_ref", scoring.cost_ref);
     scoring.max_bundle = static_cast<std::size_t>(
       declare_parameter<int>("max_bundle", static_cast<int>(scoring.max_bundle)));
+    // 同一個任務 TRANSIENT 失敗到這個次數就永久不出價；0 = 不啟用（只靠成功率打折）
+    scoring.max_failures = declare_parameter<int>("max_failures", scoring.max_failures);
 
     CommConfig comm;
     comm.lost_timeout = declare_parameter<double>("lost_timeout", comm.lost_timeout);
@@ -411,8 +420,10 @@ private:
         name.c_str(), active ? taskName(active->task).c_str() : "無");
       return;
     }
-    // spec §2.3 規則 3：PERMANENT 這台永久不再對它出價，其他（TRANSIENT／PREEMPTED／STOPPED）failure_exclude_sec 秒
-    const double exclude = msg.reason == TaskResultMsg::PERMANENT ? kInf : failure_exclude_sec_;
+    // spec §2.3 規則 3：PERMANENT 這台永久不再對它出價，PREEMPTED preempt_exclude_sec 秒，
+    // 其他（TRANSIENT／STOPPED）failure_exclude_sec 秒
+    const double exclude = msg.reason == TaskResultMsg::PERMANENT ? kInf :
+      msg.reason == TaskResultMsg::PREEMPTED ? preempt_exclude_sec_ : failure_exclude_sec_;
     const ReportCheck check = assignments_->onResult(msg.task_id, active->version, msg.success, now, exclude);
     if (check != ReportCheck::ACCEPTED) {
       RCLCPP_WARN(get_logger(), "任務 %s 的回報拒絕（%s），任務狀態不變", name.c_str(), toString(check));
@@ -428,6 +439,20 @@ private:
     } else {
       RCLCPP_WARN(get_logger(), "任務 %s 失敗（%s），交回競標池，這台 %.0f s 內不接",
         name.c_str(), why, exclude);
+    }
+    // TRANSIENT 才算「這台做這個點會失敗」：之後的出價打折，別台優先接手（上面的 log 格式照機器狗端，另外印一行）
+    if (!msg.success && msg.reason == TaskResultMsg::TRANSIENT) {
+      comm_->countFailure(msg.task_id, now);
+      const auto & agent = comm_->agent();
+      const int f = agent.failures(msg.task_id);
+      const auto it = agent.tasks().find(msg.task_id);
+      const double p = it == agent.tasks().end() ? 1.0 : it->second.success_prob;
+      const int max_failures = agent.params().max_failures;
+      if (max_failures > 0 && f >= max_failures) {
+        RCLCPP_WARN(get_logger(), "任務 %s 這台失敗 %d 次（max_failures %d），之後不再接", name.c_str(), f, max_failures);
+      } else {
+        RCLCPP_INFO(get_logger(), "任務 %s 這台失敗 %d 次，估計成功率 %.2f，之後的出價打折", name.c_str(), f, p);
+      }
     }
   }
 
@@ -606,6 +631,7 @@ private:
   double state_timeout_{1.5};
   double recon_altitude_{5.0};
   double failure_exclude_sec_{60.0};
+  double preempt_exclude_sec_{60.0};
 
   AgentState state_;
   std::unique_ptr<CbbaComm> comm_;

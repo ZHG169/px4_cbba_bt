@@ -23,6 +23,10 @@ struct VehicleState
   bool armed{false};
   bool offboard{false};
   bool landed{true};
+  // offboard 掉了的原因（2026-10-17）：PX4 vehicle_status 的 failsafe、failsafe_and_user_took_over。
+  // failsafe = 0 時 offboard 掉了 = 人切了模式（遙控器、地面站）；= 1 = PX4 自己的失效保護
+  bool failsafe{false};
+  bool user_took_over{false};
 };
 
 // cbba_node 的 current_task（task_id = 0 表示沒有任務）。version 2026-10-12 起固定 0（介面不帶指派版本）

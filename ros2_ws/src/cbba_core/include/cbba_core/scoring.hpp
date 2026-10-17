@@ -10,6 +10,12 @@
 //
 // 對外使用分數（越高越好，0 表示做不到）：
 //   score = value / (1 + 邊際成本 / cost_ref)
+//
+// 失敗過的任務（2026-10-17，宜臻「CBBA 任務失敗排除與人工接管：實作說明」的需求 1）：成功率 p = Task::success_prob
+//   期望價值       value → p × value
+//   期望到達時間   到達時間 + (1 − p) / p × (前往時間 + 執行時間)：成功前預期失敗 (1 − p) / p 次（幾何分佈）；
+//                  路徑後面的任務一起延後。執行中、有 BT 剩餘時間（head_remaining）的第一個任務不加
+//   p = 1（沒失敗過）時和原本的公式完全相同。電量的可行性仍以一次嘗試計算
 #pragma once
 
 #include <cstddef>
@@ -31,6 +37,7 @@ struct ScoringParams
   double score_epsilon{1e-3};    // 兩個分數相差在此以內視為平手
   std::size_t max_bundle{5};     // 一次最多接幾個任務
   double rebid_threshold{0.1};   // 重新評估時，分數變動超過此比例才更新
+  int max_failures{0};           // 同一個任務 TRANSIENT 失敗到這個次數就永久不出價；0 = 不啟用
 };
 
 struct LegEval

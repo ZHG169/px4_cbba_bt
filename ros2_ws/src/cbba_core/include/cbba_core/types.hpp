@@ -43,6 +43,9 @@ struct Task
   TaskStatus status{TaskStatus::OPEN};
   double status_stamp{0.0};
   bool explicit_deadline{true};   // false：建立時沒給期限（deadline_sec 是出價用的預設值），排隊用最大等待時間
+  // 本機估計的成功率 p_ij = 1 / (1 + 這台 TRANSIENT 失敗的次數)（2026-10-17）。只在本機（CbbaAgent::countFailure 設定），
+  // 不上網路：封包格式不帶、收到的任務一律是 1
+  double success_prob{1.0};
 };
 
 // 任務優先級（2026-10-09）：本機安全處置（BT 內部，不是 CBBA 任務）＞ 火警處置（GROUND_INTERVENTION）＞ 一般巡檢。

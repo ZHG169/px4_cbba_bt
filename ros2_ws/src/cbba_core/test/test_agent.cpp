@@ -360,3 +360,133 @@ TEST(Agent, TemporaryExclusionExpires)
   uav.reevaluate(500.0);
   EXPECT_EQ(uav.winner(7), kNoAgent);
 }
+
+// ===========================================================================
+// 失敗次數與成功率（2026-10-17，宜臻「CBBA 任務失敗排除與人工接管：實作說明」的需求 1）
+// ===========================================================================
+TEST(Agent, OtherAgentWinsAfterTransientFailure)
+{
+  // A 離任務近、先得標；A 回報 TRANSIENT（排除 60 s＋失敗一次）→ B 接手。60 s 後 A 以打折的分數（約一半）重新出價，
+  // 仍是 B（原本 A 的原分數比 B 高，時間到就會被派回 A、再失敗）
+  CbbaAgent a(makeUav(1, 0, 0), ScoringParams{});
+  CbbaAgent b(makeUav(2, 30, 0), ScoringParams{});
+  Task t = makeTask(7, 5, 0);
+  t.deadline_sec = 1000.0;
+  a.onTask(t, 0.0);
+  b.onTask(t, 0.0);
+  exchangeUntilQuiet(a, b, 0.1);
+  ASSERT_EQ(a.winner(7), 1);
+  ASSERT_EQ(b.winner(7), 1);
+
+  a.excludeTask(7, 1.0, 60.0);
+  a.countFailure(7, 1.0);
+  EXPECT_EQ(a.failures(7), 1);
+  EXPECT_NEAR(a.tasks().at(7).success_prob, 0.5, 1e-12);
+  exchangeUntilQuiet(a, b, 1.1);
+  EXPECT_EQ(b.winner(7), 2);
+
+  a.reevaluate(61.5);
+  b.reevaluate(61.5);
+  exchangeUntilQuiet(a, b, 61.6);
+  EXPECT_EQ(a.winner(7), 2);
+  EXPECT_EQ(b.winner(7), 2);
+}
+
+TEST(Agent, SoleAgentRetriesAfterTransientFailure)
+{
+  // 只有這台能做：排除時間過後仍得標重試，分數約剩一半（期望價值 0.5 × value）
+  CbbaAgent uav(makeUav(1, 0, 0), ScoringParams{});
+  Task t = makeTask(7, 20, 0);
+  t.deadline_sec = 1000.0;
+  t.duration_sec = 10.0;
+  uav.onTask(t, 0.0);
+  ASSERT_EQ(uav.winner(7), 1);
+  const double before = uav.score(7);
+
+  uav.excludeTask(7, 1.0, 60.0);
+  uav.countFailure(7, 1.0);
+  uav.reevaluate(61.5);
+  EXPECT_EQ(uav.winner(7), 1);
+  EXPECT_LT(uav.score(7), 0.55 * before);
+  EXPECT_GT(uav.score(7), 0.4 * before);
+}
+
+TEST(Agent, ReevaluateKeepsFailurePenalty)
+{
+  // 失敗後重新得標，之後的重新評估不會把分數恢復成原本的
+  CbbaAgent uav(makeUav(1, 0, 0), ScoringParams{});
+  Task t = makeTask(7, 20, 0);
+  t.deadline_sec = 1000.0;
+  uav.onTask(t, 0.0);
+  const double before = uav.score(7);
+  uav.excludeTask(7, 1.0, 60.0);
+  uav.countFailure(7, 1.0);
+  uav.reevaluate(61.5);
+  ASSERT_EQ(uav.winner(7), 1);
+  const double after = uav.score(7);
+  uav.reevaluate(62.0);
+  uav.reevaluate(90.0);
+  EXPECT_NEAR(uav.score(7), after, 0.05 * after);
+  EXPECT_LT(uav.score(7), 0.6 * before);
+}
+
+TEST(Agent, PreemptedDoesNotCountAsFailure)
+{
+  // PREEMPTED（被平板叫走）：節點只排除 preempt_exclude_sec、不呼叫 countFailure → 時間到以原分數出價
+  CbbaAgent uav(makeUav(1, 0, 0), ScoringParams{});
+  Task t = makeTask(7, 20, 0);
+  t.deadline_sec = 1000.0;
+  uav.onTask(t, 0.0);
+  const double before = uav.score(7);
+  uav.excludeTask(7, 1.0, 5.0);
+  EXPECT_EQ(uav.failures(7), 0);
+  uav.reevaluate(6.5);
+  EXPECT_EQ(uav.winner(7), 1);
+  EXPECT_NEAR(uav.score(7), before, 0.01 * before);
+}
+
+TEST(Agent, MaxFailuresExcludesPermanently)
+{
+  // max_failures = 2：第一次只打折，第二次永久不出價；不認得的任務不計
+  ScoringParams p;
+  p.max_failures = 2;
+  CbbaAgent uav(makeUav(1, 0, 0), p);
+  Task t = makeTask(7, 20, 0);
+  t.deadline_sec = 1000.0;
+  uav.onTask(t, 0.0);
+  EXPECT_FALSE(uav.countFailure(99, 0.5));
+  EXPECT_EQ(uav.failures(99), 0);
+
+  uav.excludeTask(7, 1.0, 60.0);
+  uav.countFailure(7, 1.0);
+  uav.reevaluate(61.5);
+  EXPECT_EQ(uav.winner(7), 1);
+
+  uav.excludeTask(7, 62.0, 60.0);
+  uav.countFailure(7, 62.0);
+  EXPECT_EQ(uav.failures(7), 2);
+  EXPECT_TRUE(uav.excluded(7, 1e9));
+  uav.reevaluate(500.0);
+  EXPECT_EQ(uav.winner(7), kNoAgent);
+}
+
+TEST(Agent, InactiveAgentStillRelaysBids)
+{
+  // 不參與出價（mode 不是 AUTO）只關掉出價、不關掉共識：A 仍收 B 的出價、自己的訊息帶出得標者 B
+  CbbaAgent a(makeUav(1, 0, 0), ScoringParams{});
+  CbbaAgent b(makeUav(2, 30, 0), ScoringParams{});
+  Task t = makeTask(7, 5, 0);
+  a.onTask(t, 0.0);
+  b.onTask(t, 0.0);
+  exchangeUntilQuiet(a, b, 0.1);
+  ASSERT_EQ(a.winner(7), 1);
+
+  a.setActive(false, 1.0);
+  exchangeUntilQuiet(a, b, 1.1);
+  EXPECT_EQ(a.winner(7), 2);
+  EXPECT_EQ(b.winner(7), 2);
+  const CbbaMessage m = a.makeMessage(2.0);
+  const auto bid = std::find_if(m.bids.begin(), m.bids.end(), [](const Bid & x) {return x.task_id == 7;});
+  ASSERT_NE(bid, m.bids.end());
+  EXPECT_EQ(bid->winner, 2);
+}

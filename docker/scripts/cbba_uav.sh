@@ -94,11 +94,14 @@ wait_gate() {
     echo "[cbba_uav] 啟動 $2"
 }
 
+BRIDGE_ARGS=()
 if [ "${EXECUTOR}" = bt ] || [ "${EXECUTOR}" = task_manager ]; then
     if [ "${EXECUTOR}" = bt ]; then
         BT_EXE=uav_bt_node; BT_NODE="uav${UAV_ID}_bt"
     else
         BT_EXE=uav_task_manager_node; BT_NODE="uav${UAV_ID}_task_manager"
+        # 正式 BT 決定 mode（起飛完成、被接管、PX4 失效保護、返航），bridge 照抄進 robot_state（2026-10-17）
+        BRIDGE_ARGS=(-p bt_mode_topic:="/uav${UAV_ID}/bt_mode")
     fi
     # CBBA_TAKEOFF_GATE=<檔案>：BT 等這個檔案出現才啟動（沒有 BT 就不會解鎖起飛），全隊一起起飛
     # shellcheck disable=SC2086  # EXEC_ARGS 要拆成多個參數
@@ -119,11 +122,12 @@ else
         2>&1 | prefix exec &
     PIDS+=($!)
 fi
-# PX4 → robot_state：解鎖且離地才送，cbba_node 收到才參與出價
-# 爬到巡檢高度（−0.5 m）才 mode AUTO：起飛完成後才參與出價，不會一離地就被派任務
+# PX4 → robot_state（位置、電量、mode）。mode：task_manager 照 BT 的 bt_mode；其他執行者由 bridge 自己判斷：
+# 在空中、爬到巡檢高度（−0.5 m）而且 offboard 才 AUTO（起飛完成才出價；被接管、失效保護、返航時不出價）
 ros2 run px4_waypoint_node px4_state_bridge --ros-args -r __node:="uav${UAV_ID}_px4_state_bridge" \
     -p agent_id:="${UAV_ID}" -p px4_ns:="uav${UAV_ID}" \
-    -p auto_min_altitude:="$(awk -v a="${ALT}" 'BEGIN {printf "%.2f", (a > 1.0 ? a - 0.5 : a / 2)}')" 2>&1 | prefix state &
+    -p auto_min_altitude:="$(awk -v a="${ALT}" 'BEGIN {printf "%.2f", (a > 1.0 ? a - 0.5 : a / 2)}')" \
+    "${BRIDGE_ARGS[@]}" 2>&1 | prefix state &
 PIDS+=($!)
 # 統一版 cbba_node（swarm_cbba，2026-10-12）：namespace 給 /uavN、參數用 config/cbba_uav.yaml（和機器狗端相同的寫法）
 # CBBA_START_GATE=<檔案>：cbba_node 等這個檔案出現才啟動（itest demo：全隊都起飛到同一個高度後才開始 CBBA）

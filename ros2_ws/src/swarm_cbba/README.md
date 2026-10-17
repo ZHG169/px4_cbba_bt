@@ -34,11 +34,17 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 
 - **參與出價**：`robot_state` 在 `state_timeout`（1.5 s）內有更新，而且 `mode == AUTO`（spec §2.3 規則 2、4）。
   `MANUAL`（平板接管）、`ESTOP`、沒有 `robot_state` 時對所有任務出價 0，手上的任務立刻釋放（`current_task` 變 0）。
-  無人機的 `mode` 由 `px4_waypoint_node/px4_state_bridge` 決定：已解鎖、在空中，而且這次起飛後爬到過 `auto_min_altitude`（`cbba_uav.sh` 給巡檢高度 − 0.5 m）= AUTO，起飛完成才出價（2026-10-12）。
+  無人機的 robot_state 由 `px4_waypoint_node/px4_state_bridge` 發。mode（2026-10-17 起照機器狗端由 BT 決定）：正式 BT（`uav_task_manager_node`）送
+  `/uavN/bt_mode`，bridge 照抄：起飛完成、BT 在控制 = AUTO；地上、爬升中、被遙控器／地面站接管、PX4 失效保護、低電量返航 = MANUAL；急停 = ESTOP。
+  備用 BT 時 bridge 自己判斷：在空中、爬到過 `auto_min_altitude`（巡檢高度 − 0.5 m）而且 offboard = AUTO。
+  被接管時 BT 照狗回報 `PREEMPTED_BY_MANUAL`（5 s 不接、不算失敗次數），PX4 失效保護時回報 `PX4_FAILSAFE`（STOPPED）。
 - **回報**：`task_result` 的 `task_id` 要是目前 `current_task` 上的任務，不是就拒絕（log 會寫），任務狀態不變。
   BT 不用帶指派版本；版本只在 CBBA 節點之間（機間封包）用，擋掉別台的舊回報。
 - **失敗**（`success = false`）：任務交回競標池，這台依 `reason` 不再對它出價：
-  `PERMANENT` 永久；`TRANSIENT`、`PREEMPTED`、`STOPPED` `failure_exclude_sec`（60 s）後恢復（spec §2.3 規則 3）。
+  `PERMANENT` 永久；`PREEMPTED` `preempt_exclude_sec`（狗、無人機的 yaml 都 5 s）；`TRANSIENT`、`STOPPED` `failure_exclude_sec`（60 s）後恢復（spec §2.3 規則 3）。
+  **`TRANSIENT` 另外累計失敗次數 f**（2026-10-17）：之後這台對它的出價用成功率 1/(1+f) 打折（價值 × p、到達時間多算預期的重試），
+  時間到了別台通常會贏，不會又派回同一台、再失敗；只有它能做時仍會重試。log：`任務 … 這台失敗 f 次，估計成功率 p`。
+  `max_failures`（預設 0 = 不啟用）：失敗到這個次數就永久不接。
 - **不握手**：CBBA 直接發 `current_task`，BT 的哨兵負責中斷舊的任務。
 - **執行中的任務鎖定**：已經發到 `current_task` 的任務，別台不出價；只有失敗、取消、更高優先級（火警 > 巡檢）搶占才換。
 - **AIR_RECON** 的 z 低於 `recon_altitude` 時抬到巡檢高度（地面任務不改）。
@@ -52,7 +58,9 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `ns` | 空字串 | 空 = 相對名稱（由 launch 的 namespace 決定）；給了就用 `/<ns>/…` |
 | `state_timeout` | 1.5 s | `robot_state` 多久沒更新就不出價 |
 | `assign_hold` | 0.4 s | 排第一多久才發 `current_task`（spec §2.3 規則 1：2 個廣播週期） |
-| `failure_exclude_sec` | 60 s | 失敗（不是 PERMANENT）後多久不再對同一任務出價 |
+| `failure_exclude_sec` | 60 s | 失敗（TRANSIENT、STOPPED）後多久不再對同一任務出價 |
+| `preempt_exclude_sec` | = `failure_exclude_sec` | PREEMPTED 後多久不出價；`cbba_v60.yaml`、`cbba_uav.yaml` 設 5 s（只擋 mode = MANUAL 晚到的空檔，接管期間靠 MANUAL） |
+| `max_failures` | 0 | 同一任務 TRANSIENT 失敗幾次後永久不出價；0 = 不啟用（只打折） |
 | `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他，全隊要一樣） |
 | `recon_altitude` | 5.0 m | AIR_RECON 的巡檢高度 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | UAV：5、0.5、0.2、20；UGV：1、0.1、0.05、20 | 能量模型（狗的是佔位值，見 `cbba_core/doc/ugv_tuning.md`） |

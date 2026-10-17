@@ -32,6 +32,12 @@ PathEval evaluatePath(
       // 已經在執行：完成時間用 BT 的預估
       leg.completion = head_remaining;
       leg.arrival = std::min(leg.arrival, head_remaining);
+    } else if (task.success_prob < 1.0) {
+      // 期望重試時間：成功前預期失敗 (1 − p) / p 次，每次花「前往＋執行」的時間
+      const double p = std::max(task.success_prob, 1e-3);
+      const double wasted = (1.0 - p) / p * (leg.distance / speed + task.duration_sec);
+      leg.arrival += wasted;
+      leg.completion += wasted;
     }
     const double remaining = (task.created + task.deadline_sec) - now;
     leg.remaining_deadline = std::max(remaining, params.min_deadline);
@@ -116,7 +122,7 @@ Insertion bestInsertion(
   }
 
   if (best.feasible) {
-    best.score = costToScore(task.value, best.marginal_cost, params.cost_ref);
+    best.score = costToScore(task.success_prob * task.value, best.marginal_cost, params.cost_ref);   // 期望價值
   }
   return best;
 }

@@ -3,6 +3,7 @@
 // 只改了這些，其餘一字未改：
 //   - makeExternalWaypoint（狗：站在目標前 1.5 m、雲台；無人機：目標正上方、air_recon）
 //   - failureReason 加無人機的停止原因 BATTERY_RTL（低電量返航）、NOT_AIRBORNE（降落、上鎖）→ STOPPED（UAV_BT_GUIDE §2.1）
+//     、PX4_FAILSAFE（PX4 自己的失效保護，2026-10-17）。被人接管照狗用 PREEMPTED_BY_MANUAL（原本就是 PREEMPTED）
 #pragma once
 // Queue rules for external (CBBA / manual) waypoints. Pure: no ROS, no blackboard. Spec 3.4.3-3.4.6.
 #include "uav_px4_bt/skeleton/bt_nodes.hpp"
@@ -97,7 +98,7 @@ inline uint8_t failureReason(bool success, const std::string& detail) {
   if (starts("NAV_FAILED(204)") || starts("NAV_FAILED(208)") || starts("PTZ_OUT_OF_RANGE")) return reason::PERMANENT;
   if (starts("PREEMPTED_BY_MANUAL")) return reason::PREEMPTED;
   for (const char* s : {"OPERATOR_STOP", "EMERGENCY", "MISSION_TIMEOUT", "SHUTDOWN", "POLICY_ABORT", "INTERNAL_ERROR",
-                        "BATTERY_RTL", "NOT_AIRBORNE"})
+                        "BATTERY_RTL", "NOT_AIRBORNE", "PX4_FAILSAFE"})
     if (starts(s)) return reason::STOPPED;
   return reason::TRANSIENT;   // stuck, timeouts, no ack, anything unknown: penalise, keep it in the auction
 }

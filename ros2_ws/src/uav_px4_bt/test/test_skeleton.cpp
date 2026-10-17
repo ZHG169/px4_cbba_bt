@@ -611,21 +611,29 @@ TEST_F(FlightTest, SlowClimbWarnsOnce)
   EXPECT_EQ(countLogs("還沒到"), 1);
 }
 
-TEST_F(FlightTest, TakeoverWarnsAndRejoinsWithAltitudeDiff)
+TEST_F(FlightTest, UserTakeoverEntersOverrideAndResumesHere)
 {
-  // 在空中被切出 offboard → 警告、仍是 AIRBORNE；被拉到 2 m 再切回 → 警告高度差、直接接回（行為不變）
+  // 起飛完成後被人切出 offboard（failsafe 0）：TAKEOVER 一次、OVERRIDE（node 層：PREEMPTED_BY_MANUAL、mode MANUAL）；
+  // 期間被飛到 (6, 0, 2) 再切回 → RESUMED、警告高度差、待命點改成目前位置（不飛回接管前的點）
+  flight = std::make_unique<UavFlight>(*ctx, 5.0, 20.0, -1.0);
   ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
-  EXPECT_EQ(countLogs("不是 offboard"), 0);
   platform.v.offboard = false;
+  EXPECT_EQ(step(), FlightEvent::TAKEOVER);
+  EXPECT_EQ(flight->phase(), FlightPhase::OVERRIDE);
+  EXPECT_TRUE(flight->overrideByUser());
+  EXPECT_STREQ(flight->overrideReason(), "PREEMPTED_BY_MANUAL");
   EXPECT_EQ(step(), FlightEvent::NONE);
-  EXPECT_EQ(step(), FlightEvent::NONE);
-  EXPECT_EQ(countLogs("不是 offboard"), 1);
-  EXPECT_EQ(flight->phase(), FlightPhase::AIRBORNE);
-  platform.v.position.z = 2.0;
+  EXPECT_EQ(countLogs("被接管"), 1);
+
+  platform.v.position = {6.0, 0.0, 2.0};
+  platform.v.velocity = {};
   platform.v.offboard = true;
-  EXPECT_EQ(step(), FlightEvent::NONE);
-  EXPECT_EQ(countLogs("切回 offboard，高度"), 1);
+  EXPECT_EQ(step(), FlightEvent::RESUMED);
   EXPECT_EQ(flight->phase(), FlightPhase::AIRBORNE);
+  EXPECT_EQ(countLogs("切回 offboard，高度"), 1);
+  runUntil([](FlightEvent) {return false;}, 5.0);
+  EXPECT_NEAR(platform.v.position.x, 6.0, 0.3);
+  EXPECT_NEAR(platform.v.position.z, 2.0, 0.3);
 }
 
 TEST_F(FlightTest, RejoinAtAltitudeIsNotWarned)
@@ -635,7 +643,48 @@ TEST_F(FlightTest, RejoinAtAltitudeIsNotWarned)
   platform.v.offboard = false;
   step();
   platform.v.offboard = true;
-  step();
+  EXPECT_EQ(step(), FlightEvent::RESUMED);
   EXPECT_EQ(countLogs("切回 offboard，高度"), 0);
   EXPECT_EQ(countLogs("切回 offboard（高度"), 1);
+}
+
+TEST_F(FlightTest, Px4FailsafeIsNotTakeover)
+{
+  // PX4 自己的失效保護（failsafe 1，例如 setpoint 斷了 → AUTO_RTL）：FAILSAFE（PX4_FAILSAFE → STOPPED）；
+  // 之後有人接手（user_took_over）→ 原因改成人接管；降落 → LANDED
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  platform.v.offboard = false;
+  platform.v.failsafe = true;
+  EXPECT_EQ(step(), FlightEvent::FAILSAFE);
+  EXPECT_EQ(flight->phase(), FlightPhase::OVERRIDE);
+  EXPECT_STREQ(flight->overrideReason(), "PX4_FAILSAFE");
+  EXPECT_EQ(countLogs("PX4 失效保護"), 1);
+
+  platform.v.user_took_over = true;
+  EXPECT_EQ(step(), FlightEvent::NONE);
+  EXPECT_STREQ(flight->overrideReason(), "PREEMPTED_BY_MANUAL");
+
+  platform.v.armed = false;
+  platform.v.landed = true;
+  EXPECT_EQ(step(), FlightEvent::LANDED);
+  EXPECT_EQ(flight->phase(), FlightPhase::GROUND);
+}
+
+TEST_F(FlightTest, OwnReturnToLaunchIsNotOverride)
+{
+  // 自己的低電量返航（BT 停 offboard、要 RTL）：一直是 RTL，不當成被接管
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  platform.v.battery = 19.0;
+  EXPECT_EQ(step(), FlightEvent::BATTERY_RTL);
+  EXPECT_FALSE(platform.v.offboard);
+  EXPECT_FALSE(runUntil([](FlightEvent e) {return e != FlightEvent::NONE;}, 3.0));
+  EXPECT_EQ(flight->phase(), FlightPhase::RTL);
+  EXPECT_EQ(countLogs("被接管"), 0);
+}
+
+TEST(FailureReason, TakeoverIsPreemptedAndFailsafeIsStopped)
+{
+  // 被人接管照狗的 PREEMPTED_BY_MANUAL（不算失敗次數）；PX4 失效保護是載具停了
+  EXPECT_EQ(task_manager::failureReason(false, "PREEMPTED_BY_MANUAL"), task_manager::reason::PREEMPTED);
+  EXPECT_EQ(task_manager::failureReason(false, "PX4_FAILSAFE"), task_manager::reason::STOPPED);
 }

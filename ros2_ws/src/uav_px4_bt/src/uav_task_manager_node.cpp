@@ -9,9 +9,14 @@
 //     Px4Platform（和備用 BT 共用）
 //   - 樹外（skeleton/uav_flight.hpp）：起飛完成才 tick 樹；樹沒在跑時待命（return_home_delay 秒後飛回起飛點上空）與讓路；低電量返航（BATTERY_RTL）、
 //     降落（NOT_AIRBORNE）時結束任務、交還 CBBA
-//   - robot_state 不由這裡發（px4_state_bridge 發，兩邊都發會互相蓋）；沒有 TF、markers、/mission_status
+//   - robot_state 不由這裡發（px4_state_bridge 發，兩邊都發會互相蓋，GUIDE §4）；沒有 TF、markers、/mission_status。
+//     mode 由這裡決定（2026-10-17）：/<ns>/bt_mode（std_msgs/UInt8，值同 RobotState 的 AUTO／MANUAL／ESTOP），
+//     bridge 照抄進 robot_state。AUTO = 起飛完成、BT 在控制（AIRBORNE）；ESTOP = 急停；其他（地上、爬升中、
+//     被接管、PX4 失效保護、低電量返航）MANUAL。改變時立刻送，平常每 mode_period 送一次（bridge 逾時當 MANUAL）
+//   - 被接管（offboard 掉了，UavFlight 的 OVERRIDE）：照狗的平板接管，手上的任務以 PREEMPTED_BY_MANUAL 交還；
+//     PX4 失效保護時以 PX4_FAILSAFE（STOPPED）交還。期間收到的任務直接用同一個原因交還
 //   - 沒有巡檢 yaml、/start_mission、/stop_mission：巡檢點是 CBBA 的 AIR_RECON 任務，佇列裡只有外部點
-//   - 沒有 manual_override（平板不接無人機）、Nav2 reaper
+//   - 沒有 manual_override（平板不接無人機；無人機的接管是遙控器／地面站切 PX4 模式）、Nav2 reaper
 //   - 急停話題 /<ns>/emergency_stop（參數 emergency_topic）：狗的 /emergency_stop 是全域的，無人機各台分開；
 //     急停時樹 halt、原地懸停（不是降落）
 //
@@ -23,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -33,6 +39,8 @@
 #include <behaviortree_cpp/loggers/bt_cout_logger.h>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/u_int8.hpp>
+#include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
 
@@ -52,6 +60,7 @@ namespace uav_px4_bt
 {
 
 using SwarmTask = swarm_interfaces::msg::Task;
+using RobotStateMsg = swarm_interfaces::msg::RobotState;
 using task_manager::g_ctx;
 using task_manager::Waypoint;
 
@@ -77,10 +86,13 @@ public:
     // 看到火警後懸停監控、等地面處置任務結束最多幾秒（0 = 不等）
     fire_monitor_timeout_ = declare_parameter<double>("fire_task.monitor_timeout", 120.0);
     log_transitions_ = declare_parameter<bool>("log_transitions", false);
+    mode_period_ = declare_parameter<double>("mode_period", 0.5);   // bt_mode 平常多久送一次（s）
     const UavContextConfig cfg = Px4Platform::declareConfig(*this);
     platform_ = std::make_unique<Px4Platform>(*this);
     const std::string emergency_topic = declare_parameter<std::string>("emergency_topic",
         "/" + platform_->ns() + "/emergency_stop");
+    const std::string mode_topic = declare_parameter<std::string>("bt_mode_topic",
+        "/" + platform_->ns() + "/bt_mode");
 
     ctx_ = std::make_unique<UavContext>(*platform_, cfg);
     flight_ = std::make_unique<UavFlight>(*ctx_, platform_->altitude(), min_battery, return_home_delay);
@@ -105,6 +117,7 @@ public:
           g_ctx.emergency = m->data;
         });
 
+    mode_pub_ = create_publisher<std_msgs::msg::UInt8>(mode_topic, rclcpp::QoS(1).reliable());
     timer_ = create_wall_timer(std::chrono::milliseconds(tick_period_), [this]() {onTick();});
     RCLCPP_INFO(get_logger(), "uav%u：樹 %s，速度 %.1f m/s，返航電量 %.0f %%；%s", platform_->agentId(),
       bt_file_.c_str(), cfg.cbf.max_speed, min_battery, platform_->describe().c_str());
@@ -141,6 +154,9 @@ private:
         RCLCPP_WARN(get_logger(), "收到關機訊號，任務進行中 → 先停");
         abortNow("SHUTDOWN");
       }
+      std_msgs::msg::UInt8 m;   // 不用等 bridge 逾時
+      m.data = RobotStateMsg::MANUAL;
+      mode_pub_->publish(m);
       rclcpp::shutdown();
       return;
     }
@@ -152,12 +168,16 @@ private:
         }
         break;
       case FlightEvent::BATTERY_RTL:
-        if (running_) {
-          abortNow("BATTERY_RTL");
-        } else {
-          rejectQueued("BATTERY_RTL");
+      case FlightEvent::TAKEOVER:
+      case FlightEvent::FAILSAFE: {
+          const std::string why = flight_->phase() == FlightPhase::RTL ? "BATTERY_RTL" : flight_->overrideReason();
+          if (running_) {
+            abortNow(why);
+          } else {
+            rejectQueued(why);
+          }
+          break;
         }
-        break;
       default:
         break;
     }
@@ -167,7 +187,28 @@ private:
         flight_->loiter();
       }
     }
+    publishMode();
     platform_->endTick();
+  }
+
+  // 給 px4_state_bridge 填 robot_state.mode（照機器狗端：BT 決定能不能接任務）
+  void publishMode()
+  {
+    const std::uint8_t mode = g_ctx.emergency ? RobotStateMsg::ESTOP :
+      flight_->phase() == FlightPhase::AIRBORNE ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
+    const double t = platform_->timeNow();
+    if (mode == mode_ && t - mode_sent_ < mode_period_) {
+      return;
+    }
+    if (mode != mode_) {
+      static const char * const kNames[] = {"AUTO", "MANUAL", "ESTOP"};
+      RCLCPP_INFO(get_logger(), "mode → %s", mode < 3 ? kNames[mode] : "?");
+    }
+    mode_ = mode;
+    mode_sent_ = t;
+    std_msgs::msg::UInt8 m;
+    m.data = mode;
+    mode_pub_->publish(m);
   }
 
   // 伯宇 onTick 的任務部分（起飛完成才會到這裡）
@@ -272,6 +313,11 @@ private:
       RCLCPP_WARN(get_logger(), "返航中收到 CBBA 任務 %u → 回 BATTERY_RTL 交還", t.task_id);
       return;
     }
+    if (flight_->phase() == FlightPhase::OVERRIDE) {   // mode MANUAL 送到之前派下來的
+      g_ctx.task_result_pub(t.task_id, false, flight_->overrideReason());
+      RCLCPP_WARN(get_logger(), "被接管中收到 CBBA 任務 %u → 回 %s 交還", t.task_id, flight_->overrideReason());
+      return;
+    }
     // 手上另一個 cbba 點直接換掉：CBBA 知道
     const Waypoint wp = task_manager::makeExternalWaypoint("cbba_", t.task_id, t.position.x, t.position.y,
         t.position.z, platform_->altitude(), std::max(0.0f, t.duration_sec));
@@ -345,6 +391,9 @@ private:
   std::string bt_file_;
   bool log_transitions_{false};
   double fire_monitor_timeout_{120.0};
+  double mode_period_{0.5};
+  std::uint8_t mode_{255};   // 上一次送的 bt_mode（255 = 還沒送過）
+  double mode_sent_{0.0};
   std::optional<double> mission_timeout_;
 
   std::unique_ptr<Px4Platform> platform_;
@@ -353,6 +402,7 @@ private:
 
   rclcpp::Subscription<SwarmTask>::SharedPtr current_task_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr emergency_sub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr mode_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   bool running_{false};

@@ -621,6 +621,27 @@ bool CbbaAgent::excludeTask(TaskId id, double now, double duration)
   return true;
 }
 
+bool CbbaAgent::countFailure(TaskId id, double now)
+{
+  const auto it = tasks_.find(id);
+  if (it == tasks_.end()) {
+    return false;
+  }
+  const int f = ++fail_count_[id];
+  // tasks_ 裡的任務經由 pathTasks()、bestInsertion() 帶到計分；onTask() 對已知任務只改狀態，不會蓋掉這個值
+  it->second.success_prob = 1.0 / (1.0 + f);
+  if (params_.max_failures > 0 && f >= params_.max_failures) {
+    return excludeTask(id, now, kInf);
+  }
+  return false;
+}
+
+int CbbaAgent::failures(TaskId id) const
+{
+  const auto it = fail_count_.find(id);
+  return it == fail_count_.end() ? 0 : it->second;
+}
+
 std::vector<AgentId> CbbaAgent::lostNeighbors(double now, double timeout) const
 {
   std::vector<AgentId> lost;

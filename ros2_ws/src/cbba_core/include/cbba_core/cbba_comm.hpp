@@ -260,6 +260,7 @@ public:
   bool suspendTask(TaskId id, double now);
   void resumeSuspended(double now);
   void excludeTask(TaskId id, double now, double duration = kInf);   // 不再出價（duration 秒；kInf = 永久）
+  void countFailure(TaskId id, double now);   // TRANSIENT 失敗：之後對它的出價打折（CbbaAgent::countFailure）
 
   // BT 回報任務結果。version 必須是自己目前「執行中」的正式指派。
   // success：開始完成確認；失敗：結束指派、釋放回競標池，自己 exclude_sec 秒內不再對它出價（任務保留；kInf = 永久）。

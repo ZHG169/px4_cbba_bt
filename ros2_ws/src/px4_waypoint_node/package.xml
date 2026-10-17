@@ -10,6 +10,7 @@
 
   <depend>rclcpp</depend>
   <depend>px4_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>swarm_interfaces</depend>
 
   <export>

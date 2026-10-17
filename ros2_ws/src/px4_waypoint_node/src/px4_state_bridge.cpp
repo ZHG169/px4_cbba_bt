@@ -9,10 +9,15 @@
 // PX4 的位置有在更新（position_timeout 內）就一直送，地面上、未解鎖時也送。
 // 位置沒在更新（PX4 斷線）就停止送，cbba_node 在 state_timeout（1.5 s）後停止參與出價、釋放任務。
 //
-// mode（RobotState v1.2，2026-10-12 照機器狗端的介面）：飛行狀態有效、已解鎖、沒有 landed（＝在空中），
-// 而且這次起飛後爬到過 auto_min_altitude（起飛完成）時 AUTO，否則 MANUAL。cbba_node 只在 AUTO 時出價
-// （spec §2.3 規則 2），所以無人機起飛完成後才參與（不會一離地、還在爬升就被派任務）、降落後立刻停止。
-// 到過高度之後只要還在空中就維持 AUTO（避碰、懸停時高度晃動不會反覆切換）。auto_min_altitude = 0 時離地就算。
+// mode（RobotState v1.2，2026-10-12 照機器狗端的介面）。cbba_node 只在 AUTO 時出價（spec §2.3 規則 2）。
+//   bt_mode_topic 有設（正式 BT uav_task_manager_node，2026-10-17）：照抄 BT 送的 mode（std_msgs/UInt8，值同
+//     RobotState）。照機器狗端由 BT 決定：起飛完成、BT 在控制 = AUTO；地上、爬升中、被接管、PX4 失效保護、返航 =
+//     MANUAL；急停 = ESTOP。「起飛完成」只有 BT 一套標準（altitude ± takeoff_tolerance）。BT 改變時這裡立刻送一筆；
+//     bt_mode_timeout 內沒收到（BT 沒開、當掉）= MANUAL。
+//   沒設（備用 BT uav_bt_node）：自己判斷。飛行狀態有效、已解鎖、沒有 landed（＝在空中）、這次起飛後爬到過
+//     auto_min_altitude（起飛完成），而且 PX4 在 offboard（2026-10-17：被接管、PX4 失效保護、返航時 offboard 都會掉）
+//     時 AUTO，否則 MANUAL。到過高度之後只要還在空中就不再看高度（避碰、懸停時高度晃動不會反覆切換）。
+//     auto_min_altitude = 0 時離地就算。
 //
 // 飛行狀態（決定 mode 用，不送出去）：
 //   armed     = arming_state == ARMING_STATE_ARMED
@@ -38,6 +43,7 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 
 using px4_msgs::msg::BatteryStatus;
@@ -81,6 +87,9 @@ public:
     // 之間跳，cbba_node 跟著撤銷又接回任務（2026-10-12 itest 發現）。PX4 斷線靠位置的 position_timeout（0.5 s）判斷
     status_timeout_ = declare_parameter<double>("status_timeout", 5.0);
     const double rate_hz = declare_parameter<double>("rate_hz", 10.0);
+    // 正式 BT 決定 mode（見開頭）；空 = 自己判斷（備用 BT）。cbba_uav.sh 的 EXECUTOR=task_manager 會給
+    const std::string bt_mode_topic = declare_parameter<std::string>("bt_mode_topic", "");
+    bt_mode_timeout_ = declare_parameter<double>("bt_mode_timeout", 1.5);
 
     const double spacing = std::stod(envOr("UAV_SPAWN_SPACING", "2.0"));
     const auto spawn = declare_parameter<std::vector<double>>(
@@ -118,13 +127,28 @@ public:
         battery_ = msg->connected && msg->remaining >= 0.0f ? 100.0f * msg->remaining : -1.0f;
       });
 
+    use_bt_mode_ = !bt_mode_topic.empty();
+    if (use_bt_mode_) {
+      bt_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(bt_mode_topic, rclcpp::QoS(1).reliable(),
+        [this](std_msgs::msg::UInt8::ConstSharedPtr msg) {
+          const bool changed = !have_bt_mode_ || msg->data != bt_mode_;
+          bt_mode_ = msg->data;
+          have_bt_mode_ = true;
+          last_bt_mode_ = steadyNow();
+          if (changed) {
+            publish();   // 不等下一個週期：被接管時 cbba_node 早一點停止出價
+          }
+        });
+    }
+
     // cbba_node 用 best effort 訂閱，這裡用 reliable 發也收得到
     state_pub_ = create_publisher<RobotStateMsg>(prefix + "/robot_state", rclcpp::QoS(1).reliable());   // 和機器狗端一致
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / rate_hz), [this]() {publish();});
 
-    RCLCPP_INFO(get_logger(), "uav%d：%s → %s/robot_state（%.0f Hz），出生點 map (%.1f, %.1f, %.1f)",
-      agent_id, fmu.c_str(), prefix.c_str(), rate_hz, spawn_x_, spawn_y_, spawn_z_);
+    RCLCPP_INFO(get_logger(), "uav%d：%s → %s/robot_state（%.0f Hz），出生點 map (%.1f, %.1f, %.1f)；mode：%s",
+      agent_id, fmu.c_str(), prefix.c_str(), rate_hz, spawn_x_, spawn_y_, spawn_z_,
+      use_bt_mode_ ? ("照 BT 的 " + bt_mode_topic).c_str() : "自己判斷（在空中、起飛完成、offboard）");
   }
 
 private:
@@ -175,22 +199,48 @@ private:
     msg.position.y = y_;
     msg.position.z = z_;
     msg.battery = battery_;
+    msg.mode = use_bt_mode_ ? modeFromBt(now) : modeFromPx4(valid);
+    state_pub_->publish(msg);
+  }
+
+  // 正式 BT 送的 mode；逾時（BT 沒開、當掉）當 MANUAL
+  std::uint8_t modeFromBt(double now)
+  {
+    const bool fresh = have_bt_mode_ && now - last_bt_mode_ < bt_mode_timeout_;
+    const std::uint8_t mode = fresh ? bt_mode_ : RobotStateMsg::MANUAL;
+    const int phase = fresh ? mode : -2;
+    if (phase != phase_) {
+      phase_ = phase;
+      if (!fresh) {
+        RCLCPP_WARN(get_logger(), "%.1f s 內沒收到 BT 的 mode：mode MANUAL（不接任務）", bt_mode_timeout_);
+      } else {
+        RCLCPP_INFO(get_logger(), "BT 的 mode：%s（%.1f m）", mode == RobotStateMsg::AUTO ? "AUTO（可以接任務）" :
+          mode == RobotStateMsg::ESTOP ? "ESTOP（急停）" : "MANUAL（不接任務）", z_);
+      }
+    }
+    return mode;
+  }
+
+  // 備用 BT：自己從 PX4 判斷
+  std::uint8_t modeFromPx4(bool valid)
+  {
     const bool airborne = valid && armed_ && !landed_;
     climbed_ = airborne && (climbed_ || z_ >= auto_min_altitude_);
-    const bool ready = airborne && climbed_;
-    msg.mode = ready ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
-    const int phase = !airborne ? 0 : (ready ? 2 : 1);
+    const bool ready = airborne && climbed_ && offboard_;
+    const int phase = !airborne ? 0 : !climbed_ ? 1 : !offboard_ ? 3 : 2;
     if (phase != phase_) {
       phase_ = phase;
       if (phase == 2) {
-        RCLCPP_INFO(get_logger(), "起飛完成（%.1f m）：mode AUTO（可以接任務）", z_);
+        RCLCPP_INFO(get_logger(), "起飛完成（%.1f m）、offboard：mode AUTO（可以接任務）", z_);
       } else if (phase == 1) {
         RCLCPP_INFO(get_logger(), "離地、爬升中：mode MANUAL（到 %.1f m 才接任務）", auto_min_altitude_);
+      } else if (phase == 3) {
+        RCLCPP_INFO(get_logger(), "在空中但不是 offboard（被接管、PX4 失效保護或返航）：mode MANUAL（不接任務）");
       } else {
         RCLCPP_INFO(get_logger(), "不在空中：mode MANUAL（不接任務）");
       }
     }
-    state_pub_->publish(msg);
+    return ready ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
   }
 
   std::uint8_t agent_id_{1};
@@ -216,7 +266,14 @@ private:
   bool valid_{false};
   double auto_min_altitude_{0.0};
   bool climbed_{false};    // 這次起飛後爬到過 auto_min_altitude
-  int phase_{-1};          // 0 地面、1 爬升中、2 起飛完成（只用來印 log）
+  int phase_{-1};          // 自己判斷：0 地面、1 爬升中、2 起飛完成、3 不是 offboard；照 BT：mode、−2 逾時（只用來印 log）
+
+  bool use_bt_mode_{false};
+  double bt_mode_timeout_{1.5};
+  bool have_bt_mode_{false};
+  std::uint8_t bt_mode_{RobotStateMsg::MANUAL};
+  double last_bt_mode_{0.0};
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr bt_mode_sub_;
 
   rclcpp::Subscription<VehicleLocalPosition>::SharedPtr position_sub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr status_sub_;

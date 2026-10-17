@@ -86,7 +86,12 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 | `/v60/task_result` | BT → CBBA | `TaskResult`（reliable） | 一個任務一次；**task_id 要是目前 `current_task` 上的**；不用帶指派版本 |
 | `/v60/new_task` | BT → CBBA | `Task` | 狗也可以建立任務（task_id = 50 × 65536 + 流水號，重開機後流水號要接續） |
 
-- **失敗的 `reason`**：`PERMANENT` → 這隻狗永久不再接這個任務；`TRANSIENT`、`PREEMPTED`、`STOPPED` → **60 s** 內不接（`failure_exclude_sec`），之後恢復出價。
+- **失敗的 `reason`**：`PERMANENT` → 這隻狗永久不再接這個任務；`PREEMPTED`（`PREEMPTED_BY_MANUAL`）→ **5 s** 內不接
+  （`preempt_exclude_sec`，2026-10-17 起：只擋「回報先到、mode = MANUAL 晚到」；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回）；
+  `TRANSIENT`、`STOPPED` → **60 s** 內不接（`failure_exclude_sec`），之後恢復出價。
+- **`TRANSIENT` 會讓之後的出價打折**（2026-10-17）：失敗 f 次，這隻狗對這個任務的出價用成功率 1/(1+f)（價值減半、到達時間多算重試），
+  60 s 後通常由別隻接手，不會一直派回同一隻；只有你能做時仍會派回來重試。卡住、逾時請回 `TRANSIENT`，
+  被平板叫走回 `PREEMPTED_BY_MANUAL`（不算失敗次數）。
 - **assign_hold 0.4 s**：同一個任務在路徑第一位穩定 0.4 s 才發 `current_task`。
 - **不握手**：CBBA 直接發 `current_task`，你的哨兵負責中斷。
 - `/v60/cancel_task`（取消任務）是我們多的，你不用也沒關係。
@@ -121,7 +126,8 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 你的 T1～T10 和 DEMO3 我們寫成了一支腳本 `test/g2_e2e.sh`（不用 BT，約 3 分鐘，58 項），另外加了 E1～E4 驗下一節的差異：
 `bash src/swarm_cbba/test/g2_e2e.sh`（ROS_DOMAIN_ID 93、UDP port 14693，不會干擾正在跑的節點）。
 
-**跑你的 `e2e_cbba_node.sh`（G3）時**：狗的 node 要加 `-p failure_exclude_sec:=1e9`（或寫進 yaml）。
+**跑你的 `e2e_cbba_node.sh`（G3）時**：狗的 node 要加 `-p failure_exclude_sec:=1e9 -p preempt_exclude_sec:=1e9`（或寫進 yaml；
+2026-10-17 起 `cbba_v60.yaml` 的 `preempt_exclude_sec` 是 5 s，第 3 幕平板接管交還的任務 5 s 後就會派回來）。
 失敗後只排除 60 s（你的規則 3），腳本約 4 分鐘，第 2、3、5 幕失敗的任務 60 s 後會派回來，
 閒置的樹會自己開跑、打亂後面幾幕的計數。加了之後行為和你 10/07 跑的一樣（失敗的永遠不回來）。
 
@@ -156,7 +162,9 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 | `agent_type` | `UGV` | |
 | `state_timeout` | 1.5 s | `robot_state` 多久沒更新就停止出價 |
 | `assign_hold` | 0.4 s | |
-| `failure_exclude_sec` | 60 s | 失敗（不是 PERMANENT）後多久不接同一個任務 |
+| `failure_exclude_sec` | 60 s | 失敗（TRANSIENT、STOPPED）後多久不接同一個任務 |
+| `preempt_exclude_sec` | 5 s（yaml） | PREEMPTED 後多久不接 |
+| `max_failures` | 0 | 同一個任務 TRANSIENT 失敗幾次後永久不接；0 = 不啟用（只打折） |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | 1.0、0.1、0.05、20 | **佔位值，請用實測換掉**（`cbba_core/doc/ugv_tuning.md`） |
 | `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式，**全隊要一樣**，不要只改狗的 |
 | `mesh_ip` | 環境變數 `MESH_IP` | |

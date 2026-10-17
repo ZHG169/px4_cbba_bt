@@ -124,6 +124,7 @@ result v60 65539 false NAV_NO_ACK 2; TF=$(date +%s)
 check "E1 task_result 格式" "task_result 00010003：success 0，reason 2，detail「NAV_NO_ACK」" $D 5
 check "E1 失敗格式（伯宇 grep）" "任務 00010003 失敗（NAV_NO_ACK），交回競標池" $D 3
 check "E1 60 s 內不接" "這台 60 s 內不接" $D 1
+check "E1 失敗次數與成功率（2026-10-17）" "任務 00010003 這台失敗 1 次，估計成功率 0.50" $D 3
 
 echo "▷ E2 永久失敗（等 E1 的同時）"
 fire uav1 65540 4.0 18.0

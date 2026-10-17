@@ -10,6 +10,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(px4_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(swarm_interfaces REQUIRED)
 
 # 起飛並懸停（第 2 週再加航點）
@@ -22,7 +23,7 @@ target_link_libraries(task_executor rclcpp::rclcpp ${px4_msgs_TARGETS} ${swarm_i
 
 # 轉接節點：PX4 的話題 → 通用 cbba_node 的 RobotState（NED → map ENU；解鎖且離地才送）
 add_executable(px4_state_bridge src/px4_state_bridge.cpp)
-target_link_libraries(px4_state_bridge rclcpp::rclcpp ${px4_msgs_TARGETS} ${swarm_interfaces_TARGETS})
+target_link_libraries(px4_state_bridge rclcpp::rclcpp ${px4_msgs_TARGETS} ${std_msgs_TARGETS} ${swarm_interfaces_TARGETS})
 
 install(TARGETS takeoff_hover task_executor px4_state_bridge DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/hover_report.py DESTINATION lib/${PROJECT_NAME})

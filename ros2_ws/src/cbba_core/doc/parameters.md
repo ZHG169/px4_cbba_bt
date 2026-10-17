@@ -26,6 +26,8 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他）。第 5 週弱網量測後調整（全隊要一樣） |
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
+| `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
+| `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 
 ---
 
@@ -73,6 +75,8 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 |---|---|---|
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 不是 PERMANENT 時，這台多久不再對同一個任務出價（PERMANENT 永久） |
+| `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
+| `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 | `max_queued_fires` | 1 | 執行中任務之後最多保留幾個火警 |
 | `max_queue_wait` | 120 s | 沒有期限的任務，排隊時最多等多久（從任務建立時算，不會每輪競標重新起算）。有期限時用期限 |
 | `overrun_margin` | 10 s | 執行中的任務超過「開始時估的前往＋停留時間」再加這麼多秒還沒完成（例如無人機懸停監控火點、等地面處置）：不再排在它後面接新任務，已排隊、還沒開始的撤回給別台；更高優先級的搶占照常（2026-10-13，SITL 的 U6） |

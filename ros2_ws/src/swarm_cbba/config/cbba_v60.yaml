@@ -8,3 +8,5 @@
     energy_per_meter: 0.1
     hover_energy_per_sec: 0.05
     safety_reserve: 20.0
+    preempt_exclude_sec: 5.0  # 被接管（PREEMPTED_BY_MANUAL）交還的任務多久不接：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（2026-10-17）
+    # max_failures: 0         # 同一個任務 TRANSIENT 失敗幾次後永久不接；0 = 不啟用（只靠成功率 1/(1+f) 打折）

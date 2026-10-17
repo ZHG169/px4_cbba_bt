@@ -279,6 +279,11 @@ void CbbaComm::excludeTask(TaskId task_id, double now, double duration)
   markChanged(agent_.excludeTask(task_id, now, duration));
 }
 
+void CbbaComm::countFailure(TaskId task_id, double now)
+{
+  markChanged(agent_.countFailure(task_id, now));
+}
+
 ReportCheck CbbaComm::reportResult(TaskId task_id, bool success, std::uint64_t version, double now,
   double exclude_sec)
 {

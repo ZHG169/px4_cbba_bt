@@ -214,6 +214,8 @@ VehicleState Px4Platform::vehicle() const
   v.armed = have_status_ && status_.arming_state == VehicleStatus::ARMING_STATE_ARMED;
   v.offboard = have_status_ && status_.nav_state == VehicleStatus::NAVIGATION_STATE_OFFBOARD;
   v.landed = landed_;
+  v.failsafe = have_status_ && status_.failsafe;
+  v.user_took_over = have_status_ && status_.failsafe_and_user_took_over;
   return v;
 }
 

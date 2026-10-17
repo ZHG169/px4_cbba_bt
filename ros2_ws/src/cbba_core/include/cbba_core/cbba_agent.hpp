@@ -8,6 +8,7 @@
 //   setActive()  是否參與出價（例如還沒起飛時不參與）
 //   releaseAgent() / releaseStale()  某台停止參與或失聯：把它得標的任務設為無人，重新出價
 //   excludeTask() 自己做這個任務失敗：釋放並在一段時間內（或永久）不再對它出價（交回給其他載具）
+//   countFailure() TRANSIENT 失敗的次數 f：成功率 p = 1/(1+f)，之後對它的出價打折（scoring.hpp），別台優先接手
 //   setExecConstraints() 執行狀態的限制（2026-10-09）：已接受的任務釘在路徑最前面；
 //                 搶占要「可以安全中斷、新任務優先級較高」；火警排隊最多 1 個、要在期限內做得完
 //   setLocked()   別台已接受（保留／執行中）的任務：不出價（容量承諾）
@@ -126,6 +127,12 @@ public:
   bool excludeTask(TaskId id, double now, double duration = kInf);
   bool excluded(TaskId id, double now) const;
 
+  // TRANSIENT 失敗（2026-10-17）：失敗次數 + 1、Task::success_prob = 1/(1+f)。PERMANENT、PREEMPTED、STOPPED 不算
+  // （不是「這台做不到這個點」）。max_failures > 0 且達到時永久排除。只在本機，不需要廣播。
+  // 先 excludeTask（釋放）再呼叫：排除時間過後用新的成功率重新出價。回傳 true 表示有改變
+  bool countFailure(TaskId id, double now);
+  int failures(TaskId id) const;
+
   // 執行狀態的限制。回傳 true 表示有改變（例如已接受的任務改了、不能再排隊的任務被釋放）
   bool setExecConstraints(const ExecConstraints & c, double now);
   const ExecConstraints & execConstraints() const {return exec_;}
@@ -169,6 +176,7 @@ private:
   std::vector<TaskId> bundle_;
   std::vector<TaskId> path_;
   std::map<TaskId, double> excluded_;   // 任務 → 排除到什麼時刻（kInf = 永久）
+  std::map<TaskId, int> fail_count_;    // 任務 → 這台 TRANSIENT 失敗的次數
   std::set<TaskId> suspended_;
   std::set<TaskId> locked_;
   ExecConstraints exec_;

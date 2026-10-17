@@ -239,3 +239,66 @@ TEST(Scoring, MarginalScoreDoesNotIncreaseWithLongerPath)
   RecordProperty("violation_rate", std::to_string(rate));
   EXPECT_GT(samples, 1000);
 }
+
+// ===========================================================================
+// 失敗過的任務：期望價值、期望到達時間（2026-10-17）
+// ===========================================================================
+TEST(Scoring, FullSuccessProbKeepsOriginalScore)
+{
+  // success_prob = 1（沒失敗過）：和原本的公式完全相同（數字同 HandComputedSingleTask）
+  const AgentState uav = makeUav(0, 0);
+  Task task = makeTask(1, TaskType::AIR_RECON, 40, 0, 60, 80, 10);
+  task.success_prob = 1.0;
+  const Insertion ins = bestInsertion(uav, {}, task, 0.0, makeParams());
+  ASSERT_TRUE(ins.feasible);
+  EXPECT_NEAR(ins.marginal_cost, 10.1667, 1e-3);
+  EXPECT_NEAR(ins.score, 66.482, 1e-2);
+}
+
+TEST(Scoring, UrgentTaskPenalizedMore)
+{
+  // 實作說明的範例：失敗一次（p = 0.5）、距離 20 m、規劃速度 4 m/s、執行 10 s、不算電池
+  //   火警 value 80、剩 30 s：到達 5 → 20 s，75.0 → 31.6（42%）
+  //   巡檢 value 40、剩 600 s：39.9 → 19.7（49%）：期限長，時間項幾乎不起作用，只剩價值減半
+  const AgentState uav = makeUav(0, 0);
+  const ScoringParams params = makeParams(0.0);
+  auto score = [&](double deadline, double value, double p) {
+      Task t = makeTask(1, TaskType::AIR_RECON, 20, 0, deadline, value, 10);
+      t.success_prob = p;
+      return bestInsertion(uav, {}, t, 0.0, params).score;
+    };
+  EXPECT_NEAR(score(30, 80, 1.0), 75.0, 0.05);
+  EXPECT_NEAR(score(30, 80, 0.5), 31.58, 0.05);
+  EXPECT_NEAR(score(600, 40, 1.0), 39.87, 0.05);
+  EXPECT_NEAR(score(600, 40, 0.5), 19.74, 0.05);
+  EXPECT_LT(score(30, 80, 0.5) / score(30, 80, 1.0), score(600, 40, 0.5) / score(600, 40, 1.0));
+}
+
+TEST(Scoring, FailureDelaysLaterTasks)
+{
+  // 路徑上第一個任務 p = 0.5：它多 (1 − p)/p × (前往 5 s＋執行 10 s) = 15 s，後面的任務一起延後
+  const AgentState uav = makeUav(0, 0);
+  const ScoringParams params = makeParams(0.0);
+  Task a = makeTask(1, TaskType::AIR_RECON, 20, 0, 600, 80, 10);
+  const Task b = makeTask(2, TaskType::AIR_RECON, 40, 0, 600, 80, 0);
+  const PathEval base = evaluatePath(uav, {a, b}, 0.0, params);
+  EXPECT_NEAR(base.legs[1].arrival, 20.0, 1e-9);    // 5 + 10 + 5
+  a.success_prob = 0.5;
+  const PathEval slow = evaluatePath(uav, {a, b}, 0.0, params);
+  EXPECT_NEAR(slow.legs[0].arrival, 20.0, 1e-9);    // 5 + 15
+  EXPECT_NEAR(slow.legs[1].arrival, 35.0, 1e-9);    // 30 + 5
+  EXPECT_GT(slow.total_cost, base.total_cost);
+}
+
+TEST(Scoring, ActiveHeadWithRemainingTimeIsNotDelayed)
+{
+  // 執行中、有 BT 的剩餘時間：第一個任務的完成時間就用它，不再加期望重試時間
+  const AgentState uav = makeUav(0, 0);
+  const ScoringParams params = makeParams(0.0);
+  Task a = makeTask(1, TaskType::AIR_RECON, 20, 0, 600, 80, 10);
+  a.success_prob = 0.5;
+  const Task b = makeTask(2, TaskType::AIR_RECON, 40, 0, 600, 80, 0);
+  const PathEval eval = evaluatePath(uav, {a, b}, 0.0, params, 3.0);
+  EXPECT_NEAR(eval.legs[0].completion, 3.0, 1e-9);
+  EXPECT_NEAR(eval.legs[1].arrival, 8.0, 1e-9);     // 3 + 20 m / 4 m/s
+}

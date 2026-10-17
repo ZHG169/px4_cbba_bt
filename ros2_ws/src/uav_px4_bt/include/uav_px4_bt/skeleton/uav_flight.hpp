@@ -7,11 +7,15 @@
 //            （停在被推開的位置，鄰機離開後再繼續飛回去）。GUIDE §3 的 DefaultBehavior 不放進樹，樹跑完就結束、回報照骨架的流程
 //   返航     在空中、電量 ≤ min_battery → 停止 offboard、PX4 RTL（指令可能掉：每 2 s 再送，最多 3 次），之後一直是 RTL
 //   不在空中 起飛完成後上鎖或降落 → 回到起飛（和備用 BT 的 TakeOff 一樣會重新起飛）
-//   高度警告（2026-10-17，只印 log、行為不變；被接管時 mode 怎麼送還在和機器狗端討論）：
-//            - 爬升 kClimbWarnSec 秒還沒到 altitude ± takeoff_tolerance：一直不算起飛完成、不 tick 樹
-//              （px4_state_bridge 的門檻是 altitude − 0.5 m，兩邊可能不一致）
-//            - 在空中被切出 offboard（遙控器、地面站接管）：BT 照舊當作在空中，robot_state 仍是 AUTO
-//            - 切回 offboard：不重新起飛、不重新確認高度，直接接回；高度和 altitude 差超過 takeoff_tolerance 時警告
+//   被接管   起飛完成後 offboard 掉了（不是自己的返航）→ OVERRIDE（2026-10-17，照機器狗端的平板接管）：
+//            PX4 的 failsafe = 0（或失效保護中 user_took_over）＝ 人用遙控器／地面站切了模式 → TAKEOVER
+//            （node 層把手上的任務以 PREEMPTED_BY_MANUAL 交還）；failsafe = 1 ＝ PX4 自己的失效保護（setpoint 斷了、
+//            地理圍欄、PX4 的低電量）→ FAILSAFE（PX4_FAILSAFE，STOPPED）。2026-10-17 SITL 實測：commander mode auto:loiter
+//            → user_intention 跟著變、failsafe 0；停掉 BT → nav_state AUTO_RTL、user_intention 仍是 OFFBOARD、failsafe 1。
+//            OVERRIDE 期間不 tick 樹、mode 送 MANUAL（node 層），持續送「目前位置」的 setpoint（PX4 要有 offboard 訊號
+//            才能切回）。切回 offboard → AIRBORNE（RESUMED，照狗：直接放行），待命點改成目前位置（不飛回接管前的點），
+//            高度和 altitude 差超過 takeoff_tolerance 時警告
+//   高度警告（2026-10-17，只印 log）：爬升 kClimbWarnSec 秒還沒到 altitude ± takeoff_tolerance：一直不算起飛完成、不 tick 樹
 //
 // 不依賴 ROS：透過 UavContext（UavPlatform）讀狀態、下命令，test_skeleton 用假平台測。
 #pragma once
@@ -25,10 +29,11 @@
 namespace uav_px4_bt
 {
 
-enum class FlightPhase { GROUND, AIRBORNE, RTL };
+// OVERRIDE：在空中，但不是 BT 在控制（被接管或 PX4 失效保護）
+enum class FlightPhase { GROUND, AIRBORNE, RTL, OVERRIDE };
 
 // update() 這個 tick 發生的事（node 層據此結束任務、開始 tick 樹）
-enum class FlightEvent { NONE, TOOK_OFF, LANDED, BATTERY_RTL };
+enum class FlightEvent { NONE, TOOK_OFF, LANDED, BATTERY_RTL, TAKEOVER, FAILSAFE, RESUMED };
 
 class UavFlight
 {
@@ -39,6 +44,9 @@ public:
   FlightPhase phase() const {return phase_;}
   const Vec3 & home() const {return home_;}
   double altitude() const {return altitude_;}
+  // OVERRIDE 的原因：true = 人接管（PREEMPTED_BY_MANUAL），false = PX4 失效保護（PX4_FAILSAFE）
+  bool overrideByUser() const {return override_user_;}
+  const char * overrideReason() const {return override_user_ ? "PREEMPTED_BY_MANUAL" : "PX4_FAILSAFE";}
 
   // 每個 tick 先呼叫：起飛中、返航中自己下命令；在空中時只檢查電量、是否還在空中
   FlightEvent update()
@@ -54,15 +62,15 @@ public:
           rtl_last_ = now;
         }
         return FlightEvent::NONE;
+      case FlightPhase::OVERRIDE:
+        return updateOverride(v);
       case FlightPhase::AIRBORNE:
         if (!v.armed || v.landed) {
-          ctx_.platform.log("已經不在空中（上鎖或降落）：重新起飛");
-          ctx_.airborne = false;
-          phase_ = FlightPhase::GROUND;
-          takeoff_start_ = -1.0;
-          return FlightEvent::LANDED;
+          return landed();
         }
-        noticeOffboard(v);
+        if (!v.offboard) {
+          return enterOverride(v);
+        }
         // 一旦觸發就不再恢復，電量讀數上下跳時不會來回切換
         if (v.battery >= 0.0 && v.battery <= min_battery_) {
           char b[96];
@@ -124,6 +132,67 @@ public:
   void leaveHold() {hold_valid_ = false;}
 
 private:
+  FlightEvent landed()
+  {
+    ctx_.platform.log("已經不在空中（上鎖或降落）：重新起飛");
+    ctx_.airborne = false;
+    phase_ = FlightPhase::GROUND;
+    takeoff_start_ = -1.0;
+    return FlightEvent::LANDED;
+  }
+
+  static bool byUser(const VehicleState & v) {return !v.failsafe || v.user_took_over;}
+
+  FlightEvent enterOverride(const VehicleState & v)
+  {
+    phase_ = FlightPhase::OVERRIDE;
+    override_user_ = byUser(v);
+    char b[256];
+    std::snprintf(b, sizeof(b), override_user_ ?
+      "警告：被接管（不是 offboard，failsafe 0），高度 %.2f m：交還手上的任務（PREEMPTED_BY_MANUAL）、mode MANUAL，"
+      "切回 offboard 才接任務" :
+      "警告：PX4 失效保護（不是 offboard，failsafe 1），高度 %.2f m：交還手上的任務（PX4_FAILSAFE）、mode MANUAL",
+      v.position.z);
+    ctx_.platform.log(b);
+    ctx_.setExec(ExecMode::FAULT, -1.0, nullptr);
+    holdHere(v);
+    return override_user_ ? FlightEvent::TAKEOVER : FlightEvent::FAILSAFE;
+  }
+
+  FlightEvent updateOverride(const VehicleState & v)
+  {
+    if (!v.armed || v.landed) {
+      return landed();
+    }
+    if (v.offboard) {
+      phase_ = FlightPhase::AIRBORNE;
+      hold_valid_ = false;   // 待命點改成目前位置：接管期間被飛到別處，不要飛回接管前的點
+      ctx_.resetMotion();
+      char b[256];
+      const double dz = v.position.z - altitude_;
+      if (std::fabs(dz) >= ctx_.config.takeoff_tolerance) {
+        std::snprintf(b, sizeof(b), "警告：切回 offboard，高度 %.2f m 和巡檢高度 %.1f m 差 %+.2f m："
+          "不重新起飛，從目前位置接回、mode AUTO", v.position.z, altitude_, dz);
+      } else {
+        std::snprintf(b, sizeof(b), "切回 offboard（高度 %.2f m）：從目前位置接回、mode AUTO", v.position.z);
+      }
+      ctx_.platform.log(b);
+      return FlightEvent::RESUMED;
+    }
+    // 失效保護中人接手、或人放手後 PX4 失效保護：只改原因（之後收到的任務用它交還）；手上的任務進來時已經交還
+    const bool user = byUser(v);
+    if (user != override_user_) {
+      override_user_ = user;
+      ctx_.platform.log(user ? "被接管中：人接手（failsafe 0 或 user_took_over）" : "被接管中：PX4 失效保護（failsafe 1）");
+    }
+    ctx_.setExec(ExecMode::FAULT, -1.0, nullptr);
+    holdHere(v);
+    return FlightEvent::NONE;
+  }
+
+  // PX4 要一直收到 offboard 的 setpoint 才能切回 offboard；送目前位置，切回時從這裡開始、不會往接管前的點衝
+  void holdHere(const VehicleState & v) {ctx_.platform.setSetpoint(v.position, {});}
+
   bool takeOff(const VehicleState & v, double now)
   {
     ctx_.setExec(ExecMode::IDLE, -1.0, nullptr);
@@ -175,29 +244,7 @@ private:
     ctx_.airborne = true;
     phase_ = FlightPhase::AIRBORNE;
     hold_valid_ = false;
-    offboard_ = true;
     return true;
-  }
-
-  // 被接管的現象先印出來，行為不變（見開頭「高度警告」）
-  void noticeOffboard(const VehicleState & v)
-  {
-    if (v.offboard == offboard_) {
-      return;
-    }
-    offboard_ = v.offboard;
-    char b[256];
-    const double dz = v.position.z - altitude_;
-    if (!v.offboard) {
-      std::snprintf(b, sizeof(b), "警告：在空中但不是 offboard（遙控器或地面站接管？），高度 %.2f m："
-        "BT 照舊當作在空中，robot_state 仍是 AUTO", v.position.z);
-    } else if (std::fabs(dz) >= ctx_.config.takeoff_tolerance) {
-      std::snprintf(b, sizeof(b), "警告：切回 offboard，高度 %.2f m 和巡檢高度 %.1f m 差 %+.2f m："
-        "不重新起飛、直接接回", v.position.z, altitude_, dz);
-    } else {
-      std::snprintf(b, sizeof(b), "切回 offboard（高度 %.2f m）：直接接回", v.position.z);
-    }
-    ctx_.platform.log(b);
   }
 
   static constexpr double kClimbWarnSec = 20.0;   // 5 m 的巡檢高度正常幾秒就到
@@ -214,7 +261,7 @@ private:
   Vec3 climb_xy_;
   double climb_start_{0.0};
   bool climb_warned_{false};
-  bool offboard_{true};               // 在空中時上一次看到的 offboard（只用來印警告）
+  bool override_user_{true};
 
   int rtl_sent_{0};
   double rtl_last_{0.0};

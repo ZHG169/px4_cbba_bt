@@ -71,6 +71,8 @@ public:
   // 往 goal 飛（CBF 避碰），回傳現在離 goal 的距離
   // yield_to_busy：待命時讓路給執行任務中的鄰機（CBF 把它們當不會讓的障礙物、全額閃開）
   double moveTo(const Vec3 & goal, bool yield_to_busy = false);
+  // 運動平滑層從目前位置重新開始（被接管後切回 offboard：參考位置不要停在接管前的點）
+  void resetMotion() {motion_.reset();}
   void setExec(ExecMode mode, double remaining, const AssignedTask * active);
   bool reported(const AssignedTask & t) const {return reported_.count({t.task_id, t.version}) > 0;}
   void markReported(const AssignedTask & t) {reported_.insert({t.task_id, t.version});}
