@@ -367,6 +367,8 @@ private:
   // 從外面停掉執行中的任務：halt，再照一般流程回報
   void abortNow(const std::string & reason)
   {
+    // 不是哨兵換任務：清掉 kick 留下的中斷延遲起點，否則閒置時開跑的任務被接管、返航時會印出「派任務 → 中止」的時間
+    g_ctx.preempt_t0.reset();
     tree_->haltTree();
     g_ctx.end_reason = reason;
     if (g_ctx.abort_waypoint.empty()) {

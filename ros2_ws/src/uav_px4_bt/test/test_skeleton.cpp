@@ -518,6 +518,15 @@ TEST_F(FlightTest, TakesOffThenLoiters)
   EXPECT_EQ(platform.exec.mode, ExecMode::IDLE);
 }
 
+TEST_F(FlightTest, HoldsAtPatrolAltitudeAfterTakeoff)
+{
+  // 起飛完成時離巡檢高度還差 takeoff_tolerance 以內（SITL：4.71 m）：待命點用巡檢高度，最後停在 5.0 m
+  flight = std::make_unique<UavFlight>(*ctx, 5.0, 20.0, -1.0);
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  runUntil([](FlightEvent) {return false;}, 10.0);
+  EXPECT_NEAR(platform.v.position.z, 5.0, 0.05);
+}
+
 TEST_F(FlightTest, NotReadyWaitsWithoutArming)
 {
   // 起飛前檢查沒過：只送零速度，不要求解鎖
@@ -614,7 +623,7 @@ TEST_F(FlightTest, SlowClimbWarnsOnce)
 TEST_F(FlightTest, UserTakeoverEntersOverrideAndResumesHere)
 {
   // 起飛完成後被人切出 offboard（failsafe 0）：TAKEOVER 一次、OVERRIDE（node 層：PREEMPTED_BY_MANUAL、mode MANUAL）；
-  // 期間被飛到 (6, 0, 2) 再切回 → RESUMED、警告高度差、待命點改成目前位置（不飛回接管前的點）
+  // 期間被飛到 (6, 0, 2) 再切回 → RESUMED、警告高度差、待命點改成目前的水平位置＋巡檢高度（不飛回接管前的點）
   flight = std::make_unique<UavFlight>(*ctx, 5.0, 20.0, -1.0);
   ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
   platform.v.offboard = false;
@@ -631,9 +640,9 @@ TEST_F(FlightTest, UserTakeoverEntersOverrideAndResumesHere)
   EXPECT_EQ(step(), FlightEvent::RESUMED);
   EXPECT_EQ(flight->phase(), FlightPhase::AIRBORNE);
   EXPECT_EQ(countLogs("切回 offboard，高度"), 1);
-  runUntil([](FlightEvent) {return false;}, 5.0);
+  runUntil([](FlightEvent) {return false;}, 10.0);
   EXPECT_NEAR(platform.v.position.x, 6.0, 0.3);
-  EXPECT_NEAR(platform.v.position.z, 2.0, 0.3);
+  EXPECT_NEAR(platform.v.position.z, 5.0, 0.1);
 }
 
 TEST_F(FlightTest, RejoinAtAltitudeIsNotWarned)

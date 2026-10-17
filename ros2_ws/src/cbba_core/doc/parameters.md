@@ -28,6 +28,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 是 TRANSIENT、STOPPED 時，這台多久不再對同一個任務出價（PERMANENT 永久；PREEMPTED 看 `preempt_exclude_sec`） |
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
+| `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 
 ---
 
@@ -77,6 +78,7 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 是 TRANSIENT、STOPPED 時，這台多久不再對同一個任務出價（PERMANENT 永久；PREEMPTED 看 `preempt_exclude_sec`） |
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
+| `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `max_queued_fires` | 1 | 執行中任務之後最多保留幾個火警 |
 | `max_queue_wait` | 120 s | 沒有期限的任務，排隊時最多等多久（從任務建立時算，不會每輪競標重新起算）。有期限時用期限 |
 | `overrun_margin` | 10 s | 執行中的任務超過「開始時估的前往＋停留時間」再加這麼多秒還沒完成（例如無人機懸停監控火點、等地面處置）：不再排在它後面接新任務，已排隊、還沒開始的撤回給別台；更高優先級的搶占照常（2026-10-13，SITL 的 U6） |

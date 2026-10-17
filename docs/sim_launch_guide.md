@@ -68,7 +68,7 @@ source install/setup.bash     # 已經開著的 terminal 都要重新 source（�
 | `SIM_BAT_MIN_PCT` | 20 | PX4 模擬電池最低停在這裡（= BT 返航門檻） |
 | `CBBA_SPEED`、`CBBA_ALTITUDE` | 5 m/s、5 m | cbba_node 的出價和執行者的飛行一致 |
 | `CBBA_WORLD` | （PX4 預設場景） | `fire_site`、`patrol_site`：只有第 1 台要設 |
-| `EXECUTOR` | `bt` | `bt` = `uav_px4_bt`＋`apriltag_fire_detector`；`task_executor` = 舊的簡易執行者 |
+| `EXECUTOR` | `task_manager`（2026-10-17 起） | `task_manager` = 正式 BT（`uav_task_manager_node`）＋`apriltag_fire_detector`；`bt` = 備用 BT（`uav_bt_node`）；`task_executor` = 舊的簡易執行者 |
 
 **每台開好之後要看到**（細節見 `sitl_test.md` 第 1 節）：`[bt] 到達 5.0 m，等待指派` →
 `[state] BT 的 mode：AUTO（可以接任務）`（正式 BT；備用 BT 是 `[state] 起飛完成（4.5 m）、offboard：mode AUTO`） → `[cbba] 開始參與出價`（起飛完成才出價） → `[cbba] 收斂：0 個任務，N−1 個鄰居`。

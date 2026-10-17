@@ -17,6 +17,8 @@
 //                                                            我們加的、狗端沒有）：無人機發布火警後懸停監控，等地面處置完成才走
 //               task_announced (swarm_interfaces/Task)       全隊已知的任務，每個任務一次（2026-10-14，只有 agent_type = UAV 才發，
 //                                                            狗端沒有這個話題）：無人機的火點去重複要知道別台已經報過的火
+//               task_orphaned (swarm_interfaces/Task)        孤兒任務（2026-10-17，我們加的）：任務還開著，但 orphan_warn_sec 內
+//                                                            一直沒有人得標、也沒有正式指派。只通知（給地面站），不處理
 //
 // 參與出價（spec §2.3 規則 2、4）：robot_state 在 state_timeout 內有更新，而且 mode == AUTO。
 //   MANUAL（平板接管）、ESTOP（急停）、沒有 robot_state 時對所有任務出價 0，手上的任務立刻釋放。
@@ -192,6 +194,9 @@ public:
     recon_altitude_ = declare_parameter<double>("recon_altitude", 5.0);
     // 失敗（reason 不是 PERMANENT）後多久不再對同一個任務出價（spec §2.3 規則 3）
     failure_exclude_sec_ = declare_parameter<double>("failure_exclude_sec", 60.0);
+    // 孤兒任務：開著但這麼久沒有人得標就警告（0 = 不檢查）。全隊能做的都被永久排除（PERMANENT）、不在 AUTO 或失聯時，
+    // CBBA 不會有任何訊號，期限又是軟限制，地面站不會知道（2026-10-17，宜臻的實作說明）
+    orphan_warn_sec_ = declare_parameter<double>("orphan_warn_sec", 30.0);
     // PREEMPTED（被接管 PREEMPTED_BY_MANUAL；無人機的備用 BT 路過發現火警 FIRE_FOUND）的排除時間，預設和
     // failure_exclude_sec 一樣。cbba_v60.yaml、cbba_uav.yaml 設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的
     // 空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時）
@@ -282,6 +287,7 @@ public:
       announced_pub_ = create_publisher<TaskMsg>(topic("task_announced"),
           rclcpp::QoS(256).reliable().transient_local());
     }
+    orphan_pub_ = create_publisher<TaskMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
     if (participate_ == "state") {
       // best effort 的訂閱可以接 reliable 和 best effort 的發布（BT 用 reliable）
       state_sub_ = create_subscription<RobotStateMsg>(
@@ -456,6 +462,35 @@ private:
     }
   }
 
+  // 孤兒任務：開著、沒有人得標、也沒有正式指派，超過 orphan_warn_sec 印警告、發 task_orphaned 一次；之後有人得標時印一行。
+  // 每台各自看本機的表（得標者經由 CBBA_STATE 傳到每台），不需要知道別台的排除狀態
+  void checkOrphans(double now)
+  {
+    if (!(orphan_warn_sec_ > 0.0)) {
+      return;
+    }
+    const auto & agent = comm_->agent();
+    for (const auto & [id, task] : agent.tasks()) {
+      const AgentId winner = agent.winner(id);
+      const AgentId assignee = comm_->assignment(id).assignee;
+      if (task.status != TaskStatus::OPEN || winner != kNoAgent || assignee != kNoAgent) {
+        if (orphan_warned_.erase(id) > 0 && task.status == TaskStatus::OPEN) {
+          RCLCPP_INFO(get_logger(), "任務 %s 有人得標了（agent %u），不再是孤兒任務", taskName(id).c_str(),
+            winner != kNoAgent ? winner : assignee);
+        }
+        unassigned_since_.erase(id);
+        continue;
+      }
+      const double since = unassigned_since_.emplace(id, now).first->second;
+      if (now - since >= orphan_warn_sec_ && orphan_warned_.insert(id).second) {
+        RCLCPP_WARN(get_logger(), "孤兒任務 %s (%.1f, %.1f, %.1f)：開著但 %.0f s 沒有人得標"
+          "（能做的載具可能都被永久排除、不在 AUTO 或失聯），請地面站處理", taskName(id).c_str(),
+          task.position.x, task.position.y, task.position.z, now - since);
+        orphan_pub_->publish(toMsg(task));
+      }
+    }
+  }
+
   void onCancelTask(const TaskMsg & msg)
   {
     const ReportCheck check = comm_->cancelTask(msg.task_id, wallNow());
@@ -570,6 +605,8 @@ private:
       }
     }
 
+    checkOrphans(now);
+
     const bool converged = comm_->converged(now);
     if (converged && !last_converged_) {
       RCLCPP_INFO(get_logger(), "收斂：%zu 個任務，%zu 個鄰居", comm_->taskCount(),
@@ -647,6 +684,9 @@ private:
   std::map<TaskId, double> reported_at_;   // 自己回報完成的時刻
   std::set<TaskId> closed_;                // 已經印過結束的任務
   std::set<TaskId> announced_;             // 已經發過 task_announced 的任務
+  double orphan_warn_sec_{30.0};
+  std::map<TaskId, double> unassigned_since_;   // 開著、沒有人得標的任務 → 從什麼時候開始
+  std::set<TaskId> orphan_warned_;              // 已經警告過的孤兒任務
   int last_conflicts_{0};
   int last_rejected_{0};
   int last_rejected_closes_{0};
@@ -656,6 +696,7 @@ private:
   rclcpp::Publisher<TaskMsg>::SharedPtr current_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr closed_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 只有無人機
+  rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;

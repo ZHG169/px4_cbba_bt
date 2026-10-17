@@ -4,9 +4,11 @@
 // 原樣切出，只改了這些（伯宇更新骨架時照這份清單重切）：
 //   - 拿掉狗的葉節點 GoTo（Nav2 NavigateToPose）、PtzInspect（雲台 action）、fillPtzGoal 和它們的 include、註冊函式：
 //     我們的映像沒有 nav2_msgs、task_manager_interfaces；無人機的葉節點在 skeleton/uav_leaves.hpp
+//   - printReport 的結束原因（2026-10-17）：原本沒列出的原因一律印「逾時中止」；改成 MISSION_TIMEOUT 才印「逾時中止」，
+//     其他印「中止（原因）」（無人機的 PREEMPTED_BY_MANUAL、PX4_FAILSAFE、BATTERY_RTL、NOT_AIRBORNE 會被當成逾時）
 //   - 這段註解
 // 其餘（Task、Waypoint、Ctx、哨兵 IsTaskValidAndUnchanged、IsEmergency、HandleWaypointFailure、LoadTasks、SplitTask、
-// HandleTaskFailure、ReportTaskResult、MarkMissionAborted、UnknownTask、printReport、tickOrAbort、registerAll）一字未改。
+// HandleTaskFailure、ReportTaskResult、MarkMissionAborted、UnknownTask、printReport 的其他部分、tickOrAbort、registerAll）一字未改。
 #pragma once
 #include "behaviortree_cpp/bt_factory.h"
 #include <rclcpp/rclcpp.hpp>
@@ -344,8 +346,10 @@ inline void printReport() {
     out << "  │ 操作員停止　於 " << g_ctx.abort_waypoint << " 點\n";
   else if (g_ctx.end_reason == "SHUTDOWN")
     out << "  │ 關機中止　於 " << g_ctx.abort_waypoint << " 點\n";
-  else
+  else if (g_ctx.end_reason == "MISSION_TIMEOUT")
     out << "  │ 逾時中止　於 " << g_ctx.abort_waypoint << " 點\n";
+  else
+    out << "  │ 中止（" << g_ctx.end_reason << "）　於 " << g_ctx.abort_waypoint << " 點\n";
   out << "  ├────────────────────────────────────────────────\n";
 
   for (auto& r : g_ctx.results)

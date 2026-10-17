@@ -130,6 +130,7 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 | `current_task`（Task） | CBBA → BT | 目前要執行的任務（reliable、transient_local）；排第一 `assign_hold` 0.4 s 就發；沒有任務時 task_id = 0、status = CANCELLED |
 | `task_closed`（Task） | CBBA → BT | 任務結束（status DONE／CANCELLED），每個任務一次（transient_local、depth 100）；**我們加的**（2026-10-13），狗端不用訂；無人機火警監控用 |
 | `task_announced`（Task） | CBBA → BT | 全隊已知的任務，每個任務一次（transient_local、depth 256）；**我們加的**（2026-10-14），只有 agent_type = UAV 才發；無人機的火點去重複（別台報過的火不再發布、不轉向、不搶著監控） |
+| `task_orphaned`（Task） | CBBA → 地面站等 | 孤兒任務（2026-10-17，我們加的，狗、無人機都發）：開著但 `orphan_warn_sec`（30 s）內沒有人得標、也沒有正式指派，發一次＋log 警告；有人得標時印一行。只通知、不處理 |
 | `robot_state`（RobotState） | BT → CBBA | 位置（map ENU）、電量（負值 = 不知道）、`mode`（AUTO／MANUAL／ESTOP）；`state_timeout` 1.5 s 內有更新**而且 mode = AUTO** 才出價，否則手上的任務立刻釋放。無人機由 `px4_state_bridge` 發；**mode 由正式 BT 決定**（2026-10-17，照機器狗端）：BT 送 `/uavN/bt_mode`（std_msgs/UInt8），起飛完成、BT 在控制 = AUTO，地上、爬升中、被接管、PX4 失效保護、返航 = MANUAL，急停 = ESTOP；備用 BT 時 bridge 自己判斷（在空中、爬到巡檢高度 − 0.5 m、offboard）；第一筆當返航點 |
 | `task_result`（TaskResult） | BT → CBBA | `success`、`detail`（只記 log）、`reason`（失敗後的排除時間）；task_id 要是目前 current_task 上的，否則拒絕 |
 | `new_task`（Task） | BT → CBBA | task_id 建立者必須是自己，不能和已知的重複；佇列深度 256；AIR_RECON 的 z 低於 `recon_altitude` 時改成巡檢高度 |
@@ -285,7 +286,7 @@ DDS 不走 mesh（`.env` 的 `DDS_OVER_MESH=0`）：ROS 話題（robot_state、c
 | 機間通訊（協定版本 2） | 主體完成：擴散、分配、完成確認、失敗交回（reason 排除）、停止參與後接手、**失聯接手**（火警 10 s、巡檢 30 s，10/12）、重開機、鎖定、指派版本、權限、30% 掉包 5 s 內收斂 95% |
 | CBBA 搶占 | 只有地面處置任務是火警（10/09 定案）；10/12 修評分：搶占時不算被搶占任務的延後、出價不受 bundle 上限 → 巡檢中、離火點近的 V60 搶得到（`test_assignment` 驗證） |
 | cbba_node ↔ BT 介面 | 照機器狗端（伯宇）：`swarm_cbba`、swarm_interfaces v1.6、current_task／mode／reason、不握手、assign_hold 0.4 s；log 字串照他的 e2e grep |
-| 無人機 BT | **正式：`uav_task_manager_node`（伯宇骨架，上一節），`cbba_uav.sh` 的 `EXECUTOR=task_manager`、itest 預設**；備用 `uav_bt_node`（`EXECUTOR=bt`，預設仍是 bt）；CPF、運動平滑層兩者共用 |
+| 無人機 BT | **正式：`uav_task_manager_node`（伯宇骨架，上一節），`cbba_uav.sh`、itest 的預設（`cbba_uav.sh` 10/17 起）**；備用 `uav_bt_node`（`EXECUTOR=bt`）；CPF、運動平滑層兩者共用 |
 | `px4_state_bridge` | 發 robot_state；mode 照正式 BT 的 `bt_mode`（2026-10-17）；備用 BT 時自己判斷：爬到巡檢高度（`auto_min_altitude`，高度 − 0.5 m）而且 offboard 才 AUTO |
 | AprilTag 火警 | 到達後 1.2～1.9 s 判定 tag 101、誤差 < 0.5 m、誘餌不觸發；巡檢點火警 → 懸停監控 → 假狗處理完 → 完成（demo D2～D4）；路過發現 SITL 也看過（10/13） |
 | 模擬環境 | docker（sim、uavN、gcs），DDS 只在機內；`fire_site`、`patrol_site`、`demo_site`（±22 m 展示用）；Gazebo 視窗設定 `docker/gz/gui/cbba_gui.config`（網格、關陰影、俯瞰鏡頭）；錄影用場景的俯瞰攝影機；假狗 `docker/scripts/fake_dog.py`（sim，Gazebo 橘色方塊替身）；火點 `models/fire_block`＋tag 101（`patrol_scenario.sh fire-at`） |
@@ -307,11 +308,11 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
 
 ### 還沒做的（依建議順序）
 
-1. 被接管、返航時 mode（2026-10-17 已改，**待 SITL 重測**）：選 B——正式 BT 決定 mode、bridge 照抄；offboard 掉了時用 PX4 的
+1. 被接管、返航時 mode（2026-10-17 已改，SITL 通過）：選 B——正式 BT 決定 mode、bridge 照抄；offboard 掉了時用 PX4 的
    `failsafe`、`failsafe_and_user_took_over` 分辨人接管（`PREEMPTED_BY_MANUAL`）和 PX4 失效保護（`PX4_FAILSAFE`），SITL 已確認分得出來
    （`docker/scripts/watch_px4_status.py`；模擬沒有遙控器，`posctl` 會被拒，用 `commander mode auto:loiter` 模擬接管）。
-   懸停高度：起飛完成那一刻的高度當待命點（實測停在 4.71 m，不是 5.0 m），要不要固定用巡檢高度待定。
-   `cbba_uav.sh` 的預設執行者還是 `bt`，要不要改成 task_manager 待定。
+   懸停高度：原本用起飛完成那一刻的高度當待命點（實測停在 4.71 m），10/17 改成待命點的高度一律是巡檢高度（`UavFlight::atAltitude`，
+   被接管後切回也一樣：水平留在原地、回到巡檢高度）。`cbba_uav.sh` 的預設執行者 10/17 改成 `task_manager`。SITL、單元測試通過。
 2. 殘留的 Gazebo 伺服器會不理 SIGTERM（itest 已改成 SIGKILL 後備、`px4_sitl.sh` 會提示 `pkill -9`）。
 3. 第 5 週：`resend_gap` 開成 cbba_node 參數、量 1.0／0.5／0.3 s；30% 再量 100 次。
 4. 真的 V60：假狗（`fake_dog.py`）已經完成「發布地面任務 → 狗競標 → 走過去 → 處理完」；巡檢中被火警搶占（狗有自己的巡檢）
@@ -351,7 +352,8 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
   `scoring.cpp`、`CbbaAgent::countFailure`、`CbbaComm::countFailure`、`cbba_node` 的 `preempt_exclude_sec`／`max_failures`、
   `formula_design.md` 第 5 行；test_scoring 4 項、test_agent 6 項、`g2_e2e.sh` E1 加 1 項）。和說明不同：期望重試時間不加在
   有 BT 剩餘時間的執行中任務；PREEMPTED 的排除時間照說明 5 s（狗、無人機都是；使用者一度改回 60 s，釐清「接管期間靠 MANUAL」後改回 5 s）。
-  還沒做：孤兒任務警告（`orphan_warn_sec`）、需求 2、兩隻狗 TRANSIENT 後由另一隻得標的整合測試。無人機 mode 的討論：狗是 BT 自己發 robot_state（2 Hz，
+  孤兒任務警告也做了（`cbba_node` 的 `checkOrphans`、參數 `orphan_warn_sec` 30 s、話題 `task_orphaned`；`g2_e2e.sh` 加 2 項 → 61 項）。
+  還沒做：平板指定 CBBA 任務時的鎖定、兩隻狗 TRANSIENT 後由另一隻得標的整合測試。無人機 mode 的討論：狗是 BT 自己發 robot_state（2 Hz，
   `manual_active`／`emergency`），接管時先回報 `PREEMPTED_BY_MANUAL` 再改 mode，解除接管直接放行（不 latch）；
   伯宇的 GUIDE 規定無人機的 robot_state 由 `px4_state_bridge` 發。使用者傾向 **B**（BT 決定 mode、透過話題給 bridge，
   bridge 照舊發 robot_state；備用 BT 照舊由 bridge 判斷、加 offboard 條件），正在和伯宇、宜臻討論；
@@ -362,6 +364,9 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
   發 `/<ns>/bt_mode`；bridge 參數 `bt_mode_topic`、`bt_mode_timeout`；`preempt_exclude_sec` 狗、無人機都 5 s（使用者討論後決定）；切回 offboard 時
   待命點改成目前位置、運動平滑層重來。只改無人機機內，狗、cbba_node、訊息、協定都不變。備用 BT 的 `FIRE_FOUND`（PREEMPTED）只在
   `fire_task.divert_on_sight = true`（預設關）時才會發生。
+- 2026-10-17（續 2）：SITL 驗證接管整串（被接管 → PREEMPTED_BY_MANUAL、5 s → 切回重新得標完成；懸停補爬到 5.0 m；接管 40 s 時孤兒任務
+  警告、切回解除）。修兩個顯示問題：node 層 `abortNow()` 清掉 kick 留下的中斷延遲起點（閒置開跑的任務被中止時印出 6350 ms 這種假延遲，
+  狗端骨架也有同樣問題）；骨架副本的 `printReport` 沒列出的結束原因改印「中止（原因）」，MISSION_TIMEOUT 才是「逾時中止」。
 
 ## C/C++ 格式
 

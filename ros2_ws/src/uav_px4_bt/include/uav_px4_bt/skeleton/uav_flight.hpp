@@ -2,7 +2,9 @@
 //
 //   起飛     PX4 起飛前檢查通過 → 先送 1 s 零速度 → 每秒要求 offboard＋解鎖 → 原地爬升到 altitude（誤差 takeoff_tolerance）
 //            → AIRBORNE。node 層到這時才 tick 樹（px4_state_bridge 爬到 altitude − 0.5 m 才送 AUTO，cbba_node 才出價）
-//   待命     佇列空、樹沒在跑：先原地懸停，return_home_delay 秒後飛回起飛點上空（返航點：第一次起飛的位置、altitude）
+//   待命     佇列空、樹沒在跑：先原地懸停，return_home_delay 秒後飛回起飛點上空（返航點：第一次起飛的位置、altitude）。
+//            待命點的高度一律是 altitude（2026-10-17：原本用當時的高度，起飛完成時離 altitude 還差 takeoff_tolerance 以內，
+//            SITL 實測一直停在 4.71 m；做完任務、被接管後也會停在當時的高度）
 //            待命（2026-10-13 使用者：任務做完要回到初始位置；負值 = 一直原地懸停）。影響範圍內有執行任務中的鄰機時讓路
 //            （停在被推開的位置，鄰機離開後再繼續飛回去）。GUIDE §3 的 DefaultBehavior 不放進樹，樹跑完就結束、回報照骨架的流程
 //   返航     在空中、電量 ≤ min_battery → 停止 offboard、PX4 RTL（指令可能掉：每 2 s 再送，最多 3 次），之後一直是 RTL
@@ -13,8 +15,8 @@
 //            地理圍欄、PX4 的低電量）→ FAILSAFE（PX4_FAILSAFE，STOPPED）。2026-10-17 SITL 實測：commander mode auto:loiter
 //            → user_intention 跟著變、failsafe 0；停掉 BT → nav_state AUTO_RTL、user_intention 仍是 OFFBOARD、failsafe 1。
 //            OVERRIDE 期間不 tick 樹、mode 送 MANUAL（node 層），持續送「目前位置」的 setpoint（PX4 要有 offboard 訊號
-//            才能切回）。切回 offboard → AIRBORNE（RESUMED，照狗：直接放行），待命點改成目前位置（不飛回接管前的點），
-//            高度和 altitude 差超過 takeoff_tolerance 時警告
+//            才能切回）。切回 offboard → AIRBORNE（RESUMED，照狗：直接放行），待命點改成目前的水平位置、巡檢高度
+//            （不飛回接管前的點），高度和 altitude 差超過 takeoff_tolerance 時警告
 //   高度警告（2026-10-17，只印 log）：爬升 kClimbWarnSec 秒還沒到 altitude ± takeoff_tolerance：一直不算起飛完成、不 tick 樹
 //
 // 不依賴 ROS：透過 UavContext（UavPlatform）讀狀態、下命令，test_skeleton 用假平台測。
@@ -98,7 +100,7 @@ public:
     const VehicleState v = ctx_.platform.vehicle();
     const double now = ctx_.platform.timeNow();
     if (!hold_valid_) {
-      hold_ = v.position;
+      hold_ = atAltitude(v.position);
       hold_valid_ = true;
       idle_since_ = now;
       homing_ = false;
@@ -116,7 +118,7 @@ public:
       yield = yield || (n.busy && norm(n.position - v.position) < ctx_.config.cbf.influence_radius);
     }
     if (yield) {
-      hold_ = v.position;
+      hold_ = atAltitude(v.position);
       if (!yielding_) {
         ctx_.platform.log("待命中：讓路給執行任務的鄰機");
       }
@@ -132,6 +134,8 @@ public:
   void leaveHold() {hold_valid_ = false;}
 
 private:
+  Vec3 atAltitude(const Vec3 & p) const {return {p.x, p.y, altitude_};}
+
   FlightEvent landed()
   {
     ctx_.platform.log("已經不在空中（上鎖或降落）：重新起飛");
@@ -166,13 +170,13 @@ private:
     }
     if (v.offboard) {
       phase_ = FlightPhase::AIRBORNE;
-      hold_valid_ = false;   // 待命點改成目前位置：接管期間被飛到別處，不要飛回接管前的點
+      hold_valid_ = false;   // 待命點改成目前的水平位置（巡檢高度）：接管期間被飛到別處，不要飛回接管前的點
       ctx_.resetMotion();
       char b[256];
       const double dz = v.position.z - altitude_;
       if (std::fabs(dz) >= ctx_.config.takeoff_tolerance) {
         std::snprintf(b, sizeof(b), "警告：切回 offboard，高度 %.2f m 和巡檢高度 %.1f m 差 %+.2f m："
-          "不重新起飛，從目前位置接回、mode AUTO", v.position.z, altitude_, dz);
+          "不重新起飛，從目前的水平位置接回、回到巡檢高度、mode AUTO", v.position.z, altitude_, dz);
       } else {
         std::snprintf(b, sizeof(b), "切回 offboard（高度 %.2f m）：從目前位置接回、mode AUTO", v.position.z);
       }

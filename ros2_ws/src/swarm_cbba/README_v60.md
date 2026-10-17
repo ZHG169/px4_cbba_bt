@@ -123,7 +123,7 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 - `deadline_sec` 是 `120.0`（你預期 `119.98`）：新協定不再把時間取整到 ms。
 - `指派給 BT` 後面多印座標。
 
-你的 T1～T10 和 DEMO3 我們寫成了一支腳本 `test/g2_e2e.sh`（不用 BT，約 3 分鐘，59 項；2026-10-17 E1 多檢查失敗次數），另外加了 E1～E4 驗下一節的差異：
+你的 T1～T10 和 DEMO3 我們寫成了一支腳本 `test/g2_e2e.sh`（不用 BT，約 3 分鐘，61 項；2026-10-17 加失敗次數、孤兒任務警告的檢查），另外加了 E1～E4 驗下一節的差異：
 `bash src/swarm_cbba/test/g2_e2e.sh`（ROS_DOMAIN_ID 93、UDP port 14693，不會干擾正在跑的節點）。
 
 **跑你的 `e2e_cbba_node.sh`（G3）時**：狗的 node 要加 `-p failure_exclude_sec:=1e9 -p preempt_exclude_sec:=1e9`（或寫進 yaml；
@@ -165,6 +165,7 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 | `failure_exclude_sec` | 60 s | 失敗（TRANSIENT、STOPPED）後多久不接同一個任務 |
 | `preempt_exclude_sec` | 5 s（yaml） | PREEMPTED 後多久不接 |
 | `max_failures` | 0 | 同一個任務 TRANSIENT 失敗幾次後永久不接；0 = 不啟用（只打折） |
+| `orphan_warn_sec` | 30 s | 任務開著但這麼久沒有人得標（例如只有你能做、你回報了 PERMANENT）就印警告、發 `/v60/task_orphaned`；你的 BT 不用訂 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | 1.0、0.1、0.05、20 | **佔位值，請用實測換掉**（`cbba_core/doc/ugv_tuning.md`） |
 | `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式，**全隊要一樣**，不要只改狗的 |
 | `mesh_ip` | 環境變數 `MESH_IP` | |

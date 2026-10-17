@@ -6,14 +6,16 @@
 #    cbba_uav.sh
 #    cbba_uav.sh -p lost_timeout:=2.0
 #    EXEC_ARGS="-p cbf.safe_radius:=1.5" cbba_uav.sh   執行者的參數（臨時改；常改的改 uav_px4_bt/config/uav_bt.yaml）
-#    EXECUTOR=task_manager cbba_uav.sh            用照機器狗端骨架的正式 BT（uav_task_manager_node）
+#    EXECUTOR=bt cbba_uav.sh                      用備用 BT（uav_bt_node）
 #    EXECUTOR=task_executor cbba_uav.sh           用舊的代理執行者（沒有避碰、沒有火警偵測）
 #
 #  執行者（EXECUTOR）：
-#    bt（預設）      uav_px4_bt/uav_bt_node（備用 BT：CBF 避碰、AprilTag 火警判定、電量返航）
+#    task_manager（預設，2026-10-17 起）
+#                   uav_px4_bt/uav_task_manager_node（正式 BT：伯宇的 task_manager 骨架＋NavigateTo／AirRecon；
+#                   樹 trees/uav_mission.xml；mode 由它決定，bridge 照抄）
 #                   ＋ apriltag_fire_detector/fire_detector_node（要先在 sim 執行 gz_bridge.sh 送相機影像）
-#    task_manager   uav_px4_bt/uav_task_manager_node（伯宇的 task_manager 骨架＋NavigateTo／AirRecon，2026-10-13；
-#                   樹 trees/uav_mission.xml）＋ fire_detector_node；參數和 bt 相同（多 min_battery、emergency_topic）
+#    bt             uav_px4_bt/uav_bt_node（備用 BT：CBF 避碰、AprilTag 火警判定、電量返航；mode 由 bridge 自己判斷）
+#                   ＋ fire_detector_node；參數和 task_manager 相同
 #    task_executor  px4_waypoint_node/task_executor
 #
 #  能量模型對齊 PX4 的模擬電池（px4_sitl.sh 設 SIM_BAT_DRAIN）：模擬電池依時間耗電，所以
@@ -36,7 +38,7 @@ set -uo pipefail
 LOG_DIR="/tmp/cbba_uav${UAV_ID}"
 mkdir -p "${LOG_DIR}"
 
-EXECUTOR="${EXECUTOR:-bt}"
+EXECUTOR="${EXECUTOR:-task_manager}"   # 2026-10-17 起預設正式 BT（原本 bt）
 case "${EXECUTOR}" in
     bt|task_manager) NEED_PKGS="swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector" ;;
     task_executor) NEED_PKGS="swarm_cbba px4_waypoint_node" ;;

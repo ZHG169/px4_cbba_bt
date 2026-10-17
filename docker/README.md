@@ -123,7 +123,7 @@ gcs 執行 `ros2 topic hz /uav1/fmu/out/vehicle_odometry` 頻率下降，但 Gaz
 | `xrce_agent.sh` | uavN | 啟動 Agent |
 | `colcon build --symlink-install` | uav1（在 ros2_ws 裡） | 編譯 ros2_ws，所有容器共用 |
 | `mesh_tc.sh set/show/clear` | uavN / gcs | 控制 mesh 丟包 |
-| `cbba_uav.sh` | uavN | 一次啟動 XRCE Agent、BT（預設 `uav_px4_bt`）、AprilTag 偵測、px4_state_bridge、cbba_node（步驟見 `cbba_core/doc/sitl_test.md`） |
+| `cbba_uav.sh` | uavN | 一次啟動 XRCE Agent、BT（預設正式 BT `uav_task_manager_node`，`EXECUTOR=bt` 換備用 BT）、AprilTag 偵測、px4_state_bridge、cbba_node（步驟見 `cbba_core/doc/sitl_test.md`） |
 
 每台機號只能跑一個 cbba_node（程序鎖 `agentN.lock`）：所有容器把主機的 `/tmp/cbba_locks` 掛在 `/run/cbba`（`CBBA_LOCK_DIR`），
 entrypoint 會把它改成使用者可寫。改了 `gen_compose.py` 之後要重新 `./start.sh` 才生效。

@@ -14,7 +14,7 @@ uavN 容器：XRCE Agent ─ uav_bt_node（BT）──────────�
 ```
 
 `cbba_uav.sh` 一次開 XRCE Agent、BT、AprilTag 偵測、px4_state_bridge、cbba_node，輸出前綴
-`[bt]`、`[tag]`、`[state]`、`[cbba]`。`EXECUTOR=task_executor cbba_uav.sh` 換成舊的簡易執行者（沒有避碰、沒有火警偵測）。
+`[bt]`、`[tag]`、`[state]`、`[cbba]`。預設是正式 BT（`uav_task_manager_node`，2026-10-17 起）；`EXECUTOR=bt cbba_uav.sh` 換成備用 BT，`EXECUTOR=task_executor cbba_uav.sh` 換成舊的簡易執行者（沒有避碰、沒有火警偵測）。
 
 ## 0. 準備（只做一次）
 

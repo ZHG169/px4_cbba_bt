@@ -132,7 +132,7 @@ python3 docker/itest/insert.py
 
 | Terminal | 容器 | 指令 |
 |---|---|---|
-| 1、2、3 | uav1、uav2、uav3 | `EXECUTOR=task_manager cbba_uav.sh`（XRCE Agent＋BT＋AprilTag 偵測＋px4_state_bridge＋cbba_node；不給 `EXECUTOR` 時是備用 BT） |
+| 1、2、3 | uav1、uav2、uav3 | `cbba_uav.sh`（XRCE Agent＋正式 BT＋AprilTag 偵測＋px4_state_bridge＋cbba_node；`EXECUTOR=bt` 換成備用 BT） |
 | 4 | sim | `CBBA_WORLD=demo_site px4_sitl.sh 1`，再 `px4_sitl.sh 2`、`px4_sitl.sh 3`（第 1 台開 Gazebo） |
 | 5 | sim | `gz_bridge.sh`（相機、`/clock`；要偵測火警時開） |
 | 6 | uav1 | `cbba_task.sh new 1 1 10 0` 建立任務 |
