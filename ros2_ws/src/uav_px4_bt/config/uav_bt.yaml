@@ -15,7 +15,7 @@
     # ---------- 高度、到達 ----------
     altitude: 5.0                   # 巡檢高度（m，map z）；cbba_uav.sh 用 CBBA_ALTITUDE 蓋掉
     takeoff_tolerance: 0.3          # 起飛：離 altitude 這麼近才算起飛完成（m）
-    reach_tolerance: 0.5            # 到達任務點的水平＋垂直距離（m）
+    reach_tolerance: 0.25           # 到達任務點的水平＋垂直距離（m）（2026-10-19 0.5 → 0.25：0.5 m 就算到達時，懸停的前 1.2～1.5 s 還在慢慢靠近）
     fly_timeout_margin: 30.0        # 飛行逾時 = 距離 / 速度 × 2 + 這個（s）；逾時回報 NAV_FAILED(TIMEOUT)
     fly_timeout_abort: false        # false：逾時只印「飛太久」警告（之後每 10 s 一次）、繼續飛，調 CBF 時用；
                                     # true：逾時回報失敗、交回 CBBA（正式／itest 要測逾時交還時改回 true）
@@ -26,7 +26,7 @@
 
     # ---------- CBF：名目速度（往目標飛）----------
     cbf.k_att: 1.0                  # 1/s：離目標 d 公尺時想要的速度 k_att × d（近目標時）
-    cbf.brake_accel: 0.2            # m/s²：水平剎車曲線，速度 ≤ √(2 × a × 距離)
+    cbf.brake_accel: 0.2            # m/s²：水平剎車曲線，速度 ≤ √(2 × a × 距離)（2026-10-19 試過 0.15，沒有改善：本來就沒有衝過頭）
     cbf.brake_vertical_accel: 0.1   # m/s²：垂直剎車曲線（起飛、換高度衝過頭就調小）
 
     # ---------- CBF：避碰（h = |p − p_j|² − safe_radius²，ḣ ≥ −γ h；公式見 doc/parameters.md 第五節）----------
@@ -43,7 +43,7 @@
     motion.max_accel: 1.5           # 水平加速度上限（m/s²）
     motion.max_vertical_accel: 1.0  # 垂直加速度上限（m/s²）
     motion.leash: 1.5               # 參考位置最多領先實際位置幾公尺
-    motion.hold_radius: 0.2         # 離目標這麼近、沒有鄰機要閃時，直接交給 PX4 位置保持（m）
+    motion.hold_radius: 0.2         # 離目標這麼近、沒有鄰機要閃時，直接交給 PX4 位置保持（m）；要 < reach_tolerance
     motion.reset_gap: 0.5           # 超過這麼久沒下命令，從目前位置重新開始（s）
 
     # ---------- 火警（地面處置任務）----------

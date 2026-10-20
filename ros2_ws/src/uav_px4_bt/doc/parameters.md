@@ -36,6 +36,7 @@ NavigateTo / AirRecon / 待命 / 回起飛點
 | `tick_period_ms` | 50 | BT tick 週期 | 換任務的中斷是 callback 直接 tick，不受它影響；調小只讓動作更新得更密 |
 | `min_battery` | 20 % | 電量 ≤ 這個值就返航（PX4 RTL），手上的任務回報 `BATTERY_RTL`；觸發後不恢復 | 要和 cbba_node 的 `safety_reserve`（20 %）一致 |
 | `return_home_delay` | 2 s | 做完任務、待命這麼久後飛回起飛點上空 | 負值 = 原地懸停；新任務來時中途就走 |
+| `fire_task.idle_watch_tag` | 101 | 待命（含做完任務飛回起飛點）時也看這個火警 tag：看到新火點 → 發布地面任務 → 到火點上空監控到地面任務結束或 `monitor_timeout` → 回到待命（2026-10-19）；監控中 CBBA 派了任務就去做任務。0 = 待命時不看（只有執行任務時看） | 正式 BT（`uav_task_manager_node`）才有 |
 | `fire_task.monitor_timeout` | 120 s | 看到火警後懸停監控，等地面任務結束（`task_closed`）最多多久 | 0 = 不等（停留時間到就走）；沒有狗時會等滿這麼久，排在後面的任務在 `overrun_margin` 後交給別台 |
 | `mission_timeout` | 0（= 1800 s） | 一趟（佇列跑完）最長多久，超過就中止 | 通常不用改 |
 | `emergency_topic` | `/<ns>/emergency_stop` | 急停話題（std_msgs/Bool）；急停 = 樹 halt、原地懸停 | |
@@ -49,7 +50,7 @@ NavigateTo / AirRecon / 待命 / 回起飛點
 | `cruise_speed` | 5 m/s | 最大水平速度（CBF 的上限） | 用 `CBBA_SPEED`（cbba_node 的出價速度一起改）；itest demo 用 3 |
 | `max_vertical_speed` | 2 m/s | 最大垂直速度 | 起飛太慢調大，但垂直衝過頭要配合 `cbf.brake_vertical_accel` |
 | `takeoff_tolerance` | 0.3 m | 爬到 altitude ± 這個值才算起飛完成 | 太小：PX4 高度晃就一直不算完成 |
-| `reach_tolerance` | 0.5 m | 離任務點這麼近算到達（開始懸停、認 tag） | 要 > `motion.hold_radius`；調小到得比較準，但最後一段比較慢 |
+| `reach_tolerance` | 0.25 m（2026-10-19 從 0.5 調小：0.5 m 就算到達時，懸停的前 1.2～1.5 s 還在靠近；`docker/itest/hover_error.py` 量） | 離任務點這麼近算到達（開始懸停、認 tag） | 要 > `motion.hold_radius`；調小到得比較準，但最後一段比較慢 |
 | `fly_timeout_margin` | 30 s | 飛行逾時 = 距離 / cruise_speed × 2 + 這個 | 避碰繞路多、速度設很低時調大；逾時回報 `NAV_FAILED(TIMEOUT)`（TRANSIENT，交回 CBBA） |
 | `fly_timeout_abort` | yaml false（程式預設 true） | 逾時要不要中止 | false：只印「飛太久」警告（之後每 10 s 一次）、繼續飛，調 CBF 時用；true：回報失敗、交回 CBBA |
 
@@ -64,7 +65,7 @@ u_nom 大小 = min(cruise_speed, k_att × 距離, √(2 × brake_accel × 距離
 | 參數 | 預設 | 作用 | 調大 | 調小 |
 |---|---|---|---|---|
 | `cbf.k_att` | 1.0 1/s | 最後幾公尺的收斂 | 收得快，可能衝過頭 | 最後一段慢 |
-| `cbf.brake_accel` | 0.2 m/s² | 水平剎車曲線 | 晚剎車，容易衝過頭 | 早剎車、比較穩，飛得比較久 |
+| `cbf.brake_accel` | 0.2 m/s²（2026-10-19 試過 0.15，沒有改善：實測本來就沒有衝過頭） | 水平剎車曲線 | 晚剎車，容易衝過頭 | 早剎車、比較穩，飛得比較久 |
 | `cbf.brake_vertical_accel` | 0.1 m/s² | 垂直剎車曲線 | 爬升快，容易衝過頭 | 爬升、換高度比較慢；巡檢高度 25 m 以上時爬升可能超過 20 s，會出現「爬升 20 s 還沒到」的警告 |
 
 `brake_accel` 要 ≤ `motion.max_accel`，`brake_vertical_accel` 要 ≤ `motion.max_vertical_accel`。
@@ -192,6 +193,8 @@ setpoint 穩、實際位置跟不上 → 調 PX4 的 `MPC_*`。
 - CBF 的公式（只看水平、往右繞、λ／ρ 的分攤）、運動平滑層的「參考位置不越過目標」：`src/cbf.cpp`、`src/motion.cpp`。
 - 航向固定在第一次收到位置時的方向（下視相機的影像方向不會一直轉）：`src/px4_platform.cpp`。
 - 外部任務的幾何（目標正上方、`air_recon` → `report_result`）：`skeleton/external_task.hpp`。
+- 待命時停下讓路的範圍：執行中的鄰機在 `kYieldStopFactor`（2）× `cbf.yield_radius` 內（yaml 2 m → 4 m）才停在被推開的位置；
+  更遠的照常飛（例如飛回起飛點），由 CBF 繞開（2026-10-19，原本用 `cbf.influence_radius`，demo 設 12 m 時離 10 m 就停）：`skeleton/uav_flight.hpp`。
 - 高度與接管警告（爬升 `kClimbWarnSec` 20 s、高度差門檻沿用 `takeoff_tolerance`）、被接管的判斷（PX4 `failsafe`、
   `failsafe_and_user_took_over`）：`skeleton/uav_flight.hpp`。
 - mode（2026-10-17）：正式 BT 的參數 `bt_mode_topic`（預設 `/<ns>/bt_mode`）、`mode_period`（0.5 s）；bridge 的參數

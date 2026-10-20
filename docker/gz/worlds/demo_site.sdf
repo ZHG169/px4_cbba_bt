@@ -61,14 +61,14 @@
 
     <model name="overview_camera">
       <static>true</static>
-      <pose>1 -1.5 30 0 1.5708 1.5708</pose>
+      <pose>1 -1.5 150 0 1.5708 1.5708</pose>
       <link name="link">
         <sensor name="overview" type="camera">
           <always_on>true</always_on>
           <update_rate>15</update_rate>
           <topic>/demo_site/overview/image</topic>
           <camera>
-            <horizontal_fov>1.4</horizontal_fov>
+            <horizontal_fov>0.389</horizontal_fov>
             <image><width>1280</width><height>720</height><format>R8G8B8</format></image>
             <clip><near>0.1</near><far>500</far></clip>
           </camera>
@@ -79,6 +79,622 @@
             <bitrate>4000000</bitrate>
           </plugin>
         </sensor>
+      </link>
+    </model>
+    <model name="ground_grid">
+      <static>true</static>
+      <pose>0 0 0.005 0 0 0</pose>
+      <link name="link">
+        <visual name="grid_x0">
+          <pose>-60 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y0">
+          <pose>0 -60 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x1">
+          <pose>-58 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y1">
+          <pose>0 -58 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x2">
+          <pose>-56 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y2">
+          <pose>0 -56 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x3">
+          <pose>-54 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y3">
+          <pose>0 -54 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x4">
+          <pose>-52 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y4">
+          <pose>0 -52 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x5">
+          <pose>-50 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y5">
+          <pose>0 -50 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x6">
+          <pose>-48 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y6">
+          <pose>0 -48 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x7">
+          <pose>-46 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y7">
+          <pose>0 -46 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x8">
+          <pose>-44 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y8">
+          <pose>0 -44 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x9">
+          <pose>-42 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y9">
+          <pose>0 -42 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x10">
+          <pose>-40 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y10">
+          <pose>0 -40 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x11">
+          <pose>-38 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y11">
+          <pose>0 -38 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x12">
+          <pose>-36 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y12">
+          <pose>0 -36 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x13">
+          <pose>-34 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y13">
+          <pose>0 -34 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x14">
+          <pose>-32 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y14">
+          <pose>0 -32 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x15">
+          <pose>-30 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y15">
+          <pose>0 -30 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x16">
+          <pose>-28 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y16">
+          <pose>0 -28 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x17">
+          <pose>-26 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y17">
+          <pose>0 -26 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x18">
+          <pose>-24 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y18">
+          <pose>0 -24 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x19">
+          <pose>-22 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y19">
+          <pose>0 -22 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x20">
+          <pose>-20 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y20">
+          <pose>0 -20 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x21">
+          <pose>-18 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y21">
+          <pose>0 -18 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x22">
+          <pose>-16 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y22">
+          <pose>0 -16 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x23">
+          <pose>-14 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y23">
+          <pose>0 -14 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x24">
+          <pose>-12 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y24">
+          <pose>0 -12 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x25">
+          <pose>-10 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y25">
+          <pose>0 -10 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x26">
+          <pose>-8 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y26">
+          <pose>0 -8 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x27">
+          <pose>-6 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y27">
+          <pose>0 -6 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x28">
+          <pose>-4 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y28">
+          <pose>0 -4 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x29">
+          <pose>-2 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y29">
+          <pose>0 -2 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x30">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y30">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x31">
+          <pose>2 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y31">
+          <pose>0 2 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x32">
+          <pose>4 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y32">
+          <pose>0 4 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x33">
+          <pose>6 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y33">
+          <pose>0 6 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x34">
+          <pose>8 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y34">
+          <pose>0 8 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x35">
+          <pose>10 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y35">
+          <pose>0 10 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x36">
+          <pose>12 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y36">
+          <pose>0 12 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x37">
+          <pose>14 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y37">
+          <pose>0 14 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x38">
+          <pose>16 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y38">
+          <pose>0 16 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x39">
+          <pose>18 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y39">
+          <pose>0 18 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x40">
+          <pose>20 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y40">
+          <pose>0 20 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x41">
+          <pose>22 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y41">
+          <pose>0 22 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x42">
+          <pose>24 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y42">
+          <pose>0 24 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x43">
+          <pose>26 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y43">
+          <pose>0 26 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x44">
+          <pose>28 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y44">
+          <pose>0 28 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x45">
+          <pose>30 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y45">
+          <pose>0 30 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x46">
+          <pose>32 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y46">
+          <pose>0 32 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x47">
+          <pose>34 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y47">
+          <pose>0 34 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x48">
+          <pose>36 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y48">
+          <pose>0 36 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x49">
+          <pose>38 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y49">
+          <pose>0 38 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x50">
+          <pose>40 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y50">
+          <pose>0 40 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x51">
+          <pose>42 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y51">
+          <pose>0 42 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x52">
+          <pose>44 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y52">
+          <pose>0 44 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x53">
+          <pose>46 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y53">
+          <pose>0 46 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x54">
+          <pose>48 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y54">
+          <pose>0 48 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x55">
+          <pose>50 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y55">
+          <pose>0 50 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x56">
+          <pose>52 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y56">
+          <pose>0 52 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x57">
+          <pose>54 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y57">
+          <pose>0 54 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x58">
+          <pose>56 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y58">
+          <pose>0 56 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x59">
+          <pose>58 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y59">
+          <pose>0 58 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_x60">
+          <pose>60 0 0 0 0 0</pose>
+          <geometry><box><size>0.06 120 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+        <visual name="grid_y60">
+          <pose>0 60 0 0 0 0</pose>
+          <geometry><box><size>120 0.06 0.002</size></box></geometry>
+          <material><ambient>0.35 0.35 0.35 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
       </link>
     </model>
     <model name="pad_G1">

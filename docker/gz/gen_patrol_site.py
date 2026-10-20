@@ -59,8 +59,44 @@ def tag(name, tag_id, x, y, z):
 # 位置和視窗的俯瞰鏡頭相同（px4_sitl.sh 的 CAMERA_POSE：西南方往東北看）
 # demo_site 2026-10-14 改成正上方往下看（俯視，影像上方 = 北 +y、右邊 = 東 +x）：pitch π/2 往下、yaw π/2 讓影像上方朝北；
 # 30 m 高、水平視角 1.4 rad（80°）約看 50 m × 28 m（x −24～26、y −15.7～12.7），點都在 ±22 m 內；x500 約 18 px
-OVERVIEW_POSE = {"demo_site": "1 -1.5 30 0 1.5708 1.5708", "patrol_site": "-60 -55 55 0 0.57 0.76"}
-OVERVIEW_FOV = {"demo_site": 1.4}
+# 2026-10-19 使用者：拉高到 35 m，約看 59 m × 33 m（x −28.5～30.5、y −18～15），x500 約 15 px
+# 2026-10-19 同日：透視的視差讓 5 m 高的無人機看起來沒停在點上（偏移 ≈ 離畫面中心的水平距離 × 5 ／（鏡頭高度 − 5）：
+#   35 m 時 R4 處 1.1 m、場地邊緣 3.3 m）。改成 150 m 高＋窄視角（像望遠鏡頭），拍到的範圍一樣 59 m × 33 m，
+#   視差降到 R4 處 0.22 m、邊緣 0.7 m。視角 = 2 × atan(29.5 / 150) = 0.389 rad
+OVERVIEW_POSE = {"demo_site": "1 -1.5 150 0 1.5708 1.5708", "patrol_site": "-60 -55 55 0 0.57 0.76"}
+OVERVIEW_FOV = {"demo_site": 0.389}
+
+# 地面網格（2026-10-19）：視窗的網格是 GUI 外掛（docker/gz/gui/cbba_gui.config 的 GridConfig），只畫在視窗裡，
+# 伺服器的錄影鏡頭看不到。要錄到網格，改成場景裡貼地的細長方塊（只有 visual、沒有 collision，不影響物理）。
+# 間距、範圍和視窗的網格一樣：2 m 一格、往四個方向各 30 格。線寬 6 cm：35 m 高俯視時約 1 px 寬
+# （太細會時有時無），無人機 5 m 高的下視相機看到的是細灰線，不會被當成 AprilTag。
+# 場景名稱 → (格子邊長 m, 每個方向幾格, 線寬 m)；沒列的場景不加
+GRID = {"demo_site": (2.0, 30, 0.06)}
+GRID_COLOR = "0.35 0.35 0.35 1"
+
+
+def grid_lines(world):
+    if world not in GRID:
+        return ""
+    cell, count, width = GRID[world]
+    length = 2 * cell * count
+    visuals = []
+    for i in range(-count, count + 1):
+        c = i * cell
+        for axis, x, y, sx, sy in (("x", c, 0.0, width, length), ("y", 0.0, c, length, width)):
+            visuals.append(f"""        <visual name="grid_{axis}{i + count}">
+          <pose>{x:g} {y:g} 0 0 0 0</pose>
+          <geometry><box><size>{sx:g} {sy:g} 0.002</size></box></geometry>
+          <material><ambient>{GRID_COLOR}</ambient><diffuse>{GRID_COLOR}</diffuse></material>
+        </visual>
+""")
+    return f"""    <model name="ground_grid">
+      <static>true</static>
+      <pose>0 0 0.005 0 0 0</pose>
+      <link name="link">
+{"".join(visuals)}      </link>
+    </model>
+"""
 
 
 def overview_camera(world):
@@ -160,7 +196,7 @@ def main():
       <elevation>0</elevation>
     </spherical_coordinates>
 
-{overview_camera(world)}{"".join(body)}  </world>
+{overview_camera(world)}{grid_lines(world)}{"".join(body)}  </world>
 </sdf>
 """, encoding="utf-8")
     print(f"[gen_patrol_site] {len(points)} 個點 -> {out}")

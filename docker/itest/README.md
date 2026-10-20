@@ -80,9 +80,11 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
   飛到 R 點的那台懸停時看到 tag 101 → 發布地面處置任務 → **假狗**得標、走過去、處理 20 s、回報 → 那台**懸停監控到地面任務結束**
   （cbba_node 的 `task_closed`）才完成 R 點 → 全部做完後**各自飛回起飛點上空**（BT 的 `return_home_delay` 2 s）。
 - `fire_mode` route（2026-10-12 的版本，改 `config.json`）：各台出發後在某台前方航線上起火，看飛行途中發現、發布地面任務、繼續飛。
-- **假狗**（`config.json` 的 `dog`）：cbba_node（機號 50、UGV、`/v60`，`cbba_v60.yaml`）借 uav1 容器跑（要在 mesh 上）；
-  執行者 `docker/scripts/fake_dog.py` 在 sim（收 `/v60/current_task`、直線走過去、停留、回報 `task_result`；
-  Gazebo 放一個橘色方塊當替身）。速度 1.5 m/s（兩邊一致）。紀錄在 `fake_dog.log`、`dog_cbba.log`。
+- **假狗**（`config.json` 的 `dog`；2026-10-20 起 **3 隻**，`dog.units`）：v60（機號 50）在 (−4, 0)、v60b（51）在 (10, 6)、
+  v60c（52）在 (−18, −8)，分散在場地三側，看狗之間對火警的競標。每隻的 cbba_node（UGV、`/<ns>`，`cbba_v60.yaml`）借 uav1 容器跑
+  （要在 mesh 上）；執行者 `docker/scripts/fake_dog.py` 在 sim（收 `/<ns>/current_task`、直線走過去、停留、回報 `task_result`；
+  Gazebo 放一個橘色方塊 `<ns>_standin` 當替身）。速度 1.5 m/s（兩邊一致）。紀錄在 `fake_dog_<ns>.log`、`dog_cbba_<ns>.log`。
+  報告 D3 會寫每個火點由哪隻狗處理；`units` 只留一隻就是原本的單隻狗。
 - **Gazebo 錄影**（2026-10-13 改）：場景裡放一台固定的俯瞰攝影機（`overview_camera`，`CameraVideoRecorder` 系統，
   `gen_patrol_site.py` 產生），由 Gazebo **伺服器**錄，不用開視窗、不用按按鈕；場景開好就開始，完成後停 `--hold` 秒再停止，
   存成 `gazebo.mp4`（1280×720、15 fps）。原本視窗的 VideoRecorder 按鈕要呼叫 `/gui/record_video`，
@@ -96,20 +98,20 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
 | U1 | 每台起飛到巡檢高度 |
 | D1 | 巡檢任務（G1～G3＋起火的 R 點）都完成（`timeout` 240 s 內） |
 | D2 | 看到火警、發布一個地面處置任務（位置誤差 ≤ 2 m）；地面任務總數 = 火點數 |
-| D3 | 假狗處理完（地面任務的 `task_closed` status DONE），而且沒有無人機被指派地面任務 |
-| D4 | 發現的那台在地面任務結束之後才回報 R 點完成，監控期間離火點 < 2 m |
+| D3 | 假狗處理完（地面任務的 `task_closed` status DONE），而且沒有無人機被指派地面任務；列出由哪隻狗處理 |
+| D4 | 發現的那台在地面任務結束之後才回報 R 點完成，監控期間離火點 < 2 m。先發現的是別台時（例如待命、回程途中看到，2026-10-19）：發現的那台監控到地面任務結束（離火點 < 2 m），R 點有完成即可（被派去的那台照規則不重複監控） |
 | D5 | 全部做完後每台離起飛點 < 1 m、高度在巡檢高度 ±0.8 m |
-| D6 | `demo.mp4`（俯視動畫）、`gazebo.mp4`（Gazebo 俯瞰攝影機）、`demo_final.png`（最後一格） |
+| D6 | `demo.mp4`（俯視動畫）、`gazebo.mp4`（Gazebo 俯瞰攝影機）、`demo_final.png`（最後一格）、`demo_cameras.mp4`（左：gazebo.mp4 縮成 1024 × 576；右：三台的下視相機各 256 × 192，掃 AprilTag 的那台；總寬 1280，2026-10-20） |
 | D7 | CBF：任務開始到回起飛點，空中兩台的最近水平距離 ≥ 0.9 × `cbf.safe_radius`（從 `exec_args` 或 `uav_bt.yaml` 讀）；列出 BT 記到的每次接近（「避碰：這次最接近鄰機」） |
 
 俯視動畫：一開始就畫出固定任務點（綠色）；起火時火點才出現（紅色方塊＋光圈）；各台的航跡、
 目前要去的任務（虛線）；任務圓圈未分配是白的、有人拿著時填那台的顏色、完成後變灰；地面處置任務是紅色方塊。
-右邊是事件時間軸。事件前後 2 s 用 1 倍速、其他 3 倍速，起火和丟出地面任務時停 1.5 s。自己重畫：
+右邊是事件時間軸和電量長條（0～100 %，長條長度就是電量，旁邊是數值）。全程 1 倍速（2026-10-19 起，原本沒有事件時 3 倍速），起火、丟出地面任務、地面任務結束時停 1.5 s。自己重畫：
 
 ```bash
 ./docker/enter.sh sim
 python3 /home/ncrl/CBBA_BT/docker/itest/animate_demo.py /home/ncrl/CBBA_BT/docker/itest/out/<時間>_demo --frames /home/ncrl/CBBA_BT/docker/itest/out/<時間>_demo/frames
-#   不給 --frames 時存 demo.gif；--speedup 3 --slow 1 --window 2 --freeze 1.5 --fps 15
+#   不給 --frames 時存 demo.gif；--freeze 1.5 --fps 15；預設全程 1 倍速，要快轉給 --speedup 3（事件前後 --window 2 秒維持 --slow 1 倍速）
 ```
 
 **loss：第 5 週弱網量測**（不開 PX4、BT；2026-10-12）

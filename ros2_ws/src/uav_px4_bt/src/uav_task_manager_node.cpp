@@ -96,6 +96,9 @@ public:
 
     ctx_ = std::make_unique<UavContext>(*platform_, cfg);
     flight_ = std::make_unique<UavFlight>(*ctx_, platform_->altitude(), min_battery, return_home_delay);
+    // 待命（含飛回起飛點）時也看火：發布地面任務、到火點上空監控（2026-10-19）；fire_task.idle_watch_tag 0 = 不看
+    flight_->setIdleFireWatch(static_cast<unsigned>(declare_parameter<int>("fire_task.idle_watch_tag", 101)),
+      fire_monitor_timeout_);
     if (mission_timeout > 0.0) {
       mission_timeout_ = mission_timeout;
     }

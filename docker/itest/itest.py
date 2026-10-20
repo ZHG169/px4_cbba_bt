@@ -1220,6 +1220,7 @@ class DemoSuite(UavSuite):
             for _ in range(10):
                 rec["on"] = self.gz_record(True, gz_video)
                 if rec["on"]:
+                    rec["t0"] = time.time()   # 下視相機的畫面照這個時間和 gazebo.mp4 對齊（demo_cameras.mp4）
                     print("  Gazebo 開始錄影（俯瞰攝影機）")
                     return
                 time.sleep(2.0)
@@ -1239,14 +1240,25 @@ class DemoSuite(UavSuite):
         if not self.launch(headless=False, world=d["world"], stack_env=stack_env,
                            on_world=start_recording, together=True, takeoff_gate=takeoff):
             return
+        # 各台的下視相機（掃 AprilTag 的那台）也錄下來，最後和 gazebo.mp4 並排成 demo_cameras.mp4（2026-10-19）
+        if self.record:
+            env.exec(env.sim(), f"exec python3 {env.repo}/docker/itest/record_cameras.py {run.cout} "
+                     f"--ids {' '.join(str(v) for v in ids)}", detach=True, log=f"{run.cout}/record_cameras.log")
         # 假狗：Gazebo 替身＋執行者在 sim、cbba_node 在 dog.container（要在 mesh 上），和無人機的 cbba_node 同時開始
         if dog and (mode in ("point", "side") or (mode == "custom" and (sc.get("fires") or self.interactive))):
-            dx, dy = dog["start_xy"]
-            env.exec(env.sim(), dog["sim_start"].format(repo=env.repo, world=d["world"], x=dx, y=dy,
-                                                        speed=dog["speed"]), detach=True, log=f"{run.cout}/fake_dog.log")
-            env.exec(dog["container"], dog["start"].format(speed=dog["speed"]), detach=True,
-                     log=f"{run.cout}/dog_cbba.log")
-            plan["dog"] = dict(x=dx, y=dy, speed=dog["speed"])
+            # 2026-10-20 起可以多隻（dog.units，分散在場地各處，看狗之間對火警的競標）；紀錄檔 fake_dog_<ns>.log、dog_cbba_<ns>.log
+            units = dog.get("units") or [dict(ns="v60", id=50, start_xy=dog["start_xy"])]
+            plan["dog"] = []
+            for u in units:
+                dx, dy = u["start_xy"]
+                env.exec(env.sim(), dog["sim_start"].format(repo=env.repo, world=d["world"], x=dx, y=dy, ns=u["ns"],
+                                                            id=u["id"], speed=dog["speed"]),
+                         detach=True, log=f"{run.cout}/fake_dog_{u['ns']}.log")
+                env.exec(dog["container"], dog["start"].format(ns=u["ns"], id=u["id"], speed=dog["speed"]), detach=True,
+                         log=f"{run.cout}/dog_cbba_{u['ns']}.log")
+                plan["dog"].append(dict(ns=u["ns"], id=u["id"], x=dx, y=dy, speed=dog["speed"]))
+            print(f"  假狗 {len(units)} 隻：" + "、".join(f"{u['ns']}（{u['id']}）在 ({u['start_xy'][0]:g}, {u['start_xy'][1]:g})"
+                                                     for u in units))
         print("  全部起飛到巡檢高度；懸停 3 s 後同時啟動三台的 cbba_node" + ("和假狗" if plan["dog"] else ""))
         run.sleep(3.0)
         for vid in ids:
@@ -1386,6 +1398,12 @@ class DemoSuite(UavSuite):
             return p is not None and math.hypot(p[0] - homes[v][0], p[1] - homes[v][1]) < 1.0 and abs(p[2] - alt) < 0.8
         if finished:
             run.until(lambda: all(at_home(v) for v in ids), d.get("return_wait", 40.0))
+            # 剛進到 1 m 內就記錄的話，報告的距離會是還在靠近的 ~0.99 m（2026-10-19）；再等最多 5 s 讓它停好，
+            # 報告的才是最後停的位置。通過的條件照舊是 1 m
+            def settled(v):
+                p = run.positions.get(v)
+                return p is not None and math.hypot(p[0] - homes[v][0], p[1] - homes[v][1]) < 0.3
+            run.until(lambda: all(settled(v) for v in ids), 5.0)
 
         who = {p["task_id"]: run.ever_held(p["task_id"], t0) for p in plan["patrol"]}
         missing = [it["name"] for it in items if it["kind"] == "task" and not it.get("done")] if mode == "custom" else []
@@ -1430,10 +1448,14 @@ class DemoSuite(UavSuite):
                 gx = fx.get("ground_task")
                 tx = closed_at(gx) if gx else None
                 took = gx is not None and any(e["kind"] == "assigned" and e["msg"].get(f_id) == gx for e in run.events)
+                # 哪隻狗得標（2026-10-20，多隻狗）：最後一次拿到這個地面任務的
+                dogs = [e["dog"] for e in run.events if e["kind"] == "dog_assigned" and gx is not None
+                        and e["msg"].get(f_id) == gx]
                 ok3 = ok3 and bool(tx) and not took
                 rows3.append(f"{fx['name']}：" +
-                             (f"地面任務 {gx:08X} 在發布後 {tx - fx['reported_t']:.1f} s 結束" if tx else
-                              ("地面任務沒有結束（看 fake_dog.log、dog_cbba.log）" if gx else "沒有地面任務")) +
+                             (f"地面任務 {gx:08X} 由狗 {dogs[-1]} 處理，發布後 {tx - fx['reported_t']:.1f} s 結束" if tx and dogs else
+                              f"地面任務 {gx:08X} 在發布後 {tx - fx['reported_t']:.1f} s 結束" if tx else
+                              ("地面任務沒有結束（看 fake_dog_*.log、dog_cbba_*.log）" if gx else "沒有地面任務")) +
                              ("；有無人機被指派地面任務（不對）" if took else ""))
             res.add("D3", "狗（假的 V60）得標、走過去、處理完（地面任務結束）", "PASS" if ok3 else "FAIL",
                     "；".join(rows3) if rows3 else "沒有起火")
@@ -1448,17 +1470,28 @@ class DemoSuite(UavSuite):
             tc = closed_at(gt) if gt else None
             # 發現的那台懸停監控到地面任務結束才完成那個巡檢點、離開
             pt = next((p for p in plan["patrol"] if p["point"] == f.get("point")), None)
-            tr = [e["t"] for e in run.events if pt and e["kind"] == "result" and e["msg"].get(f_id) == pt["task_id"]
-                  and e["msg"].get(f_ok) is True]
+            done_by = [(e["t"], e.get("uav")) for e in run.events if pt and e["kind"] == "result"
+                       and e["msg"].get(f_id) == pt["task_id"] and e["msg"].get(f_ok) is True]
+            tr = [t for t, _ in done_by]
+            executor = done_by[0][1] if done_by else None
             v = f.get("reported_by")
             drift = None
             if v and tc:
                 ps = [e for e in run.events if e["kind"] == "pos" and e["uav"] == v and f["reported_t"] <= e["t"] <= tc]
                 drift = max((math.hypot(e["x"] - f["x"], e["y"] - f["y"]) for e in ps), default=None)
-            ok = bool(tr and tc and tr[0] >= tc - 0.5 and drift is not None and drift < 2.0)
-            res.add("D4", "無人機懸停監控火點，狗處理完才完成那個巡檢點", "PASS" if ok else "FAIL",
-                    (f"uav{v} 在狗處理完後 {tr[0] - tc:.1f} s 回報完成；監控期間離火點最遠 {drift:.2f} m"
-                     if tr and tc and drift is not None else "沒有看到「狗處理完 → 巡檢點完成」的順序"))
+            watched = drift is not None and drift < 2.0
+            if v and executor is not None and v != executor:
+                # 先看到火的是別台（例如待命、飛回起飛點途中，2026-10-19）：那台監控到狗處理完；被派去巡檢點的那台
+                # 照規則不重複監控（火已經有人報、有人盯），做完巡檢就走，所以巡檢點可以在狗處理完之前完成
+                ok = bool(tr and tc and watched)
+                detail = (f"uav{v} 先看到火、監控到狗處理完（離火點最遠 {drift:.2f} m）；巡檢點由 uav{executor} 完成"
+                          f"（火已有人盯，不重複監控）" if tr and tc and drift is not None else "沒有看到監控到狗處理完")
+            else:
+                ok = bool(tr and tc and tr[0] >= tc - 0.5 and watched)
+                detail = (f"uav{v} 在狗處理完後 {tr[0] - tc:.1f} s 回報完成；監控期間離火點最遠 {drift:.2f} m"
+                          if tr and tc and drift is not None else "沒有看到「狗處理完 → 巡檢點完成」的順序")
+            res.add("D4", "無人機懸停監控火點，狗處理完才完成那個巡檢點（別台先發現時：發現的那台監控到狗處理完）",
+                    "PASS" if ok else "FAIL", detail)
         home_rows = []
         for v in ids:
             p = run.positions.get(v)
@@ -1470,6 +1503,8 @@ class DemoSuite(UavSuite):
 
         print(f"  停 {self.hold:.0f} s 讓你看 Gazebo 畫面")
         run.sleep(self.hold)
+        rec_end = time.time()
+        env.pkill(env.sim(), "record_cameras.py")
         if recording:
             self.gz_record(False)
             run.sleep(3.0)                      # 存檔要一點時間
@@ -1493,9 +1528,40 @@ class DemoSuite(UavSuite):
                 print(f"  主機沒有 ffmpeg（sudo apt install ffmpeg），每一格留在 {frames}；裝好後：\n"
                       f"    ffmpeg -framerate {fps} -i {frames}/%05d.png -c:v libx264 -pix_fmt yuv420p {mp4}")
         gz_ok = os.path.exists(os.path.join(run.out, "gazebo.mp4"))
+        cams_mp4 = self.compose_cameras(run, rec.get("t0"), rec_end) if gz_ok else None
         res.add("D6", "影片", "INFO" if os.path.exists(mp4) and gz_ok else "FAIL",
                 ("俯視動畫 demo.mp4" if os.path.exists(mp4) else f"俯視動畫沒有合成（看 {run.out}/animate.log、ffmpeg）") +
-                ("；Gazebo 畫面 gazebo.mp4" if gz_ok else "；Gazebo 畫面沒有錄到"))
+                ("；Gazebo 畫面 gazebo.mp4" if gz_ok else "；Gazebo 畫面沒有錄到") +
+                ("；Gazebo＋下視相機 demo_cameras.mp4" if cams_mp4 else
+                 ("；下視相機沒有合成（看 compose_cameras.log、record_cameras.log）" if gz_ok and self.record else "")))
+
+    def compose_cameras(self, run, t0, t1):
+        """下視相機的畫面（record_cameras.py）照時間拼成三台直排（compose_cameras.py，sim 容器），主機的 ffmpeg
+        再和 gazebo.mp4 左右並排成 demo_cameras.mp4（2026-10-19）。gazebo.mp4 用模擬時間錄、相機用牆上時間對齊，
+        模擬比實際慢（real time factor < 1）時兩邊會慢慢差開。回傳輸出的路徑，失敗時 None"""
+        env = self.env
+        cams = os.path.join(run.out, "cameras")
+        if t0 is None or not os.path.isdir(cams) or not shutil.which("ffmpeg"):
+            return None
+        # 總寬 1280（2026-10-20 使用者：1280＋相機欄的 1600 × 720 太大）：gazebo.mp4 縮到 1024 × 576、相機一欄 256 × 576
+        height = 576
+        env.exec(env.sim(), f"python3 {env.repo}/docker/itest/compose_cameras.py {run.cout} --start {t0:.3f} "
+                 f"--end {t1:.3f} --height {height}", log=f"{run.cout}/compose_cameras.log")
+        frames = os.path.join(run.out, "camframes")
+        if not os.path.isdir(frames) or not os.listdir(frames):
+            return None
+        fps = open(os.path.join(frames, "fps.txt")).read().strip()
+        out = os.path.join(run.out, "demo_cameras.mp4")
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", os.path.join(run.out, "gazebo.mp4"),
+                            "-framerate", fps, "-i", os.path.join(frames, "%05d.jpg"), "-filter_complex",
+                            f"[0:v]scale=-2:{height}[g];[1:v]scale=-2:{height},fps=15[c];[g][c]hstack=inputs=2",
+                            "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", out], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"  下視相機合成失敗：{r.stderr.strip()[-300:]}")
+            return None
+        shutil.rmtree(frames, ignore_errors=True)
+        shutil.rmtree(cams, ignore_errors=True)
+        return out
 
 
 # =============================================================================
@@ -1537,7 +1603,7 @@ def main():
         for pat in (env.cfg["comm"]["stop_pattern"].format(id=vid), env.cfg["uav"]["stop_pattern"]):
             if env.running(env.uav(vid), pat):
                 busy.append((env.uav(vid), pat))
-    for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "ros_bridge.py", "fake_dog.py"):
+    for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "ros_bridge.py", "fake_dog.py", "record_cameras.py"):
         if env.running(env.sim(), pat):
             busy.append((env.sim(), pat))
     dog = env.cfg.get("dog")
@@ -1592,7 +1658,7 @@ def main():
                 env.pkill(env.sim(), dog["sim_stop_pattern"])
             # px4_start 的 stdin（tail -f /dev/null）：不關的話每跑一次留一個（2026-10-13 前用 sleep infinity，
             # 一直累積；而且容器的主程序也是 sleep infinity，不能用它比對）
-            for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "tail -f /dev/null"):
+            for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "tail -f /dev/null", "record_cameras.py"):
                 env.pkill_hard(env.sim(), pat)
         if args.suite in ("comm", "loss"):
             for vid in env.ids:

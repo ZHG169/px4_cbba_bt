@@ -79,14 +79,19 @@
   },
   "dog": {
     "container": "cbba_uav1",
-    "start": "exec ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 -r __node:=v60_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_v60.yaml -p agent_id:=50 -p cruise_speed:={speed}",
-    "stop_pattern": "__node:=v60_cbba_node( |$)",
-    "sim_start": "exec python3 {repo}/docker/scripts/fake_dog.py --world {world} --start {x} {y} --speed {speed}",
+    "start": "exec ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:={ns}_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_v60.yaml -p agent_id:={id} -p cruise_speed:={speed}",
+    "stop_pattern": "__node:=v60[a-z0-9]*_cbba_node( |$)",
+    "sim_start": "exec python3 {repo}/docker/scripts/fake_dog.py --world {world} --ns {ns} --id {id} --model {ns}_standin --start {x} {y} --speed {speed}",
     "sim_stop_pattern": "fake_dog.py",
-    "state_topic": "/v60/robot_state",
-    "start_xy": [-4.0, 0.0],
+    "state_topic": "/{ns}/robot_state",
+    "current_topic": "/{ns}/current_task",
+    "units": [
+      {"ns": "v60", "id": 50, "start_xy": [-4.0, 0.0]},
+      {"ns": "v60b", "id": 51, "start_xy": [10.0, 6.0]},
+      {"ns": "v60c", "id": 52, "start_xy": [-18.0, -8.0]}
+    ],
     "speed": 1.5,
-    "_說明": "demo 的假 V60（2026-10-13）：cbba_node（機號 50、UGV、/v60）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /v60/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身）。speed 同時給兩邊（出價估的時間才準）"
+    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗"
   },
   "uav": {
     "start": "export EXECUTOR=${{EXECUTOR:-bt}}; exec cbba_uav.sh",

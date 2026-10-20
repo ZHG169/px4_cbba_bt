@@ -328,6 +328,25 @@ TEST_F(SkeletonTest, FireAtPatrolPointHoversUntilGroundTaskClosed)
   EXPECT_EQ(platform.created.size(), 1u);
 }
 
+TEST_F(SkeletonTest, FireBesidePatrolPointReturnsToFinishHover)
+{
+  // 巡檢點 (10, 0) 旁 2 m 有火：停 1 s（settle）看到 → 移到火點上空監控 → 狗處理完 → 飛回 (10, 0) 補完剩下的停留時間
+  // 才回報完成（2026-10-20：原本狗處理完就直接回報，巡檢點只停了 1 s）
+  platform.fires.push_back(fire({12.0, 0.0, 0.2}));
+  dispatch(0x00010001, 10, 0, 4.0);
+  ASSERT_TRUE(runUntil([&] {return !platform.created.empty();}, 20.0));
+  run(8.0);
+  EXPECT_NEAR(platform.v.position.x, 12.0, 0.3);   // 在火點上空監控
+  EXPECT_TRUE(reported.empty());
+  platform.closed.insert(platform.created[0].task_id);
+  const double closed = platform.t;
+  ASSERT_TRUE(runUntil([&] {return !reported.empty();}, 20.0));
+  EXPECT_TRUE(reported[0].success);
+  EXPECT_NEAR(platform.v.position.x, 10.0, 0.5);   // 回到巡檢點上空
+  EXPECT_GT(platform.t - closed, 3.0 - 1e-9);      // 停留 4 s、到達後 1 s 就離開 → 回來補約 3 s（加上飛回來的時間）
+  EXPECT_EQ(platform.created.size(), 1u);
+}
+
 TEST_F(SkeletonTest, FireMonitorGivesUpAfterTimeout)
 {
   // 地面任務一直沒結束（沒有狗）：monitor_timeout（這裡 30 s）後照樣完成、離開
@@ -580,6 +599,97 @@ TEST_F(FlightTest, LoiterYieldsToBusyNeighbor)
   platform.nbrs.clear();
   runUntil([](FlightEvent) {return false;}, 3.0);
   EXPECT_NEAR(platform.v.position.x, pushed, 0.5);
+}
+
+TEST_F(FlightTest, FarBusyNeighborDoesNotStopHoming)
+{
+  // 飛回起飛點途中，執行中的鄰機在 10 m 外（CBF 的 influence_radius 設成 12 m 時也一樣）：照常飛回去，不停下讓路
+  // （2026-10-19 SITL：uav2 回起飛點途中離懸停監控的 uav1 10 m 就停了 12 s）
+  UavContextConfig cfg;
+  cfg.cbf.influence_radius = 12.0;
+  ctx = std::make_unique<UavContext>(platform, cfg);
+  flight = std::make_unique<UavFlight>(*ctx, 5.0, 20.0, 0.0);
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  platform.v.position = {12.0, 0.0, 5.0};
+  platform.v.velocity = {};
+  flight->leaveHold();
+  Neighbor n;
+  n.id = 2;
+  n.position = {12.0, -10.0, 5.0};
+  n.busy = true;
+  platform.nbrs = {n};
+  runUntil([](FlightEvent) {return false;}, 20.0);
+  EXPECT_EQ(countLogs("讓路"), 0);
+  EXPECT_NEAR(platform.v.position.x, 0.0, 0.5);
+  EXPECT_NEAR(platform.v.position.y, 0.0, 0.5);
+}
+
+TEST_F(FlightTest, IdleSeesFireReportsAndMonitorsThenReturnsHome)
+{
+  // 待命（飛回起飛點途中）看到新火點：發布地面處置任務一次 → 飛到火點上空監控 → 地面任務結束 → 回到待命、飛回起飛點
+  // （2026-10-19 SITL：回程清楚看到 R1 的火，原本只有執行任務的 NavigateTo 會處理）
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  FireObservation f;
+  f.tag_id = 101;
+  f.confidence = 0.95;
+  f.frames = 10;
+  f.position = {6.0, 3.0, 0.2};
+  f.received = platform.t + 1e6;   // 一直是新的
+  platform.fires = {f};
+  step();
+  EXPECT_EQ(countLogs("待命中發現火警"), 1);
+  ASSERT_EQ(platform.created.size(), 1u);
+  EXPECT_TRUE(flight->monitoringFire());
+  runUntil([](FlightEvent) {return false;}, 10.0);
+  EXPECT_NEAR(platform.v.position.x, 6.0, 0.3);
+  EXPECT_NEAR(platform.v.position.y, 3.0, 0.3);
+  EXPECT_EQ(countLogs("在火點上空懸停監控"), 1);
+  EXPECT_EQ(platform.created.size(), 1u);   // 同一個火點只報一次
+  EXPECT_EQ(platform.exec.mode, ExecMode::EXECUTING);
+
+  platform.closed.insert(platform.created[0].task_id);
+  step();
+  EXPECT_EQ(countLogs("回到待命"), 1);
+  EXPECT_FALSE(flight->monitoringFire());
+  runUntil([](FlightEvent) {return false;}, 20.0);
+  EXPECT_NEAR(platform.v.position.x, 0.0, 0.3);
+  EXPECT_NEAR(platform.v.position.y, 0.0, 0.3);
+}
+
+TEST_F(FlightTest, NewTaskStopsIdleFireMonitoring)
+{
+  // 待命監控火點時 CBBA 派了任務（node 層開始跑樹前呼叫 leaveHold）：結束監控去做任務，地面任務照常給狗
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  FireObservation f;
+  f.tag_id = 101;
+  f.confidence = 0.95;
+  f.frames = 10;
+  f.position = {4.0, 0.0, 0.2};
+  f.received = platform.t + 1e6;
+  platform.fires = {f};
+  step();
+  ASSERT_TRUE(flight->monitoringFire());
+  flight->leaveHold();
+  EXPECT_FALSE(flight->monitoringFire());
+  EXPECT_EQ(countLogs("停止監控火點"), 1);
+  EXPECT_EQ(platform.created.size(), 1u);
+}
+
+TEST_F(FlightTest, IdleFireWatchCanBeDisabled)
+{
+  // fire_task.idle_watch_tag = 0：待命時不看火
+  flight->setIdleFireWatch(0, 120.0);
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  FireObservation f;
+  f.tag_id = 101;
+  f.confidence = 0.95;
+  f.frames = 10;
+  f.position = {4.0, 0.0, 0.2};
+  f.received = platform.t + 1e6;
+  platform.fires = {f};
+  runUntil([](FlightEvent) {return false;}, 3.0);
+  EXPECT_TRUE(platform.created.empty());
+  EXPECT_FALSE(flight->monitoringFire());
 }
 
 TEST_F(FlightTest, ReturnsHomeAfterIdleDelay)

@@ -7,6 +7,9 @@
 //            SITL 實測一直停在 4.71 m；做完任務、被接管後也會停在當時的高度）
 //            待命（2026-10-13 使用者：任務做完要回到初始位置；負值 = 一直原地懸停）。影響範圍內有執行任務中的鄰機時讓路
 //            （停在被推開的位置，鄰機離開後再繼續飛回去）。GUIDE §3 的 DefaultBehavior 不放進樹，樹跑完就結束、回報照骨架的流程
+//            待命（含飛回起飛點）時也看火（2026-10-19，使用者：原本只有執行任務的 NavigateTo 看，回程清楚看到火也不理）：
+//            看到新的火點（自己、別台都沒報過）→ 發布地面處置任務 → 飛到火點上空懸停監控到地面任務結束（task_closed）
+//            或 fire_monitor_timeout → 回到待命（之後照常飛回起飛點）。監控中 CBBA 派了任務就去做任務（leaveHold 時結束監控）
 //   返航     在空中、電量 ≤ min_battery → 停止 offboard、PX4 RTL（指令可能掉：每 2 s 再送，最多 3 次），之後一直是 RTL
 //   不在空中 起飛完成後上鎖或降落 → 回到起飛（和備用 BT 的 TakeOff 一樣會重新起飛）
 //   被接管   起飛完成後 offboard 掉了（不是自己的返航）→ OVERRIDE（2026-10-17，照機器狗端的平板接管）：
@@ -22,7 +25,9 @@
 // 不依賴 ROS：透過 UavContext（UavPlatform）讀狀態、下命令，test_skeleton 用假平台測。
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -94,11 +99,22 @@ public:
     return takeOff(v, now) ? FlightEvent::TOOK_OFF : FlightEvent::NONE;
   }
 
+  // 待命時看火的設定（node 層給 fire_task.monitor_timeout）；tag = 0 不看
+  void setIdleFireWatch(unsigned tag, double monitor_timeout)
+  {
+    fire_tag_ = tag;
+    fire_timeout_ = monitor_timeout;
+  }
+  bool monitoringFire() const {return fire_phase_ != FirePhase::NONE;}
+
   // 待命：原地懸停，return_home_delay 秒後飛回返航點上空；讓路給執行任務中的鄰機。樹跑完後的第一次從那時的位置開始
   void loiter()
   {
     const VehicleState v = ctx_.platform.vehicle();
     const double now = ctx_.platform.timeNow();
+    if (idleFire(now)) {
+      return;
+    }
     if (!hold_valid_) {
       hold_ = atAltitude(v.position);
       hold_valid_ = true;
@@ -113,9 +129,13 @@ public:
       std::snprintf(b, sizeof(b), "待命：飛回起飛點上空 (%.1f, %.1f, %.1f)", home_.x, home_.y, home_.z);
       ctx_.platform.log(b);
     }
+    // 執行中的鄰機很近時停在被推開的位置（不拉回原本的待命點、不繼續飛回起飛點）。範圍用 kYieldStopFactor × yield_radius，
+    // 不用 CBF 的 influence_radius：itest demo 把它設成 12 m（--speed 3 時 CBF 需要的作用距離），待命的那台離執行中的
+    // 鄰機 10 m 就停下、等對方做完才走（2026-10-19 SITL：uav2 回起飛點途中停 12 s）。遠一點的照常飛，由 CBF 繞開
     bool yield = false;
     for (const Neighbor & n : ctx_.platform.neighbors()) {
-      yield = yield || (n.busy && norm(n.position - v.position) < ctx_.config.cbf.influence_radius);
+      const double d = std::hypot(n.position.x - v.position.x, n.position.y - v.position.y);
+      yield = yield || (n.busy && d < kYieldStopFactor * ctx_.config.cbf.yield_radius);
     }
     if (yield) {
       hold_ = atAltitude(v.position);
@@ -130,10 +150,77 @@ public:
     ctx_.setExec(ExecMode::IDLE, -1.0, nullptr);
   }
 
-  // 樹開始跑時呼叫：下次待命從那時的位置開始，不飛回舊的待命點
-  void leaveHold() {hold_valid_ = false;}
+  // 樹開始跑時呼叫：下次待命從那時的位置開始，不飛回舊的待命點；待命時的火點監控結束（去做 CBBA 派的任務）
+  void leaveHold()
+  {
+    hold_valid_ = false;
+    if (fire_phase_ != FirePhase::NONE) {
+      ctx_.platform.log("收到任務：停止監控火點，地面處置任務 " + hexId(fire_task_) + " 照常由狗處理");
+      fire_phase_ = FirePhase::NONE;
+    }
+  }
 
 private:
+  enum class FirePhase { NONE, TO_FIRE, MONITOR };
+
+  static std::string hexId(std::uint32_t id)
+  {
+    char b[16];
+    std::snprintf(b, sizeof(b), "%08X", id);
+    return b;
+  }
+
+  // 待命時看到新火點 → 發布地面處置任務、飛到火點上空監控（參數照 NavigateTo 的預設：confidence 0.85、5 張、0.5 s 內）。
+  // 回傳 true = 這個 tick 由火點監控控制（不做一般的待命）
+  bool idleFire(double now)
+  {
+    if (fire_phase_ == FirePhase::NONE) {
+      if (fire_tag_ == 0) {
+        return false;
+      }
+      const auto f = ctx_.newFire(fire_tag_, 0.85, 5, 0.5);
+      if (!f) {
+        return false;
+      }
+      fire_task_ = ctx_.reportFire(f->position);
+      fire_goal_ = atAltitude(f->position);
+      fire_phase_ = FirePhase::TO_FIRE;
+      char b[200];
+      std::snprintf(b, sizeof(b), "待命中發現火警 tag %u（confidence %.2f）在 (%.1f, %.1f)：發布地面處置任務、飛到火點上空監控",
+        fire_tag_, f->confidence, f->position.x, f->position.y);
+      ctx_.platform.log(b);
+    }
+    const double d = ctx_.moveTo(fire_goal_);
+    if (fire_phase_ == FirePhase::TO_FIRE) {
+      ctx_.setExec(ExecMode::EXECUTING, d / std::max(ctx_.config.cbf.max_speed, 0.1) + std::max(fire_timeout_, 0.0),
+        nullptr);
+      if (d >= ctx_.config.reach_tolerance) {
+        return true;
+      }
+      fire_phase_ = FirePhase::MONITOR;
+      fire_monitor_start_ = now;
+      char b[160];
+      std::snprintf(b, sizeof(b), "在火點上空懸停監控，等地面處置任務 %s 結束（最多 %.0f s）",
+        hexId(fire_task_).c_str(), fire_timeout_);
+      ctx_.platform.log(b);
+    }
+    const double waited = now - fire_monitor_start_;
+    ctx_.setExec(ExecMode::EXECUTING, std::max(fire_timeout_ - waited, 0.0), nullptr);
+    char b[160];
+    if (ctx_.platform.taskClosed(fire_task_)) {
+      std::snprintf(b, sizeof(b), "地面處置任務 %s 結束（%.1f s），回到待命", hexId(fire_task_).c_str(), waited);
+    } else if (waited >= fire_timeout_) {
+      std::snprintf(b, sizeof(b), "等了 %.0f s，地面處置任務 %s 還沒結束，回到待命", fire_timeout_,
+        hexId(fire_task_).c_str());
+    } else {
+      return true;
+    }
+    ctx_.platform.log(b);
+    fire_phase_ = FirePhase::NONE;
+    hold_valid_ = false;   // 從火點上空重新開始待命（return_home_delay 後飛回起飛點）
+    return true;
+  }
+
   Vec3 atAltitude(const Vec3 & p) const {return {p.x, p.y, altitude_};}
 
   FlightEvent landed()
@@ -252,6 +339,7 @@ private:
   }
 
   static constexpr double kClimbWarnSec = 20.0;   // 5 m 的巡檢高度正常幾秒就到
+  static constexpr double kYieldStopFactor = 2.0; // 待命時停下讓路的範圍 = 這個 × cbf.yield_radius
 
   UavContext & ctx_;
   double altitude_;
@@ -266,6 +354,13 @@ private:
   double climb_start_{0.0};
   bool climb_warned_{false};
   bool override_user_{true};
+
+  unsigned fire_tag_{101};
+  double fire_timeout_{120.0};
+  FirePhase fire_phase_{FirePhase::NONE};
+  Vec3 fire_goal_;
+  std::uint32_t fire_task_{0};
+  double fire_monitor_start_{0.0};
 
   int rtl_sent_{0};
   double rtl_last_{0.0};

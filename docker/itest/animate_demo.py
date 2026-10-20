@@ -8,8 +8,9 @@
 要 matplotlib（主機沒有時在 sim 容器跑）。只用 ros_bridge 記下的話題（PX4 位置、current_task、task_result、new_task），
 不看節點的 log；有 demo_plan.json（itest demo 寫的）時另外畫出全部任務點、火警起火的時刻。
 
-播放速度：事件（建立、指派、完成、起火、丟出地面任務）前後 --window 秒用 --slow 倍速，其他時間 --speedup 倍速；
-起火、丟出地面任務時停 --freeze 秒，結尾停 3 秒。
+播放速度：預設全程 1 倍速（2026-10-19 使用者：忽快忽慢沒有意義，原本沒有事件時 3 倍速快轉）；
+起火、丟出地面任務、地面任務結束時停 --freeze 秒，結尾停 3 秒。要快轉時給 --speedup（沒有事件時的倍速），
+事件前後 --window 秒維持 --slow 倍速。
 左邊：俯視地圖。綠色方塊 = 固定任務；火點起火時才出現（紅色方塊＋光圈，在某台的航線上）；每台的航跡（實線）、
 目前要去的任務（虛線）；任務的圓圈未分配是白的、有人拿著時填那台的顏色、完成後變灰；地面處置任務是紅色方塊。
 右邊：事件時間軸。樣式沿用 cbba_core/scripts/plot_results.py；圖上的文字用英文（容器裡沒有中文字型）。
@@ -25,6 +26,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib.path import Path  # noqa: E402
+from matplotlib.transforms import Affine2D  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "ros2_ws", "src", "cbba_core", "scripts"))
@@ -33,17 +36,44 @@ from plot_results import AGENT_COLORS, FIRE, GRID, INK, INK_2, MUTED, SURFACE  #
 GROUND_TYPE = 2
 PATROL = "#3f9b3f"        # 固定巡檢點（綠色平台）
 DOG = "#e07000"           # 假的 V60（2026-10-13）
+DOG_SHADES = ["#e07000", "#9c4f00", "#f4a259"]   # 多隻狗（2026-10-20）：同色系、深淺不同
+
+
+def quad_marker():
+    """四旋翼的圖示（2026-10-20，使用者：2D 動畫用無人機的圖案、標編號）：機身＋兩支交叉的機臂＋四個旋翼圈"""
+    parts = [Path.unit_rectangle().transformed(Affine2D().translate(-0.5, -0.5).scale(0.42))]
+    for deg in (45, -45):
+        parts.append(Path.unit_rectangle().transformed(Affine2D().translate(-0.5, -0.5).scale(1.5, 0.14).rotate_deg(deg)))
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            parts.append(Path.circle((0.53 * sx, 0.53 * sy), 0.3))
+    return Path.make_compound_path(*parts)
+
+
+def dog_marker():
+    """機器狗（四足、側面朝右）的圖示：一個不自我重疊的多邊形"""
+    v = [(-0.55, 0.30), (0.30, 0.30), (0.30, 0.50), (0.62, 0.50), (0.62, 0.32), (0.78, 0.32), (0.78, 0.18),
+         (0.42, 0.18), (0.42, -0.45), (0.30, -0.45), (0.30, -0.05), (0.12, -0.05), (0.12, -0.45), (0.00, -0.45),
+         (0.00, -0.05), (-0.26, -0.05), (-0.26, -0.45), (-0.38, -0.45), (-0.38, -0.05), (-0.48, -0.05),
+         (-0.48, -0.45), (-0.60, -0.45), (-0.60, 0.20), (-0.80, 0.42), (-0.86, 0.36), (-0.62, 0.30)]
+    return Path(v + [v[0]], [Path.MOVETO] + [Path.LINETO] * (len(v) - 1) + [Path.CLOSEPOLY])
+
+
+QUAD = quad_marker()
+DOG_ICON = dog_marker()
 
 
 def load(out_dir):
     ev = [json.loads(line) for line in open(os.path.join(out_dir, "events.jsonl"), encoding="utf-8") if line.strip()]
-    pos, assigned, done, tasks, dog, closed, battery = {}, {}, {}, {}, [], {}, {}
+    pos, assigned, done, tasks, dog, closed, battery, dog_assigned = {}, {}, {}, {}, {}, {}, {}, {}
     for e in ev:
         k, t = e["kind"], e["t"]
         if k == "battery":
             battery.setdefault(e["uav"], []).append((t, e["pct"]))
-        elif k == "dog":
-            dog.append((t, e["x"], e["y"]))
+        elif k == "dog":   # 2026-10-20 起帶機號（多隻狗）；舊的紀錄沒有，當成 50
+            dog.setdefault(e.get("dog", 50), []).append((t, e["x"], e["y"]))
+        elif k == "dog_assigned":
+            dog_assigned.setdefault(e["dog"], []).append((t, e["msg"].get("task_id", 0)))
         elif k == "closed" and e["msg"].get("status") == 1:
             closed.setdefault(e["msg"]["task_id"], t)
         elif k == "pos":
@@ -58,7 +88,7 @@ def load(out_dir):
                 p = m.get("position", {})
                 tasks[m["task_id"]] = dict(t=t, x=p.get("x", 0.0), y=p.get("y", 0.0), type=m.get("type", 1),
                                            by=e["uav"])
-    return pos, assigned, done, tasks, dog, closed, battery
+    return pos, assigned, done, tasks, dog, closed, battery, dog_assigned
 
 
 def at(series, t, default=0):
@@ -86,13 +116,13 @@ def main():
     ap.add_argument("out_dir")
     ap.add_argument("--frames", help="每一格存成這個目錄的 PNG（之後用 ffmpeg 合成）；沒給時存 demo.gif")
     ap.add_argument("--fps", type=int, default=15)
-    ap.add_argument("--speedup", type=float, default=3.0, help="沒有事件時的倍速")
+    ap.add_argument("--speedup", type=float, default=1.0, help="沒有事件時的倍速（預設 1 = 全程同速）")
     ap.add_argument("--slow", type=float, default=1.0, help="事件附近的倍速")
     ap.add_argument("--window", type=float, default=2.0)
     ap.add_argument("--freeze", type=float, default=1.5)
     args = ap.parse_args()
 
-    pos, assigned, done, tasks, dog, closed, battery = load(args.out_dir)
+    pos, assigned, done, tasks, dog, closed, battery, dog_assigned = load(args.out_dir)
     if not tasks or not pos:
         sys.exit("events.jsonl 裡沒有任務或位置（要用 itest.py demo 或 uav 的輸出）")
     plan_path = os.path.join(args.out_dir, "demo_plan.json")
@@ -110,13 +140,15 @@ def main():
         return best[0] if best and math.hypot(best[1]["x"] - x, best[1]["y"] - y) < 1.5 else None
 
     def fire_of(x, y):
-        return next((f["name"] for f in fires if math.hypot(f["x"] - x, f["y"] - y) <= 2.5), None)
+        # 任務點就在火點上（tf、fire_mode point）才算火點的任務：0.5 m 內。原本 2.5 m，G1 旁 2 m 的 R4 起火時
+        # G1 被叫成「F_R4 fire」，事件列表看不出 G1 完成（2026-10-20）
+        return next((f["name"] for f in fires if math.hypot(f["x"] - x, f["y"] - y) <= 0.5), None)
 
     names = {}
     for i, tid in enumerate(air):
         x, y = tasks[tid]["x"], tasks[tid]["y"]
         p, f = point_of(x, y), fire_of(x, y)
-        names[tid] = f"{f} fire" if f else (f"{p} task" if p else f"T{i + 1}")
+        names[tid] = (f"{p} task (fire)" if p and f else f"{p} task" if p else f"{f} fire" if f else f"T{i + 1}")
 
     t_start = min(tasks[t]["t"] for t in air) - 2.0
     t_end = max([v[0] for v in done.values()] + [tasks[g]["t"] for g in ground] + list(closed.values()) +
@@ -141,15 +173,31 @@ def main():
     for tid, (t, v) in done.items():
         if tid in names:
             events.append((t, f"uav{v} done {names[tid]}", colors.get(v, INK)))
-    point_mode = bool(plan and plan.get("mode") == "point")
     for g in ground:
-        f = fire_of(tasks[g]["x"], tasks[g]["y"]) or "fire"
-        how = ("spots {} -> ground task, hovers" if point_mode else
-               "spots {} en route -> ground task, diverts and hovers" if plan and plan.get("mode") in ("side", "custom")
-               else "spots {} en route -> ground task")
-        events.append((tasks[g]["t"], f"uav{tasks[g]['by']} " + how.format(f), FIRE))
+        # 地面任務的位置是偵測到的火點（誤差可到 2 m），用寬一點的範圍找是哪個火
+        f = next((ff["name"] for ff in fires if math.hypot(ff["x"] - tasks[g]["x"], ff["y"] - tasks[g]["y"]) <= 2.5),
+                 "fire")
+        # 發現的那台當時在做什麼（2026-10-20：原本照模式猜，在巡檢點懸停時看到的也寫成 en route）：
+        # 手上有空中任務而且在它上空 1 m 內 → 在那個點看到；手上有任務但還沒到 → 路上；手上沒任務 → 待命時
+        v, tg = tasks[g]["by"], tasks[g]["t"]
+        held = at(assigned.get(v, []), tg)
+        here = [p for p in pos.get(v, []) if p[0] <= tg]
+        if held in tasks and held in names and here and \
+           math.hypot(here[-1][1] - tasks[held]["x"], here[-1][2] - tasks[held]["y"]) <= 1.0:
+            how = f"sees {f} at {names[held]} -> ground task"
+        elif held in tasks and held in names:
+            how = f"sees {f} en route to {names[held]} -> ground task"
+        else:
+            how = f"sees {f} while idle -> ground task"
+        events.append((tg, f"uav{v} " + how, FIRE))
+        for d in sorted(dog_assigned):   # 哪隻狗得標（多隻狗時看得出競標結果，2026-10-20）
+            first = next((tt for tt, tid in dog_assigned[d] if tid == g), None)
+            if first is not None:
+                events.append((first, f"dog{d} <- ground task ({f})", DOG))
         if g in closed:
-            events.append((closed[g], "dog done -> ground task closed", DOG))
+            who = next((d for d in sorted(dog_assigned) if any(tid == g for _, tid in dog_assigned[d])), None)
+            events.append((closed[g], f"dog{who} done -> ground task closed" if who else "dog done -> ground task closed",
+                           DOG))
     events.sort()
 
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=SURFACE)        # 1280×720（dpi 100）
@@ -164,9 +212,9 @@ def main():
     axg.axis("off")
 
     xs = [tasks[t]["x"] for t in tasks] + [p[1] for v in ids for p in pos[v]] + [p["x"] for p in points.values()] + \
-        [p[1] for p in dog]
+        [p[1] for d in dog.values() for p in d]
     ys = [tasks[t]["y"] for t in tasks] + [p[2] for v in ids for p in pos[v]] + [p["y"] for p in points.values()] + \
-        [p[2] for p in dog]
+        [p[2] for d in dog.values() for p in d]
     pad = 5.0
     ax.set_xlim(min(xs) - pad, max(xs) + pad)
     ax.set_ylim(min(ys) - pad, max(ys) + pad)
@@ -219,16 +267,25 @@ def main():
     for v in ids:
         trails[v], = ax.plot([], [], color=colors[v], lw=1.8, alpha=0.85, zorder=2)
         links[v], = ax.plot([], [], color=colors[v], lw=1.2, ls="--", zorder=2)
-        drones[v] = ax.scatter([], [], s=230, marker="^", color=colors[v], edgecolors=INK, linewidths=1.0, zorder=7)
-    dog_trail, = ax.plot([], [], color=DOG, lw=1.8, alpha=0.85, zorder=2)
-    dog_art = ax.scatter([], [], s=200, marker="D", color=DOG, edgecolors=INK, linewidths=1.0, zorder=7)
+        # 圖示不上色（2026-10-20 使用者），各台靠航跡和編號的顏色區分
+        drones[v] = ax.scatter([], [], s=520, marker=QUAD, color=INK_2, edgecolors=INK, linewidths=0.6, zorder=7)
+    tags = {v: ax.annotate(f"uav{v}", (0, 0), xytext=(0, 13), textcoords="offset points", ha="center", fontsize=9,
+                           fontweight="bold", color=colors[v], zorder=8, visible=False) for v in ids}
+    dog_color = {d: DOG_SHADES[i % len(DOG_SHADES)] for i, d in enumerate(sorted(dog))}
+    dog_trail, dog_art, dog_tag = {}, {}, {}
+    for d in sorted(dog):
+        dog_trail[d], = ax.plot([], [], color=dog_color[d], lw=1.8, alpha=0.85, zorder=2)
+        dog_art[d] = ax.scatter([], [], s=760, marker=DOG_ICON, color=dog_color[d], edgecolors=INK, linewidths=0.6,
+                                zorder=7)
+        dog_tag[d] = ax.annotate(f"dog{d}", (0, 0), xytext=(0, -20), textcoords="offset points", ha="center",
+                                 fontsize=9, fontweight="bold", color=dog_color[d], zorder=8, visible=False)
     clock = ax.text(0.99, 0.02, "", transform=ax.transAxes, ha="right", va="bottom", fontsize=11,
                     color=INK, bbox=dict(facecolor=SURFACE, edgecolor=GRID, pad=3))
     # 電量（PX4 battery_status，2026-10-14）：右邊的橫向長條圖，每台一條、長度 = 目前電量，隨時間縮短。
-    # 橫軸從資料的最低值附近開始（任務期間只掉十幾 %，從 0 開始畫的話幾乎看不出縮短）
+    # 一般的 0～100 % 刻度（2026-10-19 使用者：原本從最低電量附近開始畫，「axis from 86」看不懂）；實際值看長條旁的數字
     bat_bar, bat_val = {}, {}
     if battery:
-        lo = max(0.0, math.floor(min(p[1] for v in battery.values() for p in v)) - 3.0)
+        lo = 0.0
         axb.set_xlim(lo, 100.0)
         axb.set_ylim(-0.6, len(ids) - 0.4)
         axb.invert_yaxis()
@@ -239,7 +296,7 @@ def main():
         for side in ("top", "right"):
             axb.spines[side].set_visible(False)
         axb.tick_params(axis="x", labelsize=8, colors=INK_2)
-        axb.set_title(f"Battery (%)   axis from {lo:.0f}", loc="left", fontsize=11, fontweight="bold", color=INK)
+        axb.set_title("Battery (%)", loc="left", fontsize=11, fontweight="bold", color=INK)
         for i, v in enumerate(ids):
             axb.barh(i, 100.0 - lo, left=lo, height=0.6, color=GRID, zorder=1)          # 底色 = 滿電
             bat_bar[v] = axb.barh(i, 0.0, left=lo, height=0.6, color=colors[v], zorder=2)[0]
@@ -253,12 +310,12 @@ def main():
     step = 0.9 / n_lines
     lines = [axl.text(0.0, 0.92 - i * step, "", fontsize=9, va="top", transform=axl.transAxes,
                       family="monospace") for i in range(n_lines)]
-    handles = [Line2D([], [], marker="^", ls="", markersize=11, color=colors[v], markeredgecolor=INK,
-                      label=f"uav{v}") for v in ids]
+    handles = [Line2D([], [], marker=QUAD, ls="-", lw=2, markersize=14, color=colors[v], markerfacecolor=INK_2,
+                      markeredgecolor=INK, markeredgewidth=0.6, label=f"uav{v}") for v in ids]
     if points:
         handles += [Line2D([], [], marker="s", ls="", markersize=11, color=PATROL, alpha=0.5, label="fixed task (G)")]
-    if dog:
-        handles += [Line2D([], [], marker="D", ls="", markersize=9, color=DOG, markeredgecolor=INK, label="dog (fake V60)")]
+    handles += [Line2D([], [], marker=DOG_ICON, ls="", markersize=14, color=dog_color[d], markeredgecolor=INK,
+                       markeredgewidth=0.6, label=f"dog{d} (fake V60)") for d in sorted(dog)]
     handles += [Line2D([], [], marker="o", ls="", markersize=13, markerfacecolor=(0.78, 0.09, 0.11, 0.15),
                        markeredgecolor=FIRE, label="fire (tag 101)"),
                 Line2D([], [], marker="s", ls="", markersize=10, color=FIRE, label="ground task (dog)")]
@@ -275,15 +332,21 @@ def main():
                 continue
             trails[v].set_data([p[1] for p in pts], [p[2] for p in pts])
             drones[v].set_offsets([[pts[-1][1], pts[-1][2]]])
+            tags[v].xy = (pts[-1][1], pts[-1][2])
+            tags[v].set_visible(True)
             cur = at(assigned.get(v, []), t)
             if cur in tasks and not (cur in done and done[cur][0] <= t):
                 links[v].set_data([pts[-1][1], tasks[cur]["x"]], [pts[-1][2], tasks[cur]["y"]])
             else:
                 links[v].set_data([], [])
-        dp = [p for p in dog if t_start - 1 <= p[0] <= t]
-        if dp:
-            dog_trail.set_data([p[1] for p in dp], [p[2] for p in dp])
-            dog_art.set_offsets([[dp[-1][1], dp[-1][2]]])
+        for d, track in dog.items():
+            dp = [p for p in track if p[0] <= t]
+            if dp:
+                moved = [p for p in dp if p[0] >= t_start - 1]
+                dog_trail[d].set_data([p[1] for p in moved], [p[2] for p in moved])
+                dog_art[d].set_offsets([[dp[-1][1], dp[-1][2]]])
+                dog_tag[d].xy = (dp[-1][1], dp[-1][2])
+                dog_tag[d].set_visible(True)
         for name, (ts, halo, lbl, block) in fire_art.items():
             if ts <= t:
                 halo.set_visible(True)
@@ -313,8 +376,11 @@ def main():
             if tasks[g]["t"] <= t:
                 sq.set_visible(True)
                 lbl.set_visible(True)
+                who = next((d for d in sorted(dog_assigned) if at(dog_assigned[d], t) == g), None)
                 if g in closed and closed[g] <= t:
                     lbl.set_text("ground task done")
+                elif who is not None:
+                    lbl.set_text(f"ground task -> dog{who}")
         past = [e for e in events if e[0] <= t][-n_lines:]
         for i, ln in enumerate(lines):
             if i < len(past):

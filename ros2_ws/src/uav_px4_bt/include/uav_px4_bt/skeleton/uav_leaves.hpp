@@ -12,8 +12,10 @@
 //   AirRecon    取代狗的 PtzInspect（Switch2 的 case air_recon）：在 target 上空懸停 duration_sec，懸停穩定 settle_sec 後
 //               認 tag 101（confidence ≥ 0.85）；認到就發布地面處置任務、移到火點上空（2026-10-14），懸停時間到了
 //               繼續懸停監控，等那個地面任務結束
-//               （cbba_node 的 task_closed，狗處理完）或 monitor_timeout 才完成（週計畫，2026-10-13）。結束時 results 記
-//               {wp, "air_recon", "OK"}，骨架的 ReportTaskResult 據此發 task_result
+//               （cbba_node 的 task_closed，狗處理完）或 monitor_timeout 才完成（週計畫，2026-10-13）。為了盯火離開了巡檢點
+//               （火點離巡檢點超過 reach_tolerance）時，監控結束後先飛回巡檢點、補完還沒停滿的 duration_sec 再完成
+//               （2026-10-20 使用者：cbba_overrun 裡 uav1 在 G1 只停 1 s 就去盯火，狗處理完直接回報 G1 完成）。
+//               結束時 results 記 {wp, "air_recon", "OK"}，骨架的 ReportTaskResult 據此發 task_result
 //
 // 樹外（node 層，uav_task_manager_node.cpp）：起飛、待命時盤旋與讓路、低電量返航、送 setpoint、位置廣播。
 // 共用的 UavContext（blackboard "uav_ctx"）和備用 BT 相同：CBF、運動平滑、火點去重複。
@@ -261,11 +263,15 @@ public:
     }
     UavContext & ctx = uavCtx(*this);
     hold_ = {tx, ty, tz};
+    target_ = hold_;
     duration_ = std::max(0.0, dur);
     start_ = ctx.platform.timeNow();
     fire_task_.reset();
     others_fire_ = false;
     monitor_start_ = -1.0;
+    left_at_ = -1.0;
+    returning_ = false;
+    back_arrived_ = -1.0;
     task_manager::say("AirRecon", "→ 在 " + g_ctx.current_waypoint + " 上空懸停 " + fmt1(duration_) + " s、認 tag");
     return onRunning();
   }
@@ -274,8 +280,11 @@ public:
   {
     using task_manager::g_ctx;
     UavContext & ctx = uavCtx(*this);
-    ctx.moveTo(hold_);
+    const double dist = ctx.moveTo(hold_);
     const double now = ctx.platform.timeNow();
+    if (returning_) {
+      return backToTarget(ctx, now, dist);
+    }
     if (!fire_task_ && !others_fire_ && now - start_ >= getInput<double>("settle_sec").value_or(1.0)) {
       look(ctx, now);
     }
@@ -292,17 +301,17 @@ public:
         task_manager::say("AirRecon", "👁 懸停監控火點，等地面處置任務 " + id + " 結束（最多 " + fmt1(timeout) + " s）");
       }
       if (ctx.platform.taskClosed(*fire_task_)) {
-        return done(ctx, "fire handled", "✓ 地面處置任務 " + id + " 結束（" + fmt1(now - monitor_start_) +
+        return finish(ctx, "fire handled", "✓ 地面處置任務 " + id + " 結束（" + fmt1(now - monitor_start_) +
           " s），完成這個點");
       }
       if (now - monitor_start_ >= timeout) {
-        return done(ctx, "fire unattended", "⚠ 等了 " + fmt1(timeout) + " s，地面處置任務 " + id +
+        return finish(ctx, "fire unattended", "⚠ 等了 " + fmt1(timeout) + " s，地面處置任務 " + id +
           " 還沒結束，完成這個點、離開");
       }
       ctx.setExec(ExecMode::EXECUTING, timeout - (now - monitor_start_), nullptr);
       return BT::NodeStatus::RUNNING;
     }
-    return done(ctx, "", "✓ 完成");
+    return finish(ctx, "", "✓ 完成");
   }
 
   void onHalted() override
@@ -345,9 +354,48 @@ private:
       if (!ctx.platform.taskClosed(*fire_task_)) {
         hold_ = {o.position.x, o.position.y, hold_.z};
         task_manager::say("AirRecon", "↪ 移到火點上空 (" + fmt1(hold_.x) + ", " + fmt1(hold_.y) + ") 懸停監控");
+        if (std::hypot(hold_.x - target_.x, hold_.y - target_.y) > ctx.config.reach_tolerance) {
+          left_at_ = now;   // 離開巡檢點：監控完要回來補完停留時間
+        }
       }
       return;
     }
+  }
+
+  // 監控結束（或沒有火）：為了盯火離開過巡檢點、而且停留時間還沒滿時，先飛回巡檢點補完再完成
+  BT::NodeStatus finish(UavContext & ctx, const std::string & detail, const std::string & msg)
+  {
+    const double remaining = left_at_ < 0.0 ? 0.0 : duration_ - (left_at_ - start_);
+    if (remaining <= 0.05) {
+      return done(ctx, detail, msg);
+    }
+    returning_ = true;
+    hold_ = target_;
+    back_remaining_ = remaining;
+    back_arrived_ = -1.0;
+    pending_detail_ = detail;
+    pending_msg_ = msg;
+    task_manager::say("AirRecon", "↩ 回到 " + task_manager::g_ctx.current_waypoint + " 上空，補完剩下的 " +
+      fmt1(remaining) + " s 懸停");
+    ctx.setExec(ExecMode::EXECUTING, remaining, nullptr);
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus backToTarget(UavContext & ctx, double now, double dist)
+  {
+    if (back_arrived_ < 0.0) {
+      if (dist >= ctx.config.reach_tolerance) {
+        ctx.setExec(ExecMode::EXECUTING, back_remaining_, nullptr);
+        return BT::NodeStatus::RUNNING;
+      }
+      back_arrived_ = now;
+    }
+    const double left = back_remaining_ - (now - back_arrived_);
+    if (left > 0.0) {
+      ctx.setExec(ExecMode::EXECUTING, left, nullptr);
+      return BT::NodeStatus::RUNNING;
+    }
+    return done(ctx, pending_detail_, pending_msg_);
   }
 
   BT::NodeStatus done(UavContext & ctx, const std::string & detail, const std::string & msg)
@@ -379,11 +427,18 @@ private:
   }
 
   Vec3 hold_;
+  Vec3 target_;                   // 巡檢點（hold_ 可能移到火點上空）
   double duration_{0.0};
   double start_{0.0};
   std::optional<std::uint32_t> fire_task_;
   bool others_fire_{false};       // 看到的是別台報的火（只印一次）
   double monitor_start_{-1.0};
+  double left_at_{-1.0};          // 為了盯火離開巡檢點的時刻（−1 = 沒離開）
+  bool returning_{false};         // 監控完、回巡檢點補完停留時間
+  double back_remaining_{0.0};
+  double back_arrived_{-1.0};
+  std::string pending_detail_;
+  std::string pending_msg_;
 };
 
 inline void registerUavLeaves(BT::BehaviorTreeFactory & f)

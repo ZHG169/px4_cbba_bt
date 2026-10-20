@@ -55,11 +55,21 @@ class Bridge(Node):
                 msg_type = get_message(spec["type"])
                 self.subs.append(self.create_subscription(
                     msg_type, name, lambda m, k=kind, v=vid: self.on_msg(k, v, m), qos_of(spec)))
-        # 機器狗（2026-10-13，demo 的假狗）：robot_state → {"kind": "dog", "x", "y"}，最多 5 Hz
-        dog = cfg.get("dog", {}).get("state_topic")
-        if dog and "robot_state" in topics:
-            self.subs.append(self.create_subscription(
-                get_message(topics["robot_state"]["type"]), dog, self.on_dog, qos_of(topics["robot_state"])))
+        # 機器狗（2026-10-13，demo 的假狗；2026-10-20 起可以多隻，dog.units）：
+        #   robot_state  → {"kind": "dog", "dog": 機號, "x", "y"}，每隻最多 5 Hz
+        #   current_task → {"kind": "dog_assigned", "dog": 機號, "msg": …}（誰拿到哪個地面任務）
+        dog = cfg.get("dog", {})
+        units = dog.get("units") or ([{"ns": "v60", "id": 50}] if dog.get("state_topic") else [])
+        for u in units:
+            if "robot_state" in topics and dog.get("state_topic"):
+                self.subs.append(self.create_subscription(
+                    get_message(topics["robot_state"]["type"]), dog["state_topic"].format(ns=u["ns"], id=u["id"]),
+                    lambda m, d=u["id"]: self.on_dog(d, m), qos_of(topics["robot_state"])))
+            if dog.get("current_topic"):
+                self.subs.append(self.create_subscription(
+                    get_message(topics["assigned"]["type"]), dog["current_topic"].format(ns=u["ns"], id=u["id"]),
+                    lambda m, d=u["id"]: self.emit({"kind": "dog_assigned", "dog": d, "msg": message_to_ordereddict(m)}),
+                    qos_of(topics["assigned"])))
         self.create_timer(0.02, self.poll)
         self.emit({"kind": "ready", "vehicles": ids, "px4": with_px4})
 
@@ -92,12 +102,12 @@ class Bridge(Node):
             return
         self.emit({"kind": kind, "uav": vid, "msg": message_to_ordereddict(msg)})
 
-    def on_dog(self, msg):
+    def on_dog(self, dog_id, msg):
         now = time.time()
-        if now - self.last_pos.get("dog", 0.0) < 0.2:
+        if now - self.last_pos.get(("dog", dog_id), 0.0) < 0.2:
             return
-        self.last_pos["dog"] = now
-        self.emit({"kind": "dog", "x": msg.position.x, "y": msg.position.y})
+        self.last_pos[("dog", dog_id)] = now
+        self.emit({"kind": "dog", "dog": dog_id, "x": msg.position.x, "y": msg.position.y})
 
     def publisher(self, topic, type_name, spec):
         key = (topic, type_name)

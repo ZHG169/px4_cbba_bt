@@ -314,7 +314,8 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
    懸停高度：原本用起飛完成那一刻的高度當待命點（實測停在 4.71 m），10/17 改成待命點的高度一律是巡檢高度（`UavFlight::atAltitude`，
    被接管後切回也一樣：水平留在原地、回到巡檢高度）。`cbba_uav.sh` 的預設執行者 10/17 改成 `task_manager`。SITL、單元測試通過。
 2. 殘留的 Gazebo 伺服器會不理 SIGTERM（itest 已改成 SIGKILL 後備、`px4_sitl.sh` 會提示 `pkill -9`）。
-3. 第 5 週：`resend_gap` 開成 cbba_node 參數、量 1.0／0.5／0.3 s；30% 再量 100 次。
+3. 第 5 週：`resend_gap` 開成 cbba_node 參數、量 1.0／0.5／0.3 s。30% 掉包 100 次 10/17 量完：98%、中位數 0.60 s、P90 0.75 s、
+   重複 0、mesh 40 kB/s（`docker/itest/out/20261017_230044_loss`）；2 次未收斂（某個任務 10 s 沒人拿著，做完別的才接）原因待追。
 4. 真的 V60：假狗（`fake_dog.py`）已經完成「發布地面任務 → 狗競標 → 走過去 → 處理完」；巡檢中被火警搶占（狗有自己的巡檢）
    還沒在 SITL 跑；等伯宇換成 main（協定版本 2）。
 5. session 層、認證；新版 CBBA 的其他 constraints；多跳腳本、實機 mesh、Jetson、chrony、實體相機、能量模型校正、itest ssh 版。
@@ -367,6 +368,30 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
 - 2026-10-17（續 2）：SITL 驗證接管整串（被接管 → PREEMPTED_BY_MANUAL、5 s → 切回重新得標完成；懸停補爬到 5.0 m；接管 40 s 時孤兒任務
   警告、切回解除）。修兩個顯示問題：node 層 `abortNow()` 清掉 kick 留下的中斷延遲起點（閒置開跑的任務被中止時印出 6350 ms 這種假延遲，
   狗端骨架也有同樣問題）；骨架副本的 `printReport` 沒列出的結束原因改印「中止（原因）」，MISSION_TIMEOUT 才是「逾時中止」。
+- 2026-10-19：Gazebo 視角說明 `docs/gazebo_view_guide.md`；demo_site 錄影鏡頭拉高到 35 m、場景加地面網格（`gen_patrol_site.py` 的 `GRID`，
+  錄影看得到；視窗的 GridConfig 錄不到）。`cbba_overrun` 的 SITL：一般懸停誤差平均 0.1 m、到達時最多衝過 0.46 m；uav1 在 G1 看起來偏 2 m
+  是移到火點上空監控（設計如此）。**修待命讓路的範圍**：原本執行中的鄰機在 `cbf.influence_radius`（demo 12 m）內就停下，uav2 回起飛點
+  途中停了 12 s；改成 2 × `cbf.yield_radius`（4 m），`test_skeleton` 加 1 項。新增手動測試 `docs/failure_takeover_tests.md`
+  （地面端 A1～A7：gcs 兩隻假狗、`docker/scripts/fake_robot_state.py`；無人機端 B1～B5），還沒跑。
+  **待命時也看火**（`UavFlight::loiter` 的 `idleFire`，參數 `fire_task.idle_watch_tag` 101、0 = 不看）：`f R1` 的 SITL 裡火生成得太晚，
+  飛 G3 的那台出發時沒看到，回程飛回起飛點時清楚看到（16/16）卻不理（原本只有 NavigateTo 看火）→ 待命看到新火點也發布地面任務、
+  到火點上空監控、結束後回到待命；監控中被派任務時 `leaveHold` 結束監控。`test_skeleton` 加 3 項（37 項）。
+  動畫 `animate_demo.py` 改全程 1 倍速（原本沒事件時 3 倍速）、電量 0～100%；錄影鏡頭 150 m＋視角 0.389 rad（35 m 時透視視差讓無人機
+  看起來偏 1 m）；itest D5 等停好（0.3 m 內，最多 5 s）再記位置。
+  itest D4：先發現火的是別台（例如待命時看到）時，改成檢查發現的那台監控到狗處理完。itest demo 加 **`demo_cameras.mp4`**：
+  sim 容器的 `docker/itest/record_cameras.py` 錄 `/uavN/camera/image_raw`（每秒 5 張 JPEG，牆上時間當檔名），結束後
+  `compose_cameras.py` 照 gazebo.mp4 的開始、結束時間拼成三台直排，主機 ffmpeg 和 gazebo.mp4 左右並排（`--no-record` 時不錄）。
+  懸停：`docker/itest/hover_error.py` 量出**沒有衝過頭**（0.00～0.01 m）、穩定後 0.07～0.10 m，問題是 `reach_tolerance` 0.5 m 就算到達，
+  懸停的前 1.2～1.5 s 還在靠近 → `reach_tolerance` 0.25；`brake_accel` 試過 0.15 沒差、改回 0.2；`hold_radius` 0.2（要 < reach_tolerance）。
+- 2026-10-20：`AirRecon` 為了盯火離開巡檢點（火點離巡檢點 > reach_tolerance）時，監控結束（狗處理完或 monitor_timeout）後
+  **先飛回巡檢點補完剩下的停留時間再回報完成**（`cbba_overrun` 裡 uav1 在 G1 只停 1 s 就去盯 R4，狗處理完直接回報 G1 完成）；
+  `test_skeleton` 加 `FireBesidePatrolPointReturnsToFinishHover`（38 項）。`demo_cameras.mp4` 在 `cbba_overrun` 合成成功。
+  公式 PDF：`docs/cbba_cbf_formulas.html` → `docs/reports/cbba_cbf_formulas_20261019.pdf`（Chrome headless 轉）。
+  `animate_demo.py`：任務名稱改成先認場景的點（G1 旁 2 m 起火時原本叫「F_R4 fire」，看不出 G1 完成）、火點任務要在 0.5 m 內；
+  發現火的事件依資料寫「at <點>／en route to <點>／while idle」（原本照模式猜，懸停時看到也寫 en route）。
+  itest demo 的假狗改成 **3 隻**（`config.json` 的 `dog.units`：v60／50 (−4, 0)、v60b／51 (10, 6)、v60c／52 (−18, −8)），
+  ros_bridge 記每隻的位置（`dog` 帶機號）和 `current_task`（`dog_assigned`），D3 列出哪隻狗處理；2D 動畫無人機用四旋翼圖示＋`uavN`、
+  狗用四足圖示＋`dogN`，事件加「dogN <- ground task」；`demo_cameras.mp4` 縮成總寬 1280（Gazebo 1024 × 576＋相機 256 × 576）。
 
 ## C/C++ 格式
 

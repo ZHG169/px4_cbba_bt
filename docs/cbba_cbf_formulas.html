@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>CBBA 出價與 CBF 避碰公式</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 16mm 15mm; }
+  body { font-family: "Noto Sans CJK TC", "Noto Sans CJK SC", sans-serif; font-size: 10pt; line-height: 1.55;
+         color: #1b1f24; }
+  h1 { font-size: 18pt; margin: 0 0 2mm 0; }
+  h2 { font-size: 13.5pt; margin: 7mm 0 2mm 0; padding-bottom: 1mm; border-bottom: 1.5px solid #2a5d8f; color: #1f4e79; }
+  h3 { font-size: 11pt; margin: 5mm 0 1.5mm 0; color: #1f4e79; }
+  h2, h3 { page-break-after: avoid; break-after: avoid; }
+  p { margin: 1.5mm 0; }
+  .meta { color: #555; font-size: 9pt; margin-bottom: 4mm; }
+  .eq { font-family: "Noto Serif CJK TC", "Times New Roman", serif; font-size: 11.5pt; background: #f3f6fa;
+        border-left: 3px solid #2a5d8f; padding: 2.2mm 4mm; margin: 2mm 0; page-break-inside: avoid; }
+  .eq .n { float: right; color: #2a5d8f; font-family: "Noto Sans CJK TC", sans-serif; font-size: 9pt; }
+  i { font-family: "Times New Roman", "Noto Serif CJK TC", serif; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0 3mm 0; font-size: 9pt; page-break-inside: avoid; }
+  th, td { border: 1px solid #c8d1dc; padding: 1.2mm 2mm; vertical-align: top; }
+  th { background: #e8eef5; text-align: left; }
+  code { font-family: "Noto Sans Mono CJK TC", monospace; font-size: 8.6pt; background: #f1f1f1; padding: 0 1mm; }
+  .note { font-size: 9pt; color: #444; }
+  .box { border: 1px solid #c8d1dc; border-radius: 2mm; padding: 2mm 4mm; margin: 2mm 0; page-break-inside: avoid; }
+  .pb { page-break-before: always; }
+  ol, ul { margin: 1mm 0 1mm 6mm; padding-left: 4mm; }
+  li { margin: 0.6mm 0; }
+</style>
+</head>
+<body>
+
+<h1>CBBA 出價與 CBF 避碰公式</h1>
+<div class="meta">CBBA_BT 無人機端 · 2026-10-19 · 依目前程式整理（<code>cbba_core/src/scoring.cpp</code>、<code>energy_model.cpp</code>、
+<code>cbba_agent.cpp</code>、<code>uav_px4_bt/src/cbf.cpp</code>、<code>motion.cpp</code>）。設計理由見
+<code>cbba_core/doc/formula/formula_design.md</code>，參數見 <code>cbba_core/doc/parameters.md</code>、<code>uav_px4_bt/doc/parameters.md</code>。</div>
+
+<div class="box">
+<b>兩套公式各管一層，互不影響：</b>
+<b>CBBA</b>（任務分配）決定「哪台去哪個任務、什麼順序」，各機用出價分數競標、經 UDP 協定版本 2 達成共識；
+<b>CBF</b>（避碰）在飛行層每 50 ms 修正速度命令，保證無人機之間的水平距離，不改變任務分配。
+</div>
+
+<h2>一、符號</h2>
+<table>
+<tr><th style="width:22%">符號</th><th>意義</th><th style="width:28%">程式／參數</th></tr>
+<tr><td><i>i</i>、<i>j</i></td><td>載具 <i>i</i>、任務 <i>j</i></td><td></td></tr>
+<tr><td><i>p<sub>i</sub></i></td><td>載具 <i>i</i> 的路徑（依執行順序的任務序列）</td><td><code>path_</code></td></tr>
+<tr><td><i>x</i><sub><i>j</i></sub>、<i>x</i><sub>home</sub></td><td>任務 <i>j</i> 的位置、返航點（第一筆 robot_state 的位置）</td><td>map ENU（m）</td></tr>
+<tr><td><i>B<sub>i</sub></i></td><td>目前電量（%）</td><td><code>robot_state.battery</code></td></tr>
+<tr><td><i>λ<sub>a</sub></i></td><td>安全存量：做完並返航後至少要剩的電量</td><td><code>safety_reserve</code> 20 %</td></tr>
+<tr><td><i>E<sub>pc</sub></i>、<i>E<sub>h</sub></i></td><td>每公尺耗能、懸停每秒耗能</td><td><code>energy_per_meter</code>、<code>hover_energy_per_sec</code></td></tr>
+<tr><td><i>v</i></td><td>規劃速度 = 巡航速度 × 餘裕</td><td><code>cruise_speed</code> × <code>speed_margin</code>（0.8）</td></tr>
+<tr><td><i>d<sub>j</sub></i></td><td>任務 <i>j</i> 的現場執行時間</td><td><code>duration_sec</code></td></tr>
+<tr><td><i>t</i><sup>c</sup><sub><i>j</i></sub>、<i>D<sub>j</sub></i></td><td>任務建立時刻、期限（軟限制，從建立起算）</td><td><code>created</code>、<code>deadline_sec</code></td></tr>
+<tr><td>value<sub><i>j</i></sub></td><td>任務價值（分數上限）</td><td>巡檢 80、火警 100</td></tr>
+<tr><td><i>w</i>、<i>c</i><sub>ref</sub></td><td>電池權重、成本轉分數的基準</td><td><code>battery_weight</code> 1.0、<code>cost_ref</code> 50</td></tr>
+<tr><td><i>p<sub>ij</sub></i>、<i>f<sub>ij</sub></i></td><td>本機估計的成功率、這台對任務 <i>j</i> 的 TRANSIENT 失敗次數</td><td><code>Task::success_prob</code>、<code>fail_count_</code></td></tr>
+<tr><td><i>y<sub>j</sub></i>、<i>z<sub>j</sub></i></td><td>已知的最高出價、得標者（0 = 無人）</td><td><code>y_</code>、<code>z_</code></td></tr>
+</table>
+
+<h2>二、CBBA 出價（每個插入位置都算一次）</h2>
+
+<h3>① 路徑耗能（含返航）</h3>
+<div class="eq"><span class="n">(1)</span>
+<i>E</i><sub>path</sub> = Σ<sub><i>j</i>∈<i>p<sub>i</sub></i></sub> ( ‖<i>x</i><sub><i>j</i>−1</sub> − <i>x<sub>j</sub></i>‖ · <i>E<sub>pc</sub></i> + <i>d<sub>j</sub></i> · <i>E<sub>h</sub></i> )
+ + ‖<i>x</i><sub>last</sub> − <i>x</i><sub>home</sub>‖ · <i>E<sub>pc</sub></i></div>
+<p class="note">線性模型。SITL 對齊 PX4 的模擬電池（依時間線性下降）：<i>E<sub>h</sub></i> = 100 / SIM_BAT_DRAIN（% / s），<i>E<sub>pc</sub></i> = <i>E<sub>h</sub></i> / <i>v</i><sub>cruise</sub>（<code>cbba_uav.sh</code> 自動算；續航 900 s、5 m/s 時 0.111 %/s、0.022 %/m）。狗是佔位值 0.05 %/s、0.1 %/m。</p>
+
+<h3>② 可行條件（硬限制）</h3>
+<div class="eq"><span class="n">(2)</span><i>B<sub>i</sub></i> − <i>E</i><sub>path</sub> ≥ <i>λ<sub>a</sub></i>　　不成立 → 這個插入位置不可行（分數 0）</div>
+<p class="note">另外：能力相容（無人機只接 AIR_RECON，狗只接 GROUND_INTERVENTION／PATROL）；任務要是 OPEN、沒被自己排除、沒被別台鎖定（已正式指派）。</p>
+
+<h3>③ 時空成本（Velhal 2022）</h3>
+<div class="eq"><span class="n">(3)</span>
+<i>t</i><sup>arr</sup><sub><i>j</i></sub> = <i>t</i><sup>done</sup><sub><i>j</i>−1</sub> + ‖<i>x</i><sub><i>j</i>−1</sub> − <i>x<sub>j</sub></i>‖ / <i>v</i>,
+<i>t</i><sup>done</sup><sub><i>j</i></sub> = <i>t</i><sup>arr</sup><sub><i>j</i></sub> + <i>d<sub>j</sub></i><br>
+<i>R<sub>j</sub></i> = max( <i>t</i><sup>c</sup><sub><i>j</i></sub> + <i>D<sub>j</sub></i> − <i>t</i><sub>now</sub>, 1 s ),
+<i>L<sub>s,j</sub></i> = ‖<i>x</i><sub><i>j</i>−1</sub> − <i>x<sub>j</sub></i>‖,
+<i>L<sub>t,j</sub></i> = <i>t</i><sup>arr</sup><sub><i>j</i></sub> / <i>R<sub>j</sub></i><br>
+<i>C</i><sub>ST</sub> = Σ<sub><i>j</i>∈<i>p<sub>i</sub></i></sub> <i>L<sub>s,j</sub></i> · <i>L<sub>t,j</sub></i></div>
+<p class="note">距離 × 時間緊迫度（<i>L<sub>t</sub></i> &gt; 1 表示到達時已過期限，仍給正分但較低）。執行中的第一個任務：有 BT 的剩餘時間時完成時間用它（目前 BT 不回報，照公式算）。</p>
+
+<h3>④ 總成本（電池加權）</h3>
+<div class="eq"><span class="n">(4)</span>
+<i>C</i><sub>total</sub> = <i>C</i><sub>ST</sub> × ( 1 + <i>w</i> · <i>E</i><sub>path</sub> / ( <i>B<sub>i</sub></i> − <i>λ<sub>a</sub></i> ) )</div>
+<p class="note">分母用「可用電量」：電量少的那台，同樣的耗能成本放大較多 → 任務往電量多的集中。<i>w</i> = 1：用完可用電量時成本變兩倍。</p>
+
+<h3>⑤ 出價分數（邊際成本）</h3>
+<div class="eq"><span class="n">(5)</span>
+Δ<i>C<sub>ij</sub></i> = min<sub>插入位置</sub> [ <i>C</i><sub>total</sub>(<i>p<sub>i</sub></i> ⊕ <i>j</i>) − <i>C</i><sub>total</sub>(<i>p<sub>i</sub></i>) ]<br>
+score<sub><i>ij</i></sub> = <i>p<sub>ij</sub></i> · value<sub><i>j</i></sub> / ( 1 + max(Δ<i>C<sub>ij</sub></i>, 0) / <i>c</i><sub>ref</sub> )</div>
+<p class="note">成本 0 時分數 = value（上限）；Δ<i>C</i> = <i>c</i><sub>ref</sub>（50）時分數減半。搶占（插在最前面、取代執行中較低優先級的任務）時，比較「拿掉被搶占的任務之後」的插入前後成本（被搶占的會交回重新競標）。</p>
+
+<h3>⑥ 失敗過的任務：成功率（2026-10-17）</h3>
+<div class="eq"><span class="n">(6)</span>
+<i>p<sub>ij</sub></i> = 1 / ( 1 + <i>f<sub>ij</sub></i> )　（<i>f<sub>ij</sub></i>：這台對任務 <i>j</i> 回報 TRANSIENT 的次數；只在本機、不廣播）<br>
+<i>t</i><sup>arr</sup><sub><i>j</i>,eff</sub> = <i>t</i><sup>arr</sup><sub><i>j</i></sub> + ( (1 − <i>p<sub>ij</sub></i>) / <i>p<sub>ij</sub></i> ) · ( <i>L<sub>s,j</sub></i> / <i>v</i> + <i>d<sub>j</sub></i> )</div>
+<p class="note">期望價值 <i>p</i>·value（式 5）＋期望到達時間（成功前預期失敗 (1−<i>p</i>)/<i>p</i> 次，每次「前往＋執行」），路徑後面的任務一起延後。<i>p</i> = 1 時還原成原公式。
+例：20 m、4 m/s、執行 10 s、不算電池，失敗一次：火警（value 80、剩 30 s）75.0 → 31.6；巡檢（value 40、剩 600 s）39.9 → 19.7。</p>
+
+<table>
+<tr><th style="width:18%">TaskResult.reason</th><th style="width:30%">這台多久不再對它出價</th><th>失敗次數 <i>f</i></th><th>誰會回報</th></tr>
+<tr><td>1 PERMANENT</td><td>永久</td><td>不變</td><td>地圖外、沒路</td></tr>
+<tr><td>2 TRANSIENT</td><td><code>failure_exclude_sec</code> 60 s</td><td><b>+1</b>（之後出價打折）</td><td>卡住、逾時、NAV_NO_ACK</td></tr>
+<tr><td>3 PREEMPTED</td><td><code>preempt_exclude_sec</code> 5 s</td><td>不變</td><td>平板接管、無人機被遙控器／地面站接管</td></tr>
+<tr><td>4 STOPPED</td><td>60 s</td><td>不變</td><td>低電量返航、降落、PX4 失效保護、急停</td></tr>
+</table>
+
+<h2 class="pb">三、CBBA 共識（每台各自執行、非同步）</h2>
+
+<h3>Bundle 建立（貪婪）</h3>
+<ol>
+<li>對每個可出價的任務 <i>j</i>，算最佳插入位置與 score<sub><i>ij</i></sub>（式 1～6）。</li>
+<li>出價 bid<sub><i>ij</i></sub> = min( score<sub><i>ij</i></sub>, 手上任務的最低分 )（bid warping：保證出價隨 bundle 單調不增，CBBA 收斂的條件）；搶占時不受這個上限。</li>
+<li>能出價的條件：<i>z<sub>j</sub></i> 是無人或自己，或 bid<sub><i>ij</i></sub> &gt; <i>y<sub>j</sub></i> + ε（ε = 10<sup>−3</sup>），或平手且自己的機號較小。</li>
+<li>挑實際分數最高的加入 bundle、插進路徑；重複直到沒有可加的或 bundle 滿（<code>max_bundle</code> 5）。</li>
+</ol>
+
+<h3>共識消解（Choi 2009 的 17 條規則）</h3>
+<p>收到鄰居 <i>k</i> 的（<i>y<sub>kj</sub></i>, <i>z<sub>kj</sub></i>, <i>s<sub>k</sub></i>）後，依「雙方各認為誰得標」與時間戳 <i>s</i>（各機最後一次取得某載具資訊的時間）決定 <b>更新／重設／不變</b>；
+自己的任務被拿走時，<b>連鎖退標</b>：它和之後加入 bundle 的任務都釋放，再重新出價。案例表在 <code>cbba_rule_cases.csv</code>。</p>
+
+<h3>和原始 CBBA 不同的地方（本專案）</h3>
+<table>
+<tr><th style="width:24%">項目</th><th>做法</th></tr>
+<tr><td>非同步</td><td>每 200 ms＋變動時廣播 CBBA_STATE（UDP 協定版本 2，每筆帶 task_id）；沒有同步的「步」</td></tr>
+<tr><td>正式指派</td><td>同一任務連續 <code>assign_hold</code> 0.4 s 排在路徑第一位才發 <code>current_task</code>；每次指派一個全隊共用的版本號</td></tr>
+<tr><td>鎖定</td><td>別台已正式指派（保留／執行中）的任務不出價；持有者失聯先鎖著，火警 10 s、巡檢 30 s 後才重新競標</td></tr>
+<tr><td>參與出價</td><td><code>robot_state</code> 1.5 s 內有更新且 mode = AUTO（無人機的 mode 由正式 BT 決定）；不參與時手上的任務立刻釋放</td></tr>
+<tr><td>重新評估</td><td>每秒用目前位置、電量重算手上任務的分數，變動超過 10 %（<code>rebid_threshold</code>）才更新；做不完（式 2）就釋放</td></tr>
+<tr><td>搶占</td><td>優先級：火警（GROUND_INTERVENTION）＞ 巡檢；同級不搶占；執行中的火警之後不排第二個火警</td></tr>
+<tr><td>孤兒任務</td><td>任務開著但 <code>orphan_warn_sec</code> 30 s 沒人得標 → 警告＋<code>task_orphaned</code>（只通知）</td></tr>
+</table>
+
+<h3>參數（全隊要一樣的標 ★）</h3>
+<table>
+<tr><th>參數</th><th>值</th><th>參數</th><th>值</th></tr>
+<tr><td>★ <code>cost_ref</code></td><td>50</td><td><code>speed_margin</code></td><td>0.8</td></tr>
+<tr><td>★ <code>battery_weight</code></td><td>1.0（建議 0～2）</td><td><code>min_deadline</code></td><td>1 s</td></tr>
+<tr><td>★ <code>max_bundle</code></td><td>5</td><td><code>safety_reserve</code></td><td>20 %</td></tr>
+<tr><td><code>assign_hold</code></td><td>0.4 s</td><td><code>failure_exclude_sec</code></td><td>60 s</td></tr>
+<tr><td><code>preempt_exclude_sec</code></td><td>5 s</td><td><code>max_failures</code></td><td>0（不啟用）</td></tr>
+<tr><td>★ <code>lost_timeout</code></td><td>1.5 s</td><td>★ <code>takeover_fire</code>／<code>takeover_patrol</code></td><td>10 s／30 s</td></tr>
+</table>
+
+<h2 class="pb">四、CBF 避碰（無人機飛行層，每 50 ms）</h2>
+
+<p>輸入：自己的位置 <i>p</i>、目標 <i>g</i>；鄰機 <i>j</i> 的位置 <i>p<sub>j</sub></i>、速度 <i>v<sub>j</sub></i>、是否執行任務中（BT 的位置廣播，UDP 14601、10 Hz；
+位置用速度外推 age 秒，最多 <code>max_extrapolation</code> 0.5 s；超過 <code>neighbor_timeout</code> 1 s 沒更新的不算）。輸出：速度命令 <i>u</i>（map ENU）。</p>
+
+<h3>① 名目速度（直線朝目標）</h3>
+<div class="eq"><span class="n">(7)</span>
+<i>u</i><sub>nom</sub> = ( <i>g</i> − <i>p</i> ) / ‖<i>g</i> − <i>p</i>‖ · min( <i>V</i>, <i>k</i><sub>att</sub> ‖<i>g</i> − <i>p</i>‖, √(2 <i>a</i><sub>b</sub> ‖<i>g</i> − <i>p</i>‖) )<br>
+垂直分量另外限制在 √(2 <i>a</i><sub>bv</sub> |Δ<i>z</i>|)（整個向量等比例縮小）</div>
+<p class="note"><i>V</i> = <code>cruise_speed</code>；<i>k</i><sub>att</sub> = <code>cbf.k_att</code> 1.0 1/s；<i>a</i><sub>b</sub> = <code>cbf.brake_accel</code> 0.2 m/s²；<i>a</i><sub>bv</sub> = <code>cbf.brake_vertical_accel</code> 0.1 m/s²。</p>
+
+<h3>② 障礙函數與約束（只看水平）</h3>
+<div class="eq"><span class="n">(8)</span>
+<i>h<sub>j</sub></i> = ‖<i>p</i> − <i>p<sub>j</sub></i>‖² − <i>r</i>²　（<i>h</i> ≥ 0 = 安全）<br>
+要求　<i>ḣ<sub>j</sub></i> ≥ −<i>ρ</i> <i>γ</i> <i>h<sub>j</sub></i>，　<i>ḣ<sub>j</sub></i> = 2 (<i>p</i> − <i>p<sub>j</sub></i>) · (<i>u</i> − <i>v<sub>j</sub></i>)<br>
+⇒　<i>a<sub>j</sub></i> · <i>u</i> ≥ <i>b<sub>j</sub></i>，　<i>a<sub>j</sub></i> = 2 (<i>p</i> − <i>p<sub>j</sub></i>)，　<i>b<sub>j</sub></i> = <i>λ</i> · <i>a<sub>j</sub></i> · <i>v<sub>j</sub></i> − <i>ρ</i> <i>γ</i> <i>h<sub>j</sub></i></div>
+<p class="note">只對 <code>cbf.influence_radius</code> 內的鄰機加約束；只限制「往鄰機靠近」的速度，平行飛、遠離不受影響；懸停（<i>u</i> = 0）在 <i>h</i> ≥ 0 時已滿足，不會被推。</p>
+
+<table>
+<tr><th style="width:38%">情況（兩台都跑同一套，分攤責任）</th><th>λ</th><th>ρ</th><th><i>r</i></th></tr>
+<tr><td>同樣狀態（都執行中，或都待命）</td><td>0</td><td>0.5</td><td><code>safe_radius</code> 1.0 m</td></tr>
+<tr><td>自己待命、鄰機執行中（讓路：把它當不會讓的障礙物）</td><td>1</td><td>1</td><td><code>yield_radius</code> 2.0 m</td></tr>
+<tr><td>自己執行中、鄰機待命</td><td>0</td><td>0.5</td><td><code>safe_radius</code> 1.0 m</td></tr>
+</table>
+
+<h3>③ 往右繞、求解</h3>
+<div class="eq"><span class="n">(9)</span>
+<i>u</i><sub>nom</sub>′ = <i>u</i><sub>nom</sub> + <i>k</i><sub>tan</sub> · ( <i>b<sub>j</sub></i> − <i>a<sub>j</sub></i>·<i>u</i><sub>nom</sub> ) / ‖<i>a<sub>j</sub></i>‖ · <i>e</i><sub>right</sub>　（只對被違反的約束）<br>
+<i>u</i> = argmin<sub><i>u</i></sub> ‖<i>u</i> − <i>u</i><sub>nom</sub>′‖²　s.t.　<i>a<sub>j</sub></i> · <i>u</i> ≥ <i>b<sub>j</sub></i>，∀<i>j</i>　（水平 2D，Dykstra 交替投影）</div>
+<p class="note"><i>k</i><sub>tan</sub> = <code>cbf.k_tan</code> 0.8：正對面飛來時單純的 CBF 只會減速到停（死結），全隊都往自己的右手邊繞就會錯開。
+垂直速度用名目值、限制在 <code>max_vertical_speed</code>；總和限制在 <i>V</i>。</p>
+
+<h3>④ 推導量（ρ = 0.5、單一鄰機）</h3>
+<table>
+<tr><th style="width:40%">量</th><th>公式</th></tr>
+<tr><td>距離 <i>d</i> 時允許往鄰機靠近的速度</td><td><i>c</i>(<i>d</i>) = <i>ρ γ</i> (<i>d</i>² − <i>r</i>²) / (2<i>d</i>)</td></tr>
+<tr><td>γ 的上限（剎得住）</td><td><i>γ</i> ≤ 2 · <code>motion.max_accel</code> / (<i>ρ</i> · <i>V</i>)</td></tr>
+<tr><td>influence_radius 的下限（一進範圍不急剎）</td><td><i>R</i> ≥ ( <i>V</i> + √(<i>V</i>² + (<i>ρ γ r</i>)²) ) / (<i>ρ γ</i>)　→ <i>V</i> = 0.5 m/s：2.4 m（yaml 3 m）；<i>V</i> = 3 m/s：12.1 m（itest demo 12 m）</td></tr>
+<tr><td>讓路時退到的距離（鄰機以 <i>v</i> 飛過來）</td><td><i>d</i>² − 2<i>d v</i> / <i>γ</i> − <code>yield_radius</code>² = 0 的正根</td></tr>
+</table>
+
+<h3>⑤ 運動平滑層 → PX4</h3>
+<p><i>u</i> 不直接給 PX4：參考速度往 <i>u</i> 靠近，水平加速度 ≤ <code>motion.max_accel</code> 1.5 m/s²、垂直 ≤ 1.0 m/s²；參考位置最多領先實際位置
+<code>motion.leash</code> 1.5 m；離目標 &lt; <code>motion.hold_radius</code> 0.2 m 且沒有鄰機要閃時直接交給 PX4 位置保持。輸出位置＋速度前饋（offboard TrajectorySetpoint）。
+到達判定：離目標 &lt; <code>reach_tolerance</code> 0.25 m。</p>
+
+<h3>⑥ 參數（<code>uav_px4_bt/config/uav_bt.yaml</code>）</h3>
+<table>
+<tr><th>參數</th><th>yaml</th><th>參數</th><th>yaml</th></tr>
+<tr><td><code>cbf.safe_radius</code></td><td>1.0 m</td><td><code>cbf.gamma</code></td><td>1.0 1/s</td></tr>
+<tr><td><code>cbf.influence_radius</code></td><td>3.0 m（demo 12 m）</td><td><code>cbf.yield_radius</code></td><td>2.0 m</td></tr>
+<tr><td><code>cbf.k_tan</code></td><td>0.8</td><td><code>cbf.k_att</code></td><td>1.0 1/s</td></tr>
+<tr><td><code>cbf.brake_accel</code></td><td>0.2 m/s²</td><td><code>cbf.brake_vertical_accel</code></td><td>0.1 m/s²</td></tr>
+<tr><td><code>motion.max_accel</code></td><td>1.5 m/s²</td><td><code>reach_tolerance</code></td><td>0.25 m</td></tr>
+</table>
+<p class="note">待命時停下讓路的範圍：執行中的鄰機在 2 × <code>yield_radius</code>（4 m）內才停在被推開的位置，更遠的照常飛、由 CBF 繞開。
+限制：只看水平、不處理靜態障礙物；鄰機資料靠位置廣播，掉包或延遲時安全距離不保證；不跑這套的鄰機（PX4 自己 RTL、手動）也被當成會分攤一半。</p>
+
+</body>
+</html>
