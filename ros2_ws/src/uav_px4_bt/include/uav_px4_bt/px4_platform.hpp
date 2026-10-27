@@ -57,7 +57,8 @@ public:
   void beginTick();
   void endTick();
 
-  std::uint16_t agentId() const {return agent_id_;}
+  std::uint16_t agentId() const override {return agent_id_;}
+  void setTaskHover(bool hover) override {task_hover_ = hover;}
   double altitude() const {return altitude_;}
   const std::string & ns() const {return ns_;}
   const std::string & fmu() const {return fmu_;}
@@ -139,6 +140,7 @@ private:
   bool commanded_{false};
   bool offboard_{true};
   ExecStatus exec_;
+  bool task_hover_{false};           // 位置廣播的 task_hover（UavContext::moveTo 每個週期設）
 };
 
 }  // namespace uav_px4_bt

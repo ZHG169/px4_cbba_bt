@@ -43,6 +43,18 @@ public:
     const Vec3 & goal, bool avoiding);
 
   void reset() {started_ = false;}
+  // 下一次 step 會從哪個參考速度起算（長時間沒呼叫、剛開始時是實際速度），二階 CBF 用（2026-10-24）
+  Vec3 referenceVelocity(double now, const Vec3 & velocity) const
+  {
+    const double dt = now - last_;
+    return (!started_ || dt > params_.reset_gap || dt < 0.0) ? velocity : ref_vel_;
+  }
+  // 距離上一次 step 多久（沒開始或太久時回傳 fallback）
+  double sinceLast(double now, double fallback) const
+  {
+    const double dt = now - last_;
+    return (!started_ || dt > params_.reset_gap || dt <= 0.0) ? fallback : dt;
+  }
   const MotionParams & params() const {return params_;}
 
 private:

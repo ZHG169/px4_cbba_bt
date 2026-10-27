@@ -43,6 +43,31 @@ TEST(FlightBeacon, RoundTrip)
   EXPECT_FLOAT_EQ(static_cast<float>(d->velocity.z), 0.5f);
 }
 
+TEST(FlightBeacon, TaskHoverBit)
+{
+  // 任務中懸停放在 flags bit 3（2026-10-24）：大小、版本不變；舊封包（bit 3 = 0）讀成 false；鄰機表帶出去
+  Beacon b = make(2, 1, 1, 0.0);
+  b.busy = true;
+  b.task_hover = true;
+  auto bytes = encodeBeacon(b);
+  ASSERT_EQ(bytes.size(), kBeaconSize);
+  EXPECT_EQ(bytes[17] & 0x0F, 0x0F);       // flags：在空中、位置有效、執行中、任務中懸停
+  auto d = decodeBeacon(bytes.data(), bytes.size());
+  ASSERT_TRUE(d);
+  EXPECT_TRUE(d->task_hover);
+  bytes[17] &= static_cast<std::uint8_t>(~0x08);
+  d = decodeBeacon(bytes.data(), bytes.size());
+  ASSERT_TRUE(d);
+  EXPECT_FALSE(d->task_hover);
+  EXPECT_TRUE(d->busy);
+  bytes = encodeBeacon(b);
+  NeighborTable t(9);
+  ASSERT_TRUE(t.receive(bytes.data(), bytes.size(), 0.0));
+  const auto n = t.neighbors(0.1, 1.0);
+  ASSERT_EQ(n.size(), 1u);
+  EXPECT_TRUE(n[0].task_hover);
+}
+
 TEST(FlightBeacon, RejectsMalformed)
 {
   // 長度、magic、版本不對、sender = 0：丟掉（CBBA 的封包送到這個埠也不會被誤認）

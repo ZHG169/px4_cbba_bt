@@ -28,3 +28,5 @@ docker/itest/out/
 docs/handoff_uav_*/
 docs/messageImage_*.jpg
 ros2_ws/src/swarm_cbba/testdata_for_uav_2026-10-12/
+ros2_ws/src/world/
+CBBA 任務失敗排除與人工接管：實作說明.md

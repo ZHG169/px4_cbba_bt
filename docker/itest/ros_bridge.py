@@ -84,10 +84,12 @@ class Bridge(Node):
             if now - self.last_pos.get(vid, 0.0) < 0.2:
                 return
             self.last_pos[vid] = now
-            spacing = self.cfg["vehicles"]["spawn_spacing"]
-            # NED（以出生點為原點）→ map ENU，和 px4_state_bridge 相同
+            spacing = float(os.environ.get("UAV_SPAWN_SPACING", self.cfg["vehicles"]["spawn_spacing"]))
+            # NED（以出生點為原點）→ map ENU，和 px4_state_bridge 相同；出生原點由 itest 用 UAV_SPAWN_ORIGIN 給
+            # （2026-10-24 yard 的起降板在 (−40, −30)；原本當成 (0, 0)，位置整個偏 50 m）
+            ox, oy = (float(v) for v in os.environ.get("UAV_SPAWN_ORIGIN", "0,0").split(","))
             self.emit({"kind": "pos", "uav": vid,
-                       "x": msg.y, "y": (vid - 1) * spacing + msg.x, "z": -msg.z})
+                       "x": ox + msg.y, "y": oy + (vid - 1) * spacing + msg.x, "z": -msg.z})
             return
         if kind == "px4_battery":
             # 電量（2026-10-14，demo 動畫顯示）：每台最多 1 Hz；remaining 0～1，沒接上 / 不知道時不記

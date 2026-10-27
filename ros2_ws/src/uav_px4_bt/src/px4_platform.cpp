@@ -145,9 +145,17 @@ UavContextConfig Px4Platform::declareConfig(rclcpp::Node & node)
   cfg.cbf.influence_radius = node.declare_parameter<double>("cbf.influence_radius", cfg.cbf.influence_radius);
   cfg.cbf.yield_radius = node.declare_parameter<double>("cbf.yield_radius", cfg.cbf.yield_radius);
   cfg.cbf.k_tan = node.declare_parameter<double>("cbf.k_tan", cfg.cbf.k_tan);
+  cfg.cbf.ttc_horizon = node.declare_parameter<double>("cbf.ttc_horizon", cfg.cbf.ttc_horizon);
+  cfg.cbf.miss_clearance = node.declare_parameter<double>("cbf.miss_clearance", cfg.cbf.miss_clearance);
+  cfg.cbf.guard_radius = node.declare_parameter<double>("cbf.guard_radius", cfg.cbf.guard_radius);
+  cfg.cbf.yield_exit = node.declare_parameter<double>("cbf.yield_exit", cfg.cbf.yield_exit);
+  cfg.cbf.emergency_speed = node.declare_parameter<double>("cbf.emergency_speed", cfg.cbf.emergency_speed);
+  cfg.cbf.second_order = node.declare_parameter<bool>("cbf.second_order", cfg.cbf.second_order);
+  cfg.cbf.response_delay = node.declare_parameter<double>("cbf.response_delay", cfg.cbf.response_delay);
   cfg.cbf.neighbor_timeout = node.declare_parameter<double>("cbf.neighbor_timeout", cfg.cbf.neighbor_timeout);
   cfg.cbf.max_extrapolation = node.declare_parameter<double>("cbf.max_extrapolation", cfg.cbf.max_extrapolation);
   cfg.motion.max_accel = node.declare_parameter<double>("motion.max_accel", cfg.motion.max_accel);
+  cfg.cbf.accel_max = cfg.motion.max_accel;   // 二階 CBF 的加速度上限＝平滑層的（平滑層才不會再改掉 CBF 的結果）
   cfg.motion.max_vertical_accel = node.declare_parameter<double>("motion.max_vertical_accel",
       cfg.motion.max_vertical_accel);
   cfg.motion.leash = node.declare_parameter<double>("motion.leash", cfg.motion.leash);
@@ -330,6 +338,7 @@ void Px4Platform::sendBeacon()
   b.airborne = v.armed && !v.landed;
   b.position_valid = v.valid;
   b.busy = exec_.mode == ExecMode::NAVIGATING || exec_.mode == ExecMode::EXECUTING;
+  b.task_hover = b.busy && task_hover_;
   b.position = v.position;
   b.velocity = v.velocity;
   link_->send(encodeBeacon(b));

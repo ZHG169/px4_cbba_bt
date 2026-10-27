@@ -15,6 +15,7 @@
 | [`cbba_cbf_formulas.html`](cbba_cbf_formulas.html) → `reports/cbba_cbf_formulas_20261019.pdf` | 自己、隊友、老師 | **CBBA 出價與 CBF 避碰公式**：符號、出價（耗能、可行、時空成本、電池加權、邊際分數、失敗成功率）、共識、CBF（名目速度、障礙函數、分攤、往右繞、推導量）、參數 | 2026-10-19；改 HTML 後用 Chrome 重新轉 PDF |
 | [`failure_takeover_tests.md`](failure_takeover_tests.md) | 自己 | **任務失敗、平板接管、地面端的手動測試**：地面端（gcs，兩隻假狗）A1～A7、無人機端（itest demo）B1～B5，附結果紀錄表 | 2026-10-19 |
 | [`gazebo_view_guide.md`](gazebo_view_guide.md) | 自己 | **Gazebo 視角調整**：錄影鏡頭（`gen_patrol_site.py`）和視窗鏡頭（`px4_sitl.sh`）、pose 怎麼算、從視窗讀出鏡頭位置、錄一段確認 | 2026-10-19 |
+| [`cbf_nonlinear_report.html`](cbf_nonlinear_report.html) → `reports/cbf_nonlinear_control_20261025.pdf` | 自己、老師 | **無人機避碰（非線性控制觀點）**：系統模型、安全集合與 CBF、二階 CBF（剎車距離）、責任分配 ρ、CBF-QP、延遲餘量、路權＋VO 的監督式名目控制、參數、單元測試與 SITL 結果、限制；文獻依記憶整理，引用前要核對 | 2026-10-25；改 HTML 後用 Chrome 重新轉 PDF |
 | [`reports/`](reports/) | 對外 | 某一天的進度快照（PDF），不再修改 | 快照 |
 | [`archive/`](archive/) | 查歷史 | 已經做完或被取代的規劃 | 封存 |
 

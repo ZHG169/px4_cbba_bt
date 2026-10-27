@@ -16,7 +16,30 @@
     "ids": [1, 2, 3],
     "ns": "uav{id}",
     "spawn_spacing": 2.0,
-    "_說明": "要測的無人機；出生點 map (0, (id-1)*spawn_spacing)，和 docker/.env 的 UAV_SPAWN_SPACING 一致"
+    "_說明": "要測的無人機；出生點 map 出生原點 + (0, (id-1)*spawn_spacing)，spawn_spacing 和 docker/.env 的 UAV_SPAWN_SPACING 一致；出生原點預設 (0, 0)，場景要別的時寫在 worlds.<場景>.spawn_origin"
+  },
+
+  "worlds": {
+    "yard": {
+      "spawn_origin": [-40.0, -30.0],
+      "spawn_spacing": 5.0,
+      "altitude": 8.0,
+      "bat_drain": 1800,
+      "demo": {
+        "side_points": ["R5"],
+        "timeout": 900.0,
+        "timeout_min": 900.0,
+        "return_wait": 240.0,
+        "area": [-46.0, 46.0, -36.0, 36.0],
+        "keep_out": [
+          [-33.5, 13.5, 12.0, 18.0], [-33.5, 13.5, -3.0, 3.0], [-33.5, 13.5, -18.0, -12.0],
+          [26.5, 33.5, -18.0, -12.0], [-31.5, 31.5, -30.5, -25.5], [13.0, 37.0, 5.0, 19.0],
+          [-45.5, -30.5, 22.5, 33.5], [34.5, 46.0, 19.5, 38.5]
+        ]
+      },
+      "dog_start": {"v60": [-35.0, 7.5], "v60_1": [-35.0, -7.5], "v60_2": [-15.0, 25.0]},
+      "_說明": "伯宇的變電所場景（docker/gz/worlds/yard.sdf，2026-10-24；python3 docker/itest/itest.py demo --world yard）：起降板在 (−40, −30)，(0, 0) 是變壓器，所以出生原點 spawn_origin 改到起降板（itest 給 sim 的 px4_sitl.sh 和每台的 cbba_uav.sh 同一個 UAV_SPAWN_ORIGIN）；出生間隔 spawn_spacing 5 m（2026-10-24：原本 2 m，3 m/s 回起飛點時剎停要約 3.9 m，停機點太擠、互相讓不開；也給 UAV_SPAWN_SPACING）；巡檢高度 8 m（鋼構棚頂 5.15 m、儲槽 6 m、管架與控制室 4 m），全隊同一個高度。demo 的欄位蓋掉上面 demo 的同名欄位：side_points R5（起降板 → G2 航線旁）；area 圍牆內；keep_out 是障礙物的範圍 [x0, x1, y0, y1]（加 1.5 m 邊），隨機的任務點、火點不放在裡面（變壓器三排、紅色變壓器 TC6_fire、管架、鋼構棚、控制室、儲槽）。dog_start：假狗的出生點，照伯宇 README_WORLD.md 的三隻狗。場地大（起降板到 R1 約 72 m，0.5 m/s 單趟約 2.5 分鐘），所以 timeout 900 s、情境檔的時限至少 timeout_min 900 s、return_wait 240 s，模擬電池續航 bat_drain 1800 s（預設 900 s 時約 12 分鐘就降到 20% 返航；給 px4_sitl.sh 和 cbba_uav.sh 的 SIM_BAT_DRAIN）"
+    }
   },
 
   "topics": {
@@ -65,7 +88,7 @@
     "min_gap": 3.0,
     "interactive_timeout": 600.0,
     "fire_grace": 15.0,
-    "exec_args": "-p cbf.influence_radius:=12.0",
+    "exec_args": "",
     "fire_count": 1,
     "fire_after": 0.15,
     "fire_min_ahead": 8.0,
@@ -73,25 +96,25 @@
     "fire_offset": 0.6,
     "duration": 4.0,
     "start_delay": 6.0,
-    "timeout": 240.0,
-    "return_wait": 40.0,
-    "_說明": "展示（itest.py demo）：world 是展示用的小場景 demo_site；全部起飛完成後才啟動 cbba_node（和假狗），連上後再等 start_delay 秒。fire_mode point（週計畫，2026-10-13 起預設）：依種子挑 fire_points 的一個點起火（紅色方塊＋tag 101），那個點和 patrol 一起當巡檢任務（停留 duration 秒）；飛到的那台看到火 → 發布地面任務 → 懸停監控到假狗處理完 → 完成 → 全部回起飛點（等最多 return_wait 秒）。fire_mode route（10/12 的版本）：各台出發（飛了 fire_after 以上）後在某台前方航線 fire_along 比例處起火，看飛行途中能不能發現。點的座標在 docker/gz/worlds/<world>_points.csv。fire_mode side（2026-10-14，或 --fire-mode side）：一開始就在 side_points（R1 在 G3 航線旁）起火、不建成任務，飛過的那台路上看到 → 轉向火點上空監控 → 假狗處理完 → 回航線完成原任務。durations：個別點的停留時間，例如 {\"G1\": 20}（空的 = 全部用 duration；2026-10-15 起不特別延長 G1，要看 CBF 交會用 --scenario cbba_fire）。exec_args：展示時給 BT 的參數（--speed 3 時 CBF 的 influence_radius 要 ≥ (V + √(V² + (0.5 γ d_s)²)) / (0.5 γ) ≈ 12 m；yaml 的 3 m 是照 0.5 m/s 算的）。--scenario：自訂情境檔（docker/itest/scenarios/）。--interactive（2026-10-14）：起飛後在 terminal 手動插入任務點（t，生成藍色平台）、任務點＋起火（tf）、只起火（f），不給座標就在 area [x0, x1, y0, y1]（俯視錄影範圍內）隨機、離其他點 ≥ min_gap；q 之後做完才結束，最長 interactive_timeout 秒（模擬電池約 12 分鐘降到 20% 就返航，所以 600 s）；沒被發現的火在任務都做完後再等 fire_grace 秒就不等了"
+    "timeout": 480.0,
+    "return_wait": 120.0,
+    "_說明": "展示（itest.py demo）：world 是展示用的小場景 demo_site；全部起飛完成後才啟動 cbba_node（和假狗），連上後再等 start_delay 秒。fire_mode point（週計畫，2026-10-13 起預設）：依種子挑 fire_points 的一個點起火（紅色方塊＋tag 101），那個點和 patrol 一起當巡檢任務（停留 duration 秒）；飛到的那台看到火 → 發布地面任務 → 懸停監控到假狗處理完 → 完成 → 全部回起飛點（等最多 return_wait 秒）。fire_mode route（10/12 的版本）：各台出發（飛了 fire_after 以上）後在某台前方航線 fire_along 比例處起火，看飛行途中能不能發現。點的座標在 docker/gz/worlds/<world>_points.csv。fire_mode side（2026-10-14，或 --fire-mode side）：一開始就在 side_points（R1 在 G3 航線旁）起火、不建成任務，飛過的那台路上看到 → 轉向火點上空監控 → 假狗處理完 → 回航線完成原任務。durations：個別點的停留時間，例如 {\"G1\": 20}（空的 = 全部用 duration；2026-10-15 起不特別延長 G1，要看 CBF 交會用 --scenario cbba_fire）。exec_args：展示時給 BT 的參數（2026-10-23 起 --speed 預設 0.5，用 yaml 的 influence_radius 3 m 就好、這裡空著；調快時 influence_radius 要 ≥ (V + √(V² + (0.5 γ d_s)²)) / (0.5 γ)，例如 3 m/s → -p cbf.influence_radius:=12.0）。timeout、return_wait 是照 0.5 m/s 定的（240 → 480、40 → 120 s；模擬電池約 12 分鐘降到 20% 就返航）。--scenario：自訂情境檔（docker/itest/scenarios/）。--interactive（2026-10-14）：起飛後在 terminal 手動插入任務點（t，生成藍色平台）、任務點＋起火（tf）、只起火（f），不給座標就在 area [x0, x1, y0, y1]（俯視錄影範圍內）隨機、離其他點 ≥ min_gap；q 之後做完才結束，最長 interactive_timeout 秒（模擬電池約 12 分鐘降到 20% 就返航，所以 600 s）；沒被發現的火在任務都做完後再等 fire_grace 秒就不等了"
   },
   "dog": {
     "container": "cbba_uav1",
     "start": "exec ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:={ns}_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_v60.yaml -p agent_id:={id} -p cruise_speed:={speed}",
-    "stop_pattern": "__node:=v60[a-z0-9]*_cbba_node( |$)",
+    "stop_pattern": "__node:=v60[a-z0-9_]*_cbba_node( |$)",
     "sim_start": "exec python3 {repo}/docker/scripts/fake_dog.py --world {world} --ns {ns} --id {id} --model {ns}_standin --start {x} {y} --speed {speed}",
     "sim_stop_pattern": "fake_dog.py",
     "state_topic": "/{ns}/robot_state",
     "current_topic": "/{ns}/current_task",
     "units": [
       {"ns": "v60", "id": 50, "start_xy": [-4.0, 0.0]},
-      {"ns": "v60b", "id": 51, "start_xy": [10.0, 6.0]},
-      {"ns": "v60c", "id": 52, "start_xy": [-18.0, -8.0]}
+      {"ns": "v60_1", "id": 51, "start_xy": [10.0, 6.0]},
+      {"ns": "v60_2", "id": 52, "start_xy": [-18.0, -8.0]}
     ],
     "speed": 1.5,
-    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗"
+    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗。名稱 2026-10-24 起照伯宇的狗（v60、v60_1、v60_2；原本 v60b、v60c）；start_xy 是 demo_site 的位置，其他場景看 worlds.<場景>.dog_start"
   },
   "uav": {
     "start": "export EXECUTOR=${{EXECUTOR:-bt}}; exec cbba_uav.sh",
@@ -102,9 +125,10 @@
     "world": "fire_site",
     "headless": true,
     "altitude": 5.0,
+    "speed": 5.0,
     "task_duration": 5.0,
     "fire": {"x": 14.0, "y": -6.0},
     "decoy": {"x": -10.0, "y": -8.0},
-    "_說明": "UAV 整串：每台的 CBBA Node＋BT＋轉接（start 在 uav 容器執行，要在背景一直跑），PX4 在 sim 容器。EXECUTOR 由 itest.py --executor 給（預設 bt）。fire、decoy 是 fire_site 場景的火警與誘餌位置"
+    "_說明": "UAV 整串：每台的 CBBA Node＋BT＋轉接（start 在 uav 容器執行，要在背景一直跑），PX4 在 sim 容器。EXECUTOR 由 itest.py --executor 給（預設 bt）。fire、decoy 是 fire_site 場景的火警與誘餌位置。speed：uav 這組的巡航速度（cbba_uav.sh 的 CBBA_SPEED；2026-10-24 cbba_uav.sh 預設改成 0.5 m/s，這組 U1～U6 的時限是照 5 m/s 定的，所以照舊給 5；demo 用 --speed）"
   }
 }

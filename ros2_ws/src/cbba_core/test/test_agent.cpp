@@ -490,3 +490,30 @@ TEST(Agent, InactiveAgentStillRelaysBids)
   ASSERT_NE(bid, m.bids.end());
   EXPECT_EQ(bid->winner, 2);
 }
+
+TEST(Agent, BidForReportsOwnBidAndReason)
+{
+  // 出價表的 log（2026-10-20）：得標的回報得標價、輸的回報自己算出來的出價、不能做／排除中回報原因
+  CbbaAgent near(makeUav(1, 0, 0), ScoringParams{});
+  CbbaAgent far(makeUav(2, 40, 0), ScoringParams{});
+  for (CbbaAgent * a : {&near, &far}) {
+    a->onTask(makeTask(101, 5, 0), 0.0);
+    a->onTask(makeTask(102, 5, 5, TaskType::GROUND_INTERVENTION), 0.0);
+  }
+  exchangeUntilQuiet(near, far, 0.0);
+  ASSERT_EQ(near.winner(101), 1);
+
+  const auto won = near.bidFor(101, 1.0);
+  EXPECT_STREQ(won.why, "in_bundle");
+  EXPECT_DOUBLE_EQ(won.bid, near.score(101));
+  const auto lost = far.bidFor(101, 1.0);
+  EXPECT_STREQ(lost.why, "bid");
+  EXPECT_GT(lost.bid, 0.0);
+  EXPECT_LT(lost.bid, near.score(101));   // 遠的那台出價較低，所以沒贏
+  EXPECT_STREQ(near.bidFor(102, 1.0).why, "infeasible");   // 無人機不做地面任務
+  EXPECT_DOUBLE_EQ(near.bidFor(102, 1.0).bid, 0.0);
+  EXPECT_STREQ(near.bidFor(999, 1.0).why, "unknown");
+
+  far.excludeTask(101, 1.0, 60.0);
+  EXPECT_STREQ(far.bidFor(101, 2.0).why, "excluded");
+}

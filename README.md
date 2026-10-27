@@ -26,6 +26,9 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
     見 `ros2_ws/src/cbba_core/doc/protocol.md`。
   - **飛行層位置廣播**（無人機 BT 的 `flight_beacon`，port 14601，10 Hz）：給 CBF 避碰用的鄰機位置與速度。
 - 用 `docker/scripts/mesh_tc.sh` 模擬丟包與延遲。
+- **GCS ↔ 載具**（2026-10-21）：Zenoh 星狀（`zenoh-bridge-ros2dds`，`swarm_zenoh`）。GCS 是 router，每台無人機、狗直接當 client
+  連 GCS，只轉白名單裡的話題（robot_state 限 2 Hz、current_task、task_closed、task_orphaned、emergency_stop、manual_override）；
+  載具之間不經過 Zenoh。模擬裡用 `docker/scripts/zenoh_sim.sh start` 一次開好，見 `ros2_ws/src/swarm_zenoh/README.md`。
 
 每台載具（無人機、機器狗）跑**同一個 `swarm_cbba/cbba_node`**（`agent_type: UAV／UGV`），它不依賴 PX4、BT、Nav2，
 只透過固定格式的話題（`swarm_interfaces`）和機上的 BT 溝通：
@@ -51,8 +54,13 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 | `uav_task_manager_node`（正式） | 照機器狗端（伯宇）的 task_manager 骨架：急停 → 哨兵 → 巡檢佇列；葉節點 `NavigateTo`、`AirRecon` |
 | `uav_bt_node`（備用） | 10/09 的版本，行為大致相同 |
 
-- 移動：名目速度（剎車曲線）→ **CBF 避碰**（控制障礙函數，2026-10-14 取代 CPF）→ 運動平滑層 → PX4 位置＋速度 setpoint。
-  公式與參數：`ros2_ws/src/uav_px4_bt/doc/parameters.md` 第五節；值在 `uav_px4_bt/config/uav_bt.yaml`。
+- 移動：名目速度（剎車曲線）→ **避碰**（`avoidance.hpp`，2026-10-24 定案）→ 運動平滑層 → PX4 位置＋速度 setpoint。
+  避碰：預測會不會碰（CPA）→ 會碰時依路權（任務中懸停 ＞ 執行中 ＞ 待命 ＞ 機號小）決定誰讓 → 讓的那台用 VO 轉向繞過
+  （不停下來等）→ **二階 CBF**（剎車距離）保底 → 太近或無解時緊急退讓。
+  公式與參數：`ros2_ws/src/uav_px4_bt/doc/parameters.md` 第五節；值在 `uav_px4_bt/config/uav_bt.yaml`；
+  報告 `docs/reports/cbf_nonlinear_control_20261025.pdf`。
+- **人工指派**（2026-10-20，模擬平板）：`/<ns>/manual_override`（`ManualOverride.srv`）→ 交還手上的 CBBA 任務
+  （`PREEMPTED_BY_MANUAL`）→ mode MANUAL、去指定點 → 做完回到 AUTO；途中遇到火警照火警流程，log 印「人工指派延遲／繼續」。
 - 火警：飛行途中或到點懸停時看到 tag 101 → 發布地面處置任務 → **飛到火點上空懸停監控**，等地面任務結束（狗處理完）
   或 `fire_task.monitor_timeout` → 回原本的航線或完成；別台已經報過的火不再發布、不轉向。
 - 起飛、待命盤旋、讓路、做完回起飛點、低電量返航在樹外（`skeleton/uav_flight.hpp`）。
@@ -69,19 +77,23 @@ docs/                         跨套件的文件 → docs/README.md：模擬測�
                               插入任務點的使用方法（task_insertion_guide.md）、目前進度（progress.md）、
                               Nav2 導入規劃（nav2_integration_plan.md）、協定版本 2 的變更通知
 docker/                       模擬環境（Dockerfile、啟動腳本、Fast DDS、mesh tc）→ docker/README.md
-├── gz/                       Gazebo 場景（fire_site、patrol_site、demo_site）、模型（AprilTag、火點方塊、藍色任務平台）、
-│                             視窗設定；demo_site、patrol_site 由 gen_patrol_site.py 從 *_points.csv 產生
+├── gz/                       Gazebo 場景（fire_site、patrol_site、demo_site、yard）、模型（AprilTag、火點方塊、藍色任務平台）、
+│                             視窗設定；demo_site、patrol_site、yard 由 gen_patrol_site.py 從 *_points.csv 產生
+│                             （yard＝伯宇的變電所 100 × 80 m，障礙物在 yard_env.sdf.inc）
 ├── itest/                    自動整合測試（comm、uav、loss、demo）、情境檔（scenarios/）、手動插入（insert.py）
-│                             → docker/itest/README.md
-└── scripts/                  cbba_uav.sh、px4_sitl.sh、gz_bridge.sh、cbba_task.sh、patrol_scenario.sh、fake_dog.py、mesh_tc.sh…
+│                             、出價表（bid_table.py）→ docker/itest/README.md
+└── scripts/                  cbba_uav.sh、px4_sitl.sh、gz_bridge.sh、cbba_task.sh、patrol_scenario.sh、fake_dog.py、mesh_tc.sh、
+                              zenoh_sim.sh…
 ros2_ws/src/
 ├── swarm_interfaces/         ROS 訊息（Task、RobotState、TaskResult…）→ swarm_interfaces/README.md
 ├── cbba_core/                CBBA 核心、機間封包、協定層、指派流程、離線模擬、單元測試（不依賴 ROS）→ cbba_core/README.md
 │   └── doc/                  協定（protocol.md）、參數（parameters.md）、SITL 手動測試（sitl_test.md）、機器狗、外部規格書
 ├── swarm_cbba/               統一版 cbba_node（無人機和狗同一支）、launch、yaml → swarm_cbba/README.md
 ├── px4_waypoint_node/        takeoff_hover、task_executor（簡易執行者）、px4_state_bridge（PX4 → RobotState）
-├── uav_px4_bt/               無人機的 BT（正式、備用）、CBF、運動平滑層、位置廣播 → uav_px4_bt/doc/parameters.md
-└── apriltag_fire_detector/   下視相機的 AprilTag 偵測 → /uavN/fire_detection
+├── uav_px4_bt/               無人機的 BT（正式、備用）、避碰（路權＋VO＋二階 CBF）、運動平滑層、位置廣播
+│                             → uav_px4_bt/doc/parameters.md；tools/avoidance_compare（新舊避碰的離線對照）
+├── apriltag_fire_detector/   下視相機的 AprilTag 偵測 → /uavN/fire_detection
+└── swarm_zenoh/              GCS ↔ 載具的 Zenoh 白名單、bridge 啟動、selftest → swarm_zenoh/README.md
 ```
 
 `px4_msgs` 不在 repo 裡，由 `docker/scripts/setup_px4_msgs.sh` 依 PX4 版本（v1.17.0）下載。
@@ -104,7 +116,7 @@ cd docker
 setup_px4_msgs.sh                     # 第一次：下載 px4_msgs
 cd ~/CBBA_BT/ros2_ws
 colcon build --symlink-install --packages-select \
-  swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector
+  swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector swarm_zenoh
 source install/setup.bash
 ```
 
@@ -117,7 +129,14 @@ source install/setup.bash
 python3 docker/itest/itest.py uav                          # UAV 整串 U1～U6（fire_site，不開視窗）
 python3 docker/itest/itest.py demo                         # 展示：Gazebo 俯視錄影＋俯視動畫（含電量）
 python3 docker/itest/itest.py demo --scenario cbba_overrun # CBBA 正常分配下的火警監控、超時交還、CBF 交會
+# 主要展示（2026-10-24）：yard 場景、3 m/s；G1～G3 固定任務、M1 人工指派（路上或旁邊起火）、
+# T1 放在 M1 懸停那台的後方（看避碰，報告 X1）、T2 隨機插入（同一點起火）
+python3 docker/itest/itest.py demo --world yard --scenario assign_random --seed 7
+python3 docker/itest/itest.py demo --scenario manual_fire --seed 7   # 人工指派＋火警＋插入（demo_site）
 ```
+
+demo 的輸出在 `docker/itest/out/<時間>_demo/`：報告、Gazebo 俯視錄影、2D 動畫、下視相機錄影（`demo_cameras.mp4`）、
+出價表（`bids.md`、`bids.svg`、`bids.csv`）。
 
 **手動插入任務點**（兩個 terminal，說明見 `docs/task_insertion_guide.md`）：
 
@@ -151,7 +170,7 @@ ros2 run cbba_core cbba_sim run $SCN/fire_3uav.csv --loss 0 --out /tmp/fire_3uav
 ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points.csv --out /tmp/insert
 ```
 
-## 目前進度（2026-10-17）
+## 目前進度（2026-10-27）
 
 | 項目 | 狀態 |
 |---|---|
@@ -160,11 +179,13 @@ ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points
 | 機間通訊協定版本 2、協定層、UDP（擴散、完成確認、失敗交回、失聯接手、重開機、鎖定、指派版本） | ✅ itest comm；30% 掉包 5 s 內收斂 95% |
 | 統一版 cbba_node（無人機、機器狗共用，照機器狗端介面） | ✅ `g2_e2e.sh`；全隊火點去重複（`task_announced`，只有無人機發） |
 | 無人機 BT（照機器狗端骨架）：起飛、巡檢、火警懸停監控、路過發現轉向、回起飛點、低電量返航 | ✅ itest uav 6／6、demo 全過 |
-| 避碰：CPF → **CBF**（2026-10-14） | ✅ SITL：正對懸停的鄰機時往右繞開；參數之後再調 |
-| AprilTag 火情偵測、Gazebo 場景（fire_site、patrol_site、demo_site）、俯視錄影 | ✅ |
+| 避碰：CPF → CBF（10/14）→ **預測衝突＋路權＋VO＋二階 CBF**（10/24 定案） | ✅ SITL yard 3 m/s：航線經過懸停的無人機時 VO 繞過、最近 2.25 m、不停頓；`test_avoidance` 15 項 |
+| AprilTag 火情偵測、Gazebo 場景（fire_site、patrol_site、demo_site、yard）、俯視錄影、下視相機錄影 | ✅ |
+| 人工指派（模擬平板 `manual_override`）、`manual_fire`／`assign_random` 情境、出價表 | ✅ itest demo 全過（10/21、10/24） |
+| GCS ↔ 載具：Zenoh 星狀＋白名單（`swarm_zenoh`） | ✅ selftest（10/26）；接整套模擬、GCS 插任務／CBBA 監控／全體急停 ⏳ |
 | 動態重新分配（執行超時交還、PX4 斷線接手） | ✅ itest U6、`--scenario cbba_overrun` |
 | 展示與測試工具：情境檔、兩個 terminal 手動／隨機插入、俯視動畫（電量長條）、D7 CBF 距離 | ✅ |
-| 無人機被人工接管（切出 offboard）時停止出價、交還任務 | ✅ 單元測試；SITL 已確認分得出人接管和 PX4 失效保護（`watch_px4_status.py`），整串待 SITL 重測 |
+| 無人機被人工接管（切出 offboard）時停止出價、交還任務 | ✅ 單元測試、SITL（10/17：分得出人接管和 PX4 失效保護，切回後重新得標完成） |
 | 機器狗 | 假狗（`fake_dog.py`）✅；真的 V60 ⏳ 等伯宇換成協定版本 2 |
 | Nav2 接入模擬（伯宇的 task_manager＋Nav2 取代假狗） | ⏳ 規劃見 `docs/nav2_integration_plan.md` |
 | 能量模型校正（實機 ulog）、Jetson、實機 mesh | ⏳ |

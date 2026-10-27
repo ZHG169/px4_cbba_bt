@@ -121,7 +121,7 @@ protected:
   }
 
   // node 層的 onCurrentTask
-  void dispatch(std::uint32_t id, double x, double y, double duration)
+  void dispatch(std::uint32_t id, double x, double y, double duration, const char * prefix = "cbba_")
   {
     std::uint32_t cur = bb->get<std::uint32_t>("current_task_id");
     if (id == 0) {
@@ -139,11 +139,17 @@ protected:
     }
     Waypoint buf;
     const Waypoint * active = in_hand ? &(buf = *in_hand) : nullptr;
-    const Waypoint wp = task_manager::makeExternalWaypoint("cbba_", id, x, y, 5.0, 5.0, duration);
+    const Waypoint wp = task_manager::makeExternalWaypoint(prefix, id, x, y, 5.0, 5.0, duration);
     task_manager::insertExternal(*waypoints, active, wp, id, cur);
     bb->set("current_task_id", cur);
     g_ctx.preempt_t0 = std::chrono::steady_clock::now();
     tick();
+  }
+
+  long countLogs(const std::string & key) const
+  {
+    return std::count_if(platform.logs.begin(), platform.logs.end(),
+             [&](const std::string & l) {return l.find(key) != std::string::npos;});
   }
 
   FireObservation fire(Vec3 p)
@@ -345,6 +351,39 @@ TEST_F(SkeletonTest, FireBesidePatrolPointReturnsToFinishHover)
   EXPECT_NEAR(platform.v.position.x, 10.0, 0.5);   // 回到巡檢點上空
   EXPECT_GT(platform.t - closed, 3.0 - 1e-9);      // 停留 4 s、到達後 1 s 就離開 → 回來補約 3 s（加上飛回來的時間）
   EXPECT_EQ(platform.created.size(), 1u);
+}
+
+TEST_F(SkeletonTest, ManualPointFireFollowsFireFlowAndLogsDelay)
+{
+  // 人工指派的點（manual_）旁 2 m 有火：照火警流程（發布地面任務、移到火點上空監控、狗處理完、回指定點補完停留），
+  // 另外印「人工指派 … 延遲」（開始監控、完成時的延遲）；不發 task_result（manual 不是 CBBA 任務）（2026-10-20）
+  g_ctx.manual_active = true;
+  platform.fires.push_back(fire({12.0, 0.0, 0.2}));
+  dispatch(7, 10, 0, 4.0, "manual_");
+  ASSERT_TRUE(runUntil([&] {return !platform.created.empty();}, 20.0));
+  EXPECT_EQ(countLogs("人工指派 manual_7 延遲"), 1);
+  run(8.0);
+  EXPECT_NEAR(platform.v.position.x, 12.0, 0.3);
+  platform.closed.insert(platform.created[0].task_id);
+  ASSERT_TRUE(runUntil([&] {return !g_ctx.manual_active;}, 20.0));
+  EXPECT_NEAR(platform.v.position.x, 10.0, 0.5);
+  EXPECT_EQ(countLogs("人工指派 manual_7 完成"), 1);
+  EXPECT_TRUE(reported.empty());
+}
+
+TEST_F(SkeletonTest, ManualPointFireEnRouteLogsDelayAndResumes)
+{
+  // 飛往人工指派點的路上看到火：發布、轉向監控、印延遲；狗處理完 → 印「繼續」、飛到指定點做完
+  g_ctx.manual_active = true;
+  platform.fires.push_back(fire({10.0, 0.0, 0.2}));
+  dispatch(8, 20, 0, 1.0, "manual_");
+  ASSERT_TRUE(runUntil([&] {return !platform.created.empty();}, 15.0));
+  EXPECT_EQ(countLogs("人工指派 manual_8 延遲"), 1);
+  run(5.0);
+  platform.closed.insert(platform.created[0].task_id);
+  ASSERT_TRUE(runUntil([&] {return countLogs("人工指派 manual_8 繼續") == 1;}, 15.0));
+  ASSERT_TRUE(runUntil([&] {return !g_ctx.manual_active;}, 20.0));
+  EXPECT_NEAR(platform.v.position.x, 20.0, 0.5);
 }
 
 TEST_F(SkeletonTest, FireMonitorGivesUpAfterTimeout)
@@ -620,6 +659,39 @@ TEST_F(FlightTest, FarBusyNeighborDoesNotStopHoming)
   platform.nbrs = {n};
   runUntil([](FlightEvent) {return false;}, 20.0);
   EXPECT_EQ(countLogs("讓路"), 0);
+  EXPECT_NEAR(platform.v.position.x, 0.0, 0.5);
+  EXPECT_NEAR(platform.v.position.y, 0.0, 0.5);
+}
+
+TEST_F(FlightTest, HomingTurnsAroundHoveringBusyNeighborWithoutStopping)
+{
+  // 飛回起飛點，執行中的鄰機懸停在正前方的航線上（cbba_overrun：uav2 回程經過在 G1 懸停的 uav1）：
+  // 不停下讓路，CBF 往右繞過去、保持距離，途中沒有停住超過 1 s（2026-10-20，原本停兩次各約 2 s）
+  UavContextConfig cfg;
+  cfg.cbf.influence_radius = 12.0;
+  ctx = std::make_unique<UavContext>(platform, cfg);
+  flight = std::make_unique<UavFlight>(*ctx, 5.0, 20.0, 0.0);
+  ASSERT_TRUE(runUntil([](FlightEvent e) {return e == FlightEvent::TOOK_OFF;}, 15.0));
+  platform.v.position = {0.0, -12.0, 5.0};
+  platform.v.velocity = {};
+  flight->leaveHold();
+  Neighbor n;
+  n.id = 2;
+  n.position = {0.0, -6.0, 5.0};
+  n.busy = true;
+  platform.nbrs = {n};
+  double min_d = 1e9, stopped = 0.0, longest_stop = 0.0;
+  for (double s = 0.0; s < 25.0; s += 0.05) {
+    step();
+    const Vec3 p = platform.v.position;
+    min_d = std::min(min_d, std::hypot(p.x - n.position.x, p.y - n.position.y));
+    const bool far_from_home = std::hypot(p.x, p.y) > 1.0;
+    stopped = far_from_home && std::hypot(platform.v.velocity.x, platform.v.velocity.y) < 0.1 ? stopped + 0.05 : 0.0;
+    longest_stop = std::max(longest_stop, stopped);
+  }
+  EXPECT_EQ(countLogs("讓路"), 0);
+  EXPECT_GE(min_d, 0.9 * cfg.cbf.safe_radius);
+  EXPECT_LT(longest_stop, 1.0);
   EXPECT_NEAR(platform.v.position.x, 0.0, 0.5);
   EXPECT_NEAR(platform.v.position.y, 0.0, 0.5);
 }

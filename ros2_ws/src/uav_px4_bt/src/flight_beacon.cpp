@@ -19,7 +19,7 @@ std::vector<std::uint8_t> encodeBeacon(const Beacon & b)
   w.u64(b.session);
   w.u32(b.sequence);
   w.u8(static_cast<std::uint8_t>((b.airborne ? 0x01 : 0x00) | (b.position_valid ? 0x02 : 0x00) |
-    (b.busy ? 0x04 : 0x00)));
+    (b.busy ? 0x04 : 0x00) | (b.task_hover ? 0x08 : 0x00)));
   for (double v : {b.position.x, b.position.y, b.position.z, b.velocity.x, b.velocity.y, b.velocity.z}) {
     w.f32(static_cast<float>(v));
   }
@@ -43,6 +43,7 @@ std::optional<Beacon> decodeBeacon(const std::uint8_t * data, std::size_t size)
   b.airborne = (flags & 0x01) != 0;
   b.position_valid = (flags & 0x02) != 0;
   b.busy = (flags & 0x04) != 0;
+  b.task_hover = (flags & 0x08) != 0;
   b.position.x = r.f32();
   b.position.y = r.f32();
   b.position.z = r.f32();
@@ -79,7 +80,7 @@ std::vector<Neighbor> NeighborTable::neighbors(double now, double timeout) const
     if (age > timeout || !e.beacon.airborne || !e.beacon.position_valid) {
       continue;
     }
-    out.push_back(Neighbor{id, e.beacon.position, e.beacon.velocity, age, e.beacon.busy});
+    out.push_back(Neighbor{id, e.beacon.position, e.beacon.velocity, age, e.beacon.busy, e.beacon.task_hover});
   }
   return out;
 }

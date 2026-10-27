@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "uav_px4_bt/bt_nodes.hpp"
 
@@ -132,8 +133,13 @@ public:
     // 執行中的鄰機很近時停在被推開的位置（不拉回原本的待命點、不繼續飛回起飛點）。範圍用 kYieldStopFactor × yield_radius，
     // 不用 CBF 的 influence_radius：itest demo 把它設成 12 m（--speed 3 時 CBF 需要的作用距離），待命的那台離執行中的
     // 鄰機 10 m 就停下、等對方做完才走（2026-10-19 SITL：uav2 回起飛點途中停 12 s）。遠一點的照常飛，由 CBF 繞開
+    // 飛回起飛點的路上不停（2026-10-20，使用者：讓路時停頓、要能順利轉彎）：交給 CBF 往右繞過執行中的鄰機。
+    // cbba_overrun 的 SITL：uav2 回程經過 uav1 在做的 R4、G1，對方懸停或往前飛離，uav2 還是停了兩次各約 2 s。
+    // 停在被推開的位置只用在原地待命（還沒出發，或已經回到起飛點附近），免得把自己拉回對方工作的位置
+    const bool en_route = homing_ &&
+      std::hypot(home_.x - v.position.x, home_.y - v.position.y) > ctx_.config.cbf.yield_radius;
     bool yield = false;
-    for (const Neighbor & n : ctx_.platform.neighbors()) {
+    for (const Neighbor & n : en_route ? std::vector<Neighbor>{} : ctx_.platform.neighbors()) {
       const double d = std::hypot(n.position.x - v.position.x, n.position.y - v.position.y);
       yield = yield || (n.busy && d < kYieldStopFactor * ctx_.config.cbf.yield_radius);
     }

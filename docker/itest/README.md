@@ -63,9 +63,13 @@ python3 docker/itest/itest.py demo                 # 隨機種子（報告和終
 python3 docker/itest/itest.py demo --seed 42       # 同一個種子 = 同樣的火點
 python3 docker/itest/itest.py demo --fire-mode side  # 航線旁起火（R1 在 G3 航線旁）：路過發現 → 轉向火點上空監控 → 假狗處理完 → 回航線完成原任務（D4 檢查這個順序）
 python3 docker/itest/itest.py demo --scenario cbf_pass   # CBF：A 在 G1 懸停 25 s，到點後插入 G2，飛 G2 的那台去程、回程都經過它（D7 看最近距離）
+python3 docker/itest/itest.py demo --world yard           # 伯宇的變電所場景（100 × 80 m；出生在起降板 (−40, −30)、巡檢高度 8 m，2026-10-24）
+python3 docker/itest/itest.py demo --world yard --scenario manual_fire --seed 7   # yard 上跑人工指派＋火警＋插入
+python3 docker/itest/itest.py demo --world yard --scenario assign_random --seed 7 # G1～G3 固定任務＋M1 指定做 G 的那台（路上或旁邊隨機起火）＋T1 放在 M1 懸停那台的後方（閒著的那台航線經過它，看避碰；報告 X1）＋T2 隨機插入（那裡也起火）；人工指派畫面上用 M1、M2… 表示（2026-10-24）
 python3 docker/itest/itest.py demo --scenario example    # 自訂情境的範例：自己排任務點、起火點、插入時機（格式見 docker/itest/scenarios/example.json 的 _說明）
-python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動插入（terminal 1 開環境）；terminal 2：python3 docker/itest/insert.py 輸入 t [x y] [d=秒]、tf、f、l、q（說明見 docs/task_insertion_guide.md）
-#   --speed 3（無人機巡航 m/s，給 CBBA 出價和 BT）  --hold 10（完成後停幾秒）  --no-record（不錄 Gazebo）
+python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動插入（terminal 1 開環境）；terminal 2：python3 docker/itest/insert.py 輸入 t [x y] [d=秒]、tf、f、m（人工指派某台）、l、q（說明見 docs/task_insertion_guide.md）
+#   --speed 3（無人機巡航 m/s，給 CBBA 出價和 BT；預設 3，2026-10-24。不是 0.5 時 itest 照速度算 cbf.gamma、
+#              cbf.influence_radius、cbf.miss_clearance 給 BT（itest.py 的 cbf_speed_args；3 m/s → 1.5、8.6 m、4.4 m））  --hold 10（完成後停幾秒）  --no-record（不錄 Gazebo）
 #   --executor bt（用備用 BT；沒有懸停監控、回起飛點，D4、D5 會失敗）
 ```
 
@@ -80,8 +84,8 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
   飛到 R 點的那台懸停時看到 tag 101 → 發布地面處置任務 → **假狗**得標、走過去、處理 20 s、回報 → 那台**懸停監控到地面任務結束**
   （cbba_node 的 `task_closed`）才完成 R 點 → 全部做完後**各自飛回起飛點上空**（BT 的 `return_home_delay` 2 s）。
 - `fire_mode` route（2026-10-12 的版本，改 `config.json`）：各台出發後在某台前方航線上起火，看飛行途中發現、發布地面任務、繼續飛。
-- **假狗**（`config.json` 的 `dog`；2026-10-20 起 **3 隻**，`dog.units`）：v60（機號 50）在 (−4, 0)、v60b（51）在 (10, 6)、
-  v60c（52）在 (−18, −8)，分散在場地三側，看狗之間對火警的競標。每隻的 cbba_node（UGV、`/<ns>`，`cbba_v60.yaml`）借 uav1 容器跑
+- **假狗**（`config.json` 的 `dog`；2026-10-20 起 **3 隻**，`dog.units`；2026-10-24 起名稱照伯宇的狗）：v60（機號 50）在 (−4, 0)、v60_1（51）在 (10, 6)、
+  v60_2（52）在 (−18, −8)（yard 場景照伯宇的出生點：(−35, 7.5)、(−35, −7.5)、(−15, 25)），分散在場地三側，看狗之間對火警的競標。每隻的 cbba_node（UGV、`/<ns>`，`cbba_v60.yaml`）借 uav1 容器跑
   （要在 mesh 上）；執行者 `docker/scripts/fake_dog.py` 在 sim（收 `/<ns>/current_task`、直線走過去、停留、回報 `task_result`；
   Gazebo 放一個橘色方塊 `<ns>_standin` 當替身）。速度 1.5 m/s（兩邊一致）。紀錄在 `fake_dog_<ns>.log`、`dog_cbba_<ns>.log`。
   報告 D3 會寫每個火點由哪隻狗處理；`units` 只留一隻就是原本的單隻狗。
@@ -104,8 +108,8 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
 | D6 | `demo.mp4`（俯視動畫）、`gazebo.mp4`（Gazebo 俯瞰攝影機）、`demo_final.png`（最後一格）、`demo_cameras.mp4`（左：gazebo.mp4 縮成 1024 × 576；右：三台的下視相機各 256 × 192，掃 AprilTag 的那台；總寬 1280，2026-10-20） |
 | D7 | CBF：任務開始到回起飛點，空中兩台的最近水平距離 ≥ 0.9 × `cbf.safe_radius`（從 `exec_args` 或 `uav_bt.yaml` 讀）；列出 BT 記到的每次接近（「避碰：這次最接近鄰機」） |
 
-俯視動畫：一開始就畫出固定任務點（綠色）；起火時火點才出現（紅色方塊＋光圈）；各台的航跡、
-目前要去的任務（虛線）；任務圓圈未分配是白的、有人拿著時填那台的顏色、完成後變灰；地面處置任務是紅色方塊。
+俯視動畫：一開始就畫出固定任務點（綠色）；起火時火點才出現（紅色方塊＋光圈）；各台的航跡（每 4 m 一個方向箭頭）、
+目前要去的任務（虛線）；任務旗子未分配是白的、有人拿著時填那台的顏色、完成後變灰；地面處置任務是紅色方塊。
 右邊是事件時間軸和電量長條（0～100 %，長條長度就是電量，旁邊是數值）。全程 1 倍速（2026-10-19 起，原本沒有事件時 3 倍速），起火、丟出地面任務、地面任務結束時停 1.5 s。自己重畫：
 
 ```bash
@@ -113,6 +117,17 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
 python3 /home/ncrl/CBBA_BT/docker/itest/animate_demo.py /home/ncrl/CBBA_BT/docker/itest/out/<時間>_demo --frames /home/ncrl/CBBA_BT/docker/itest/out/<時間>_demo/frames
 #   不給 --frames 時存 demo.gif；--freeze 1.5 --fps 15；預設全程 1 倍速，要快轉給 --speedup 3（事件前後 --window 2 秒維持 --slow 1 倍速）
 ```
+
+新的模擬端測試（2026-10-20，`--scenario manual_fire`）：起飛 → 出價 → G1～G3 → 隨機挑一台正在做 G 的無人機人工指派到隨機的 M
+（交還 G、別台接手）→ 同時在它飛往 M 的路上或 M 旁隨機起火（照火警 BT 處理，M 延遲）→ 之後隨機插入 T（由沒任務或做完的那台做）。
+跑的時候 terminal 即時印「⚠ 地面站通知」（交還 G、改由誰接手、M 因火警延遲／繼續／完成，給地面站或平板使用者看）。報告多了 M1（指派、G 交還與接手）、M2（看到火 → 地面任務 → 狗處理完 → M 延遲多久）、M3（T 由誰做、當時在做什麼），都是 INFO 紀錄，不判對錯。
+換 `--seed` 換一組位置與時間。
+
+出價表（2026-10-20）：demo 結束時 `bid_table.py` 收集各台 cbba_node（無人機 `stack_uavN.log`、狗 `dog_cbba_<ns>.log`）的
+「出價表」log，輸出 `bids.md`（一、每個任務 × 每一台第一次知道時的出價、最後得標者；二、每台得到、失去任務的時刻）、`bids.svg`（長條圖：橫軸任務、縱軸每一台的初次出價，黑框＋★ = 最後得標，瀏覽器開）和
+`bids.csv`（全部紀錄，Excel 可直接開）。cbba_node 只在任務第一次知道、得標者改變、這台的出價狀態改變時印，飛行中出價隨位置變動不印。
+沒出價時寫原因：不能做（能力不符、來不及、電量不夠）、失敗後排除中、別台已接受、不參與出價…。自己重做：
+`python3 docker/itest/bid_table.py docker/itest/out/<時間>_demo`（主機，只用標準庫）。
 
 **loss：第 5 週弱網量測**（不開 PX4、BT；2026-10-12）
 

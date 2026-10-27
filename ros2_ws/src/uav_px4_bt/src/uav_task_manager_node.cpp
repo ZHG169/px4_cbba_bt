@@ -16,7 +16,10 @@
 //   - 被接管（offboard 掉了，UavFlight 的 OVERRIDE）：照狗的平板接管，手上的任務以 PREEMPTED_BY_MANUAL 交還；
 //     PX4 失效保護時以 PX4_FAILSAFE（STOPPED）交還。期間收到的任務直接用同一個原因交還
 //   - 沒有巡檢 yaml、/start_mission、/stop_mission：巡檢點是 CBBA 的 AIR_RECON 任務，佇列裡只有外部點
-//   - 沒有 manual_override（平板不接無人機；無人機的接管是遙控器／地面站切 PX4 模式）、Nav2 reaper
+//   - 人工指派 /<ns>/manual_override（swarm_interfaces/ManualOverride，2026-10-20 照伯宇的 onManualOverride）：地面站指定這台
+//     去某點懸停 duration_sec → 手上的 CBBA 點以 PREEMPTED_BY_MANUAL 交還、mode MANUAL（不出價、忽略 current_task）→
+//     做完（骨架的 ReportTaskResult 清掉 manual_active）自動恢復 AUTO；clear 提早解除。遙控器／地面站切 PX4 模式的接管另外處理
+//     （UavFlight 的 OVERRIDE）。沒有 Nav2 reaper
 //   - 急停話題 /<ns>/emergency_stop（參數 emergency_topic）：狗的 /emergency_stop 是全域的，無人機各台分開；
 //     急停時樹 halt、原地懸停（不是降落）
 //
@@ -43,6 +46,7 @@
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
+#include <swarm_interfaces/srv/manual_override.hpp>
 
 #include "uav_px4_bt/px4_platform.hpp"
 #include "uav_px4_bt/skeleton/bt_nodes.hpp"
@@ -60,6 +64,7 @@ namespace uav_px4_bt
 {
 
 using SwarmTask = swarm_interfaces::msg::Task;
+using ManualOverride = swarm_interfaces::srv::ManualOverride;
 using RobotStateMsg = swarm_interfaces::msg::RobotState;
 using task_manager::g_ctx;
 using task_manager::Waypoint;
@@ -109,6 +114,10 @@ public:
     g_ctx.task_result_pub = [this](uint32_t id, bool ok, const std::string & detail) {
         platform_->publishResult(id, ok, detail, task_manager::failureReason(ok, detail));
       };
+    manual_srv_ = create_service<ManualOverride>("/" + platform_->ns() + "/manual_override",
+        [this](const std::shared_ptr<ManualOverride::Request> q, std::shared_ptr<ManualOverride::Response> r) {
+          onManualOverride(*q, *r);
+        });
     current_task_sub_ = create_subscription<SwarmTask>("/" + platform_->ns() + "/current_task",
         rclcpp::QoS(1).reliable().transient_local(),
         [this](SwarmTask::SharedPtr m) {onCurrentTask(*m);});
@@ -198,7 +207,7 @@ private:
   void publishMode()
   {
     const std::uint8_t mode = g_ctx.emergency ? RobotStateMsg::ESTOP :
-      flight_->phase() == FlightPhase::AIRBORNE ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
+      flight_->phase() == FlightPhase::AIRBORNE && !g_ctx.manual_active ? RobotStateMsg::AUTO : RobotStateMsg::MANUAL;
     const double t = platform_->timeNow();
     if (mode == mode_ && t - mode_sent_ < mode_period_) {
       return;
@@ -311,6 +320,10 @@ private:
       RCLCPP_WARN(get_logger(), "急停中收到 CBBA 任務 %u → 回 EMERGENCY 交還", t.task_id);
       return;
     }
+    if (g_ctx.manual_active) {   // 人工指派中：照伯宇的 BT 忽略（mode MANUAL 送到之前派下來的；CBBA 收到 MANUAL 會撤回）
+      RCLCPP_WARN(get_logger(), "人工指派中，忽略 CBBA 任務 %u", t.task_id);
+      return;
+    }
     if (flight_->phase() == FlightPhase::RTL) {
       g_ctx.task_result_pub(t.task_id, false, "BATTERY_RTL");
       RCLCPP_WARN(get_logger(), "返航中收到 CBBA 任務 %u → 回 BATTERY_RTL 交還", t.task_id);
@@ -330,6 +343,67 @@ private:
       t.position.y, t.position.z, t.duration_sec,
       flight_->phase() == FlightPhase::AIRBORNE ? "" : "  （還沒起飛完成，起飛後執行）");
     kick();
+  }
+
+  // 人工指派（spec §3.4.6，照伯宇 task_manager_node 的 onManualOverride）：地面站指定這台去某點懸停
+  void onManualOverride(const ManualOverride::Request & q, ManualOverride::Response & r)
+  {
+    if (!tree_ && !buildTree()) {
+      r.accepted = false;
+      r.message = "行為樹沒建起來";
+      return;
+    }
+    if (g_ctx.emergency) {
+      r.accepted = false;
+      r.message = "急停中";
+      return;
+    }
+    auto bb = tree_->rootBlackboard();
+    uint32_t cur = bb->get<uint32_t>("current_task_id");
+    Waypoint buf;
+    const Waypoint * active = activeWaypoint(buf);
+    if (q.clear) {
+      const bool was = g_ctx.manual_active;
+      g_ctx.manual_active = false;
+      if (task_manager::cancelExternal(*waypoints_, active, "manual_", cur)) {
+        bb->set("current_task_id", cur);
+        kick();
+      }
+      r.accepted = true;
+      r.message = was ? "人工指派解除" : "沒有在人工指派";
+      RCLCPP_INFO(get_logger(), "地面站：%s → mode AUTO", r.message.c_str());
+      return;
+    }
+    if (flight_->phase() != FlightPhase::AIRBORNE) {
+      r.accepted = false;
+      r.message = "不在可以執行的狀態（還沒起飛完成、被遙控器接管或返航中）";
+      return;
+    }
+    if (q.task.task_id == 0) {
+      r.accepted = false;
+      r.message = "task_id 不可為 0（0 是取消）";
+      return;
+    }
+    if (task_manager::isResend(*waypoints_, active, "manual_", q.task.task_id, cur)) {
+      r.accepted = true;
+      r.message = "已在做 manual_" + std::to_string(q.task.task_id);
+      return;
+    }
+    const std::string cbba = task_manager::externalInHand(*waypoints_, active, "cbba_", cur);
+    if (!cbba.empty()) {   // 手上的 CBBA 點交還（PREEMPTED：5 s 不接、不算失敗次數）
+      g_ctx.task_result_pub(task_manager::externalTaskId(cbba), false, "PREEMPTED_BY_MANUAL");
+      RCLCPP_WARN(get_logger(), "地面站指派：%s 交還 CBBA（PREEMPTED_BY_MANUAL）", cbba.c_str());
+    }
+    g_ctx.manual_active = true;
+    const Waypoint wp = task_manager::makeExternalWaypoint("manual_", q.task.task_id, q.task.position.x,
+        q.task.position.y, q.task.position.z, platform_->altitude(), std::max(0.0f, q.task.duration_sec));
+    task_manager::insertExternal(*waypoints_, active, wp, q.task.task_id, cur);
+    bb->set("current_task_id", cur);
+    RCLCPP_INFO(get_logger(), "地面站指派：%s → 去 (%.2f, %.2f)、停留 %.1f s，mode MANUAL（不參與 CBBA）", wp.id.c_str(),
+      q.task.position.x, q.task.position.y, q.task.duration_sec);
+    r.accepted = true;
+    r.message = "接管：" + wp.id;
+    kick();   // 立刻 tick：哨兵 halt 手上的點、mode MANUAL 馬上送出
   }
 
   // 任務結束（spec §3.4.1 abortNow）：手上還沒回報的 cbba 點帶著原因交還，哨兵的 key 歸零
@@ -406,6 +480,7 @@ private:
   std::unique_ptr<UavFlight> flight_;
 
   rclcpp::Subscription<SwarmTask>::SharedPtr current_task_sub_;
+  rclcpp::Service<ManualOverride>::SharedPtr manual_srv_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr emergency_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr mode_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

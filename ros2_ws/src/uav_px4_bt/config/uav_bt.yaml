@@ -9,7 +9,7 @@
     # ---------- 節點（只有 uav_task_manager_node） ----------
     tick_period_ms: 50              # BT tick 週期（ms）；哨兵最壞延遲一個週期
     min_battery: 20.0               # 電量（%）≤ 這個值就返航（RTL），一旦觸發不恢復
-    return_home_delay: 2.0          # 做完任務、待命幾秒後飛回起飛點上空；負值 = 原地懸停
+    return_home_delay: 1.0          # 做完任務、待命幾秒後飛回起飛點上空；負值 = 原地懸停（2026-10-20 2 → 1：少一次停頓感）
     fire_task.monitor_timeout: 120.0  # 看到火警後懸停監控、等地面任務結束最多幾秒；0 = 不等
 
     # ---------- 高度、到達 ----------
@@ -26,18 +26,28 @@
 
     # ---------- CBF：名目速度（往目標飛）----------
     cbf.k_att: 1.0                  # 1/s：離目標 d 公尺時想要的速度 k_att × d（近目標時）
-    cbf.brake_accel: 0.2            # m/s²：水平剎車曲線，速度 ≤ √(2 × a × 距離)（2026-10-19 試過 0.15，沒有改善：本來就沒有衝過頭）
+    cbf.brake_accel: 0.5            # m/s²：水平剎車曲線，速度 ≤ √(2 × a × 距離)（2026-10-20 0.2 → 0.5：0.2 時最後 6 m 要約 8 s、看起來拖；實測沒有衝過頭）
     cbf.brake_vertical_accel: 0.1   # m/s²：垂直剎車曲線（起飛、換高度衝過頭就調小）
 
-    # ---------- CBF：避碰（h = |p − p_j|² − safe_radius²，ḣ ≥ −γ h；公式見 doc/parameters.md 第五節）----------
-    cbf.safe_radius: 1.0            # d_s：水平距離不小於這個（m）；要比出生點間隔（2 m）小
-    cbf.gamma: 1.0                  # γ（1/s）：大 = 允許靠得快、晚剎；≤ 2 × motion.max_accel / (0.5 × cruise_speed)
-    cbf.influence_radius: 3.0       # 只對這個距離內的鄰機加約束（m）；≥ (V + √(V² + (0.5 γ d_s)²)) / (0.5 γ)（V = cruise_speed；
-                                    # 0.5 m/s、γ 1、d_s 1 → 2.4 m），否則一進來就急剎
-    cbf.yield_radius: 2.0           # 待命的讓路給執行中的鄰機時保持的距離（m）；> safe_radius（執行中的停在旁邊時也推到這個距離外）
-    cbf.k_tan: 0.8                  # 往右繞：名目速度違反約束時加 k_tan × 違反量 的右手邊分量（0 = 不繞，正對面會停住）
+    # ---------- 避碰（2026-10-24：預測衝突 → 路權 → VO 繞行 → CBF 保底；avoidance.hpp、doc/parameters.md 第五節）----------
+    # 路權 K = (任務中懸停, 執行中, −機號)：大的直行、小的用 VO 繞；預測不會碰的鄰機不加 CBF 約束（不減速）
+    cbf.safe_radius: 1.0            # d_s：水平距離不小於這個（m），全專案統一 1.0；要比出生點間隔（2 m）小
+    cbf.ttc_horizon: 5.0            # 預測最近點只看這麼多秒內（也不超過自己到目標的時間）
+    cbf.miss_clearance: 1.5         # 預測最近距離 < 這個才算衝突；讓的那台用 VO 繞到至少這麼遠（> guard_radius）。
+                                    # 目標就在鄰機旁時，到目標那一刻只要求 safe_radius
+    cbf.guard_radius: 1.3           # 現在距離 < 這個時，不管預測、不管路權，CBF 一定對這台加約束（> safe_radius）
+    cbf.yield_exit: 2.0             # 交會解除：預測不衝突而且距離 > 這個（或已經通過、距離一直變大）
+    cbf.emergency_speed: 0.3        # 一階時：距離 < safe_radius 或 CBF 無解時往外退的最低速度（m/s）；二階時用最大減速度往外剎
+    # CBF 約束（2026-10-24 預設二階：h = √(2A(d − r)) + ḋ，照最大減速度剎得住；ḣ ≥ −γ h；加速度上限 = motion.max_accel）
+    cbf.second_order: true          # true：CBF 管加速度（考慮剎車距離，速度快時也剎得住）；false：一階（h = |p − p_j|² − r²，管速度）
+    cbf.gamma: 1.0                  # γ（1/s）：大 = 允許靠得快、晚剎
+    cbf.response_delay: 0.3         # 二階：反應延遲（s，PX4 追 setpoint、位置廣播）；安全距離加上 延遲 × 靠近速度
     cbf.max_extrapolation: 0.5      # 鄰機位置最多用速度外推幾秒
     cbf.neighbor_timeout: 1.0       # 鄰機的位置廣播超過這麼久沒更新就不算（s）
+    # 下面三個只有舊的 cbfVelocity（約束一直開著＋違反後往右繞，單元測試對照用）會用；正式 BT 不用
+    cbf.influence_radius: 3.0       # 只對這個距離內的鄰機加約束（m）
+    cbf.yield_radius: 2.0           # 待命讓路給執行中的鄰機時保持的距離（m）；skeleton 的待命讓路範圍也用它（2 ×）
+    cbf.k_tan: 0.8                  # 往右繞：名目速度違反約束時加 k_tan × 違反量 的右手邊分量
 
     # ---------- 運動平滑層（CBF 速度 → 給 PX4 的位置＋速度）----------
     motion.max_accel: 1.5           # 水平加速度上限（m/s²）

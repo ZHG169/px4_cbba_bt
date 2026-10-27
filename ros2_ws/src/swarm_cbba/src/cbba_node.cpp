@@ -55,6 +55,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -569,6 +570,31 @@ private:
     }
   }
 
+  // 出價表（2026-10-20，使用者要每個任務每一台的出價當參考資料）：開著的任務第一次知道、得標者改變、
+  // 這台的出價狀態（why）改變時印一行固定格式；docker/itest/bid_table.py 收集各台（無人機、狗）的 log 做成表格。
+  // 只在這些時刻印，飛行中出價隨位置變動不印（會洗版）
+  void logBids(double now)
+  {
+    const auto & agent = comm_->agent();
+    for (const auto & [id, task] : agent.tasks()) {
+      if (task.status != TaskStatus::OPEN) {
+        continue;
+      }
+      const CbbaAgent::BidInfo b = agent.bidFor(id, now);
+      const AgentId w = agent.winner(id);
+      const auto key = std::make_pair(w, std::string(b.why));
+      const auto it = bid_logged_.find(id);
+      if (it != bid_logged_.end() && it->second == key) {
+        continue;
+      }
+      bid_logged_[id] = key;
+      RCLCPP_INFO(get_logger(), "出價表 task=%s type=%u x=%.1f y=%.1f agent=%u bid=%.3f why=%s winner=%u winner_bid=%.3f",
+        taskName(id).c_str(), static_cast<unsigned>(task.type), task.position.x, task.position.y,
+        static_cast<unsigned>(comm_->id()), b.bid, b.why,
+        static_cast<unsigned>(w), agent.score(id));
+    }
+  }
+
   // log：路徑、任務結束、收斂、task_id 衝突
   void report(double now)
   {
@@ -589,6 +615,7 @@ private:
         }
       }
     }
+    logBids(now);
     // 任務結束（自己收齊確認、或收到別台的 TASK_CLOSE）時印一次
     for (const auto & [id, task] : comm_->agent().tasks()) {
       if (task.status == TaskStatus::OPEN || !closed_.insert(id).second) {
@@ -680,6 +707,7 @@ private:
   std::uint8_t mode_{RobotStateMsg::AUTO};
 
   std::vector<TaskId> last_path_;
+  std::map<TaskId, std::pair<AgentId, std::string>> bid_logged_;   // 出價表：上次印的（得標者, why）
   bool last_converged_{false};
   std::map<TaskId, double> reported_at_;   // 自己回報完成的時刻
   std::set<TaskId> closed_;                // 已經印過結束的任務

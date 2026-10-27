@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>swarm_zenoh</name>
+  <version>0.1.0</version>
+  <description>GCS ↔ 載具的白名單話題（Zenoh）：產生 zenoh-bridge-ros2dds 與 CycloneDDS 的設定後啟動 bridge。只有白名單上的 ROS 話題、service 走 mesh，其他照樣只在機內；載具之間的 CBBA、位置廣播仍走自訂 UDP（不經過這裡）</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>ament_cmake_pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

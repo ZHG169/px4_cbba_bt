@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>多無人機避碰：控制障礙函數的設計與驗證</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 16mm 15mm; }
+  body { font-family: "Noto Sans CJK TC", "Noto Sans CJK SC", sans-serif; font-size: 10pt; line-height: 1.58;
+         color: #1b1f24; }
+  h1 { font-size: 18pt; margin: 0 0 2mm 0; }
+  h2 { font-size: 13.5pt; margin: 7mm 0 2mm 0; padding-bottom: 1mm; border-bottom: 1.5px solid #2a5d8f; color: #1f4e79; }
+  h3 { font-size: 11pt; margin: 4.5mm 0 1.5mm 0; color: #1f4e79; }
+  h2, h3 { page-break-after: avoid; break-after: avoid; }
+  p { margin: 1.5mm 0; }
+  .meta { color: #555; font-size: 9pt; margin-bottom: 4mm; }
+  .eq { font-family: "Noto Serif CJK TC", "Times New Roman", serif; font-size: 11.5pt; background: #f3f6fa;
+        border-left: 3px solid #2a5d8f; padding: 2.2mm 4mm; margin: 2mm 0; page-break-inside: avoid; }
+  .eq .n { float: right; color: #2a5d8f; font-family: "Noto Sans CJK TC", sans-serif; font-size: 9pt; }
+  i { font-family: "Times New Roman", "Noto Serif CJK TC", serif; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0 3mm 0; font-size: 9pt; page-break-inside: avoid; }
+  th, td { border: 1px solid #c8d1dc; padding: 1.2mm 2mm; vertical-align: top; }
+  th { background: #e8eef5; text-align: left; }
+  code { font-family: "Noto Sans Mono CJK TC", monospace; font-size: 8.6pt; background: #f1f1f1; padding: 0 1mm; }
+  .note { font-size: 9pt; color: #444; }
+  .box { border: 1px solid #c8d1dc; border-radius: 2mm; padding: 2mm 4mm; margin: 2mm 0; page-break-inside: avoid; }
+  .thm { border: 1px solid #2a5d8f; border-radius: 2mm; padding: 2mm 4mm; margin: 2.5mm 0; background: #fbfcfe;
+         page-break-inside: avoid; }
+  .thm b.t { color: #1f4e79; }
+  .pb { page-break-before: always; }
+  ol, ul { margin: 1mm 0 1mm 6mm; padding-left: 4mm; }
+  li { margin: 0.6mm 0; }
+  pre.flow { font-family: "Noto Sans Mono CJK TC", monospace; font-size: 8.8pt; background: #f6f8fa; border: 1px solid #dde3ea;
+             padding: 2mm 3mm; margin: 2mm 0; page-break-inside: avoid; white-space: pre; }
+  .ref { font-size: 8.8pt; }
+  .ref li { margin: 0.8mm 0; }
+</style>
+</head>
+<body>
+
+<h1>多無人機避碰：控制障礙函數的設計與驗證</h1>
+<div class="meta">CBBA_BT 無人機端 · 2026-10-25 · 以非線性控制的觀點整理目前的實作（<code>uav_px4_bt/src/avoidance.cpp</code>、
+<code>cbf.cpp</code>、<code>motion.cpp</code>）。參數見 <code>uav_px4_bt/doc/parameters.md</code> 第五節；驗證在 PX4 SITL＋Gazebo（yard 場景）。</div>
+
+<div class="box">
+<b>摘要</b>　多台旋翼機在同一高度執行 CBBA 分配的任務，航線交會時要同時滿足兩個要求：<b>安全</b>（任兩台水平距離不小於
+<i>r</i> = 1 m）與<b>活性</b>（不互相卡住、不停下來等）。安全由<b>二階控制障礙函數（CBF）</b>負責：以剎車距離定義安全集合，
+在加速度層用二次規劃（QP）做最小修正，保證安全集合前向不變。純 CBF-QP 在對飛、交叉時會產生不想要的平衡點（互相減速到停），
+所以在 CBF 之前加一層<b>監督式的名目控制</b>：預測衝突、用唯一的路權決定誰讓、讓的那台用速度障礙（VO）轉向繞行。
+這一層只影響「往哪裡飛」，不影響安全保證。PX4 SITL 在 3 m/s 下驗證：交會時讓行的一台提早轉向、最近距離 2.25 m、不停頓。
+</div>
+
+<h2>1. 系統模型</h2>
+<p>每台無人機 <i>i</i> 的水平運動（高度由另一個迴路維持在巡檢高度）視為受加速度限制的二階積分器：</p>
+<div class="eq">ṗ<sub><i>i</i></sub> = v<sub><i>i</i></sub>,　v̇<sub><i>i</i></sub> = a<sub><i>i</i></sub>,　‖a<sub><i>i</i></sub>‖ ≤ <i>a</i><sub>max</sub> = 1.5 m/s²,　‖v<sub><i>i</i></sub>‖ ≤ <i>V</i><span class="n">(1)</span></div>
+<p>寫成控制仿射形式 ẋ = <i>f</i>(x) + <i>g</i>(x) u，狀態 x = (p, v) ∈ ℝ⁴、輸入 u = a ∈ 𝒰 = {‖a‖ ≤ <i>a</i><sub>max</sub>}。
+實際的致動器是 PX4 的位置控制器：程式送出參考位置 p<sub>ref</sub> 與速度前饋 v<sub>ref</sub>，PX4 追蹤它們；我們的控制量 a 積分成
+v<sub>ref</sub>、p<sub>ref</sub>（運動平滑層，加速度上限同樣是 <i>a</i><sub>max</sub>），因此 (1) 的輸入限制和實際送出的命令一致。
+PX4 追蹤與位置廣播（10 Hz、mesh 延遲）合成的反應延遲記為 τ ≈ 0.3 s，在第 6 節用安全距離的餘量處理。</p>
+<p>鄰機 <i>j</i> 的狀態只透過位置廣播取得（機號、位置、速度、旗標「執行中」「任務中懸停」），位置用速度外推收到後經過的時間。
+記相對量 Δp = p<sub><i>i</i></sub> − p<sub><i>j</i></sub>、Δv = v<sub><i>i</i></sub> − v<sub><i>j</i></sub>、<i>d</i> = ‖Δp‖、n = Δp / <i>d</i>、
+<i>ḋ</i> = nᵀΔv（&lt; 0 表示正在靠近）。</p>
+
+<h2>2. 安全集合與控制障礙函數</h2>
+<p>安全的定義是任兩台的水平距離不小於 <i>r</i>：𝒮 = {x : <i>d</i> ≥ <i>r</i>}。控制問題是找一個回授 u = k(x)，讓閉迴路的軌跡從安全的
+初始狀態出發後永遠留在安全集合裡（前向不變，forward invariance）。</p>
+<div class="thm"><b class="t">定義（控制障礙函數，Ames 等 2017）</b>　連續可微的 <i>h</i>(x) 定義集合 𝒞 = {x : <i>h</i>(x) ≥ 0}。若存在擴展 𝒦 類函數 α，使得
+<div class="eq" style="margin:1.5mm 0">sup<sub>u∈𝒰</sub> [ <i>L<sub>f</sub>h</i>(x) + <i>L<sub>g</sub>h</i>(x) u ] ≥ −α(<i>h</i>(x))　對所有 x ∈ 𝒞<span class="n">(2)</span></div>
+則 <i>h</i> 是 CBF；任何滿足 <i>ḣ</i> ≥ −α(<i>h</i>) 的 Lipschitz 回授都讓 𝒞 前向不變（由 Nagumo 定理）。我們取 α(<i>h</i>) = γ<i>h</i>。</div>
+
+<h3>2.1 為什麼不能直接用距離平方</h3>
+<p>直覺的選擇 <i>h</i><sub>0</sub> = <i>d</i>² − <i>r</i>² 對加速度的<b>相對階數是 2</b>：<i>ḣ</i><sub>0</sub> = 2ΔpᵀΔv 不含 a（<i>L<sub>g</sub>h</i><sub>0</sub> = 0），
+條件 (2) 無法透過 a 滿足。早期的實作把速度當輸入（一階積分器 ṗ = u），在 <i>h</i><sub>0</sub> 上直接加約束；但實際的速度要經過加速度限制才能改變，
+3 m/s 時剎停要約 3 m，比 <i>r</i> 還長，模型與實際不符時保證就失效（SITL 量到最近 0.88 m）。另外 <i>h</i><sub>0</sub> 只看距離、不看方向，
+路線本來會錯開 2.36 m 的錯身也被砍速度。高相對階數的一般解法是指數 CBF／高階 CBF（Nguyen &amp; Sreenath 2016、Xiao &amp; Belta 2019）；
+我們採用多機器人文獻中物理意義較清楚的「剎車距離」障礙函數（Wang、Ames、Egerstedt 2017）。</p>
+
+<h2>3. 二階障礙函數（剎車距離）</h2>
+<div class="eq"><i>h</i>(x) = √( 2<i>A</i> (<i>d</i> − <i>r</i>) ) + <i>ḋ</i><span class="n">(3)</span></div>
+<p><b>意義</b>：<i>A</i> 是兩台可用的相對減速度。<i>h</i> ≥ 0 等價於「靠近速度 −<i>ḋ</i> ≤ √(2<i>A</i>(<i>d</i> − <i>r</i>))」，
+也就是現在立刻以 <i>A</i> 全力剎車，靠近速度會在距離縮到 <i>r</i> 之前歸零（等加速度運動 <i>s</i>² = 2<i>A</i>·距離）。
+所以 𝒞 = {<i>h</i> ≥ 0} ⊂ 𝒮，而且是「還剎得住」的狀態集合，比 𝒮 保守，速度越快越保守。</p>
+
+<h3>3.1 對加速度的相對階數為 1</h3>
+<p>對時間微分（<i>d</i> &gt; <i>r</i>）：</p>
+<div class="eq"><i>d̈</i> = nᵀΔa + ( ‖Δv‖² − <i>ḋ</i>² ) / <i>d</i>,　　<i>ḣ</i> = nᵀΔa + ( ‖Δv‖² − <i>ḋ</i>² ) / <i>d</i> + <i>A ḋ</i> / √( 2<i>A</i>(<i>d</i> − <i>r</i>) )<span class="n">(4)</span></div>
+<p>第二項是相對速度的切向分量造成的「離心」項（恆 ≥ 0，錯身時幫助安全）；第三項在靠近時為負。Δa = a<sub><i>i</i></sub> − a<sub><i>j</i></sub>
+出現在 <i>ḣ</i> 中，<i>L<sub>g</sub>h</i> = nᵀ ≠ 0，相對階數為 1，條件 <i>ḣ</i> ≥ −γ<i>h</i> 是 a 的<b>線性</b>不等式：</p>
+<div class="eq">nᵀ(a<sub><i>i</i></sub> − a<sub><i>j</i></sub>) ≥ <i>b</i> := −( ‖Δv‖² − <i>ḋ</i>² ) / <i>d</i> − <i>A ḋ</i> / √( 2<i>A</i>(<i>d</i> − <i>r</i>) ) − γ <i>h</i><span class="n">(5)</span></div>
+
+<h3>3.2 可行性（單一鄰機）</h3>
+<p>只有一台鄰機時，(5) 在 𝒰 裡有解若且唯若 <i>b</i> ≤ <i>a</i><sub>max</sub>（取 a = <i>a</i><sub>max</sub> n）。在 𝒞 的內部與邊界附近，<i>A</i> 取
+不超過實際能提供的減速度時，全力剎車就讓 <i>h</i> 不再下降，條件 (2) 成立。多台鄰機加上輸入限制時，各約束不一定同時可行（第 5 節）。</p>
+
+<h2>4. 分散式：責任分配</h2>
+<p>(5) 含有對方的加速度 a<sub><i>j</i></sub>，各機不知道。做法是把需要的相對加速度分給兩台：機 <i>i</i> 負責 ρ<sub><i>i</i></sub>、機 <i>j</i> 負責 ρ<sub><i>j</i></sub>，
+ρ<sub><i>i</i></sub> + ρ<sub><i>j</i></sub> = 1：</p>
+<div class="eq">nᵀa<sub><i>i</i></sub> ≥ ρ<sub><i>i</i></sub> <i>b</i>,　　−nᵀa<sub><i>j</i></sub> ≥ ρ<sub><i>j</i></sub> <i>b</i>　⟹　nᵀΔa ≥ <i>b</i>,　　<i>A</i> = <i>a</i><sub>max</sub> / ρ<sub><i>i</i></sub><span class="n">(6)</span></div>
+<p>兩台各自滿足自己的那一份，合起來就是 (5)。可用的相對減速度隨之改變：各分一半時兩台一起剎，<i>A</i> = 2<i>a</i><sub>max</sub>；全額負責時只有自己剎，
+<i>A</i> = <i>a</i><sub>max</sub>。ρ 的選擇（只用位置廣播的資料，兩台算出來互補）：</p>
+<table>
+<tr><th>情況</th><th>ρ<sub><i>i</i></sub></th><th>理由</th></tr>
+<tr><td>自己是讓的那台（第 7 節的路權）</td><td>1</td><td>直行的那台照原路線，安全由讓的那台全額負責</td></tr>
+<tr><td>對方沒有在靠近（往自己的速度 &lt; 0.2 m/s：懸停或正在離開）</td><td>1</td><td>對方不會替自己剎那一半；只假設它會分擔時，3 m/s 下單元測試量到 0.57 m</td></tr>
+<tr><td>兩台都在靠近</td><td>0.5</td><td>對稱分攤，兩台一起剎</td></tr>
+</table>
+<p class="note">ρ 是「自己分到多少相對加速度的責任」，不是「讓多少」：它決定約束多緊，不決定往哪邊繞。方向由第 7 節的監督層決定。</p>
+
+<h2>5. CBF-QP 與無解時的處理</h2>
+<p>每個控制週期（20 Hz）解：</p>
+<div class="eq">a* = argmin<sub>a</sub> ‖a − a<sub>ref</sub>‖²　s.t.　nₖᵀa ≥ ρₖ <i>b</i>ₖ（每台需要的鄰機 <i>k</i>），　‖a‖ ≤ <i>a</i><sub>max</sub><span class="n">(7)</span></div>
+<p>可行域是半平面與圓盤的交集，是凸的二維 QP，用 Dykstra 交替投影求解（鄰機只有幾台，迭代很快）。a<sub>ref</sub> 是監督層想要的速度換成的加速度：
+a<sub>ref</sub> = (u<sub>ref</sub> − v<sub>ref</sub>) / Δt，限制在 <i>a</i><sub>max</sub>；求得的 a* 積分回 v<sub>ref</sub> + a*Δt 交給運動平滑層。
+因為 ‖a*‖ ≤ <i>a</i><sub>max</sub> 就是平滑層的加速度上限，<b>送給 PX4 的命令就是 QP 的解</b>，不會再被平滑層改掉（一階版本的問題之一）。</p>
+<p><b>可行性不保證</b>：多個約束加上輸入限制可能沒有交集（例如一台被夾在兩台之間、背後無路可退）。這時不使用投影的近似解，改成緊急處理：
+在 ‖a‖ = <i>a</i><sub>max</sub> 的 48 個方向中，選讓所有約束的最小餘裕 minₖ(nₖᵀa − ρₖ<i>b</i>ₖ) 最大的方向，也就是近似解 max-min 問題。
+只看「離最近那台遠一點」時，最近的是停著的鄰機，會被推向另一台高速飛來的（單元測試 0.31 m），所以必須考慮全部約束。</p>
+<p>CBF-QP 只看當下的狀態，無法預先避免「幾秒後無解」。在起降區這種密集的地方，我們用場景的設定（停機點間隔 5 m，大於 3 m/s 的剎車距離約 3.9 m）
+讓系統留在可行的範圍，而不是在 QP 上增加規則。要從根本處理需要預測整段軌跡，也就是 MPC 或 MPC-CBF，列為後續工作。</p>
+
+<h2>6. 延遲與量測的穩健性</h2>
+<p>CBF 的保證假設控制量立即作用。實際上 PX4 追蹤、位置廣播共有約 τ = 0.3 s 的延遲，這段時間仍以原速度靠近。處理方式是把安全距離收緊（集合往內縮）：</p>
+<div class="eq"><i>r</i><sub>eff</sub> = <i>r</i> + τ · max(0, −<i>ḋ</i>),　　剎車餘裕 <i>m</i> = <i>d</i> − <i>r</i> − τ·(−<i>ḋ</i>)<sub>+</sub> − (−<i>ḋ</i>)<sub>+</sub>² / (2<i>A</i>)<span class="n">(8)</span></div>
+<p>(3) 中的 <i>r</i> 用 <i>r</i><sub>eff</sub> 代替。<i>m</i> ≥ 0 與 <i>h</i> ≥ 0 等價（同一個水平集），<i>m</i> 有長度的單位、好解釋，用來決定何時啟用約束（第 7.3 節）。
+安全計算用<b>實際量到的</b>位置與速度（PX4 落後時照真實狀態保守處理），積分則從參考速度 v<sub>ref</sub> 開始（命令平順）。
+這是工程上的餘量，不是對延遲的嚴格證明（嚴格的做法如 input-to-state safety，列為後續）。</p>
+
+<h2 class="pb">7. 活性：監督式名目控制</h2>
+<p>CBF-QP 是最小修正：只拿掉 a<sub>ref</sub> 朝向不安全的分量。兩台正對面飛時，最小修正就是沿連線減速，系統收斂到兩台都停住的平衡點；
+這是 CBF-QP 已知會引入不想要的漸近穩定平衡點的性質（Reis 等 2021），多機器人的「死結」（Grover 等 2020）。<b>安全由 CBF 保證，但不停頓要靠名目控制器</b>。
+我們在 CBF 之前加一層監督式控制，只決定 a<sub>ref</sub>：</p>
+<pre class="flow">每台鄰機，每個週期：
+① 預測會不會碰（有限時間的最近點，CPA）── 不會：不比路權、不繞、不加 CBF 約束（距離或剎車餘裕不夠時例外）
+② 會：路權鍵 K = (任務中懸停, 執行中, −機號)，大的直行、小的讓
+③ 讓的那台：VO 找離 u_nom 最近的安全速度（先只轉方向，左右一樣時往右；找不到才降速）
+④ 角色、方向鎖定到已經通過且距離變大（遲滯）
+⑤ 第 5 節的 CBF-QP 保底；無解 → 緊急</pre>
+
+<h3>7.1 衝突預測</h3>
+<p>自己用<b>名目速度</b> u<sub>nom</sub>（意圖，例如剛接到任務、還沒加速時），鄰機用廣播的速度；只看有限時間、而且不外推到自己的目標之後：</p>
+<div class="eq">v<sub>r</sub> = u<sub>nom</sub> − v<sub><i>j</i></sub>,　<i>t</i>* = clamp( −Δpᵀv<sub>r</sub> / ‖v<sub>r</sub>‖², 0, <i>T</i> ),　<i>d</i>* = ‖Δp + v<sub>r</sub><i>t</i>*‖,　<i>T</i> = min(5 s, 到目標的時間)<span class="n">(9)</span></div>
+<p>正在靠近而且 <i>d</i>* &lt; <i>d</i><sub>miss</sub> 才算衝突（0.5 m/s 時 1.5 m，3 m/s 時 2.1 m）。最近點恰好是抵達自己目標的那一刻（目標就在鄰機旁，例如停機點）時，
+只要求 <i>r</i>：不要求做不到的距離，否則會一直繞（SITL 曾因此相撞）。用意圖而不是量測速度，是因為剛起步的那台量到的速度是 0，
+等量得到時已經太近（SITL 0.88 m 的原因）。</p>
+
+<h3>7.2 路權：讓對稱性破缺</h3>
+<p>兩台用同一份位置廣播計算字典序的路權鍵 K = (任務中懸停, 執行中, −機號)，因為 K 是全序、機號唯一，對任何一對都恰好一台直行、一台讓，
+不會兩台都等、也不會都不讓。這就是打破正對面這種對稱情況、避開死結平衡點的機制。「任務中懸停」由 BT 的狀態產生（已到任務點、正在辨識或監控），
+不是用速度猜，避免剛起步、減速被誤判。開始交會後角色與繞行方向鎖定，直到已經通過且距離連續變大才解除；這是遲滯，避免在邊界附近來回切換角色
+（類似 Zeno 式的高頻切換）。</p>
+
+<h3>7.3 VO 繞行與約束的啟用</h3>
+<p>讓的那台在速度空間找 u<sub>ref</sub>：保持速度、轉最小的角度，使對所有鄰機的預測最近距離都夠遠（速度障礙的概念，Fiorini &amp; Shiller 1998）；
+讓行一定是轉向，不是設成零速度。停著的那台要讓時，側移速度只要「剛好來得及」= 1.5 × 需要的側移 / 交會前的時間。</p>
+<p>CBF 約束只對需要的鄰機啟用：預測會衝突、距離 &lt; 1.3 m、或剎車餘裕 <i>m</i> &lt; 0.5 m。因為 <i>m</i> 與 <i>h</i> 是同一個水平集，
+「<i>m</i> &lt; 0.5 m 就啟用」表示在 ∂𝒞 的一個鄰域內約束一定開著，前向不變的論證仍然成立；遠離邊界時不加約束，路線本來會錯開的錯身就不會被砍速度。</p>
+
+<h2>8. 參數與它們的來源</h2>
+<table>
+<tr><th>參數</th><th>值</th><th>來源</th></tr>
+<tr><td><i>r</i>（<code>cbf.safe_radius</code>）</td><td>1.0 m</td><td>機體 x500 約 0.7 m ＋ 定位誤差；要小於停機點間隔</td></tr>
+<tr><td><i>a</i><sub>max</sub>（<code>motion.max_accel</code>）</td><td>1.5 m/s²</td><td>平滑層的加速度上限，CBF 自動用同一個值</td></tr>
+<tr><td>γ（<code>cbf.gamma</code>）</td><td>1.0 1/s</td><td><i>h</i> 允許下降的速率；大＝晚剎</td></tr>
+<tr><td>τ（<code>cbf.response_delay</code>）</td><td>0.3 s</td><td>PX4 追蹤＋位置廣播的延遲</td></tr>
+<tr><td><i>d</i><sub>miss</sub>（<code>cbf.miss_clearance</code>）</td><td>1.5 m（0.5 m/s）、2.1 m（3 m/s）</td><td><i>r</i> + 0.5 + 0.2<i>V</i>：繞開之後不進入 CBF 的作用範圍</td></tr>
+<tr><td>預測時間 <i>T</i>（<code>cbf.ttc_horizon</code>）</td><td>5 s</td><td>3 m/s 對飛時約 30 m 前發現</td></tr>
+<tr><td>停機點間隔（yard）</td><td>5 m</td><td>3 m/s 的剎車距離 τV + V²/(2<i>a</i><sub>max</sub>) ≈ 3.9 m，加上 <i>r</i></td></tr>
+</table>
+
+<h2>9. 驗證</h2>
+<h3>9.1 單元測試（簡化的閉迴路：速度一階追隨命令、時間常數 0.3 s、位置廣播 10 Hz）</h3>
+<table>
+<tr><th>情境</th><th>檢查</th></tr>
+<tr><td>路權鍵</td><td>16 種狀態組合下兩台的結論一定互補</td></tr>
+<tr><td>路線錯開 2 m 經過懸停的鄰機</td><td>不觸發、不加約束、速度維持 ≥ 0.45 m/s（0.5 m/s 巡航）</td></tr>
+<tr><td>正對面、垂直交叉（0.5、3 m/s）</td><td>≥ <i>r</i>，兩台都沒有停住超過 1 s，直行的那台不減速</td></tr>
+<tr><td>經過任務中懸停的鄰機；待命的擋在執行中的航線上</td><td>懸停的不被推開；待命的讓開；飛的那台不停</td></tr>
+<tr><td>0.88 m 的 SITL 重現（懸停 → 起步朝經過的鄰機）</td><td>角色在懸停時就鎖定，起步時不會撞上</td></tr>
+<tr><td>二階：3 m/s 正對不動的鄰機（6 m 外）</td><td>剎車距離前開始剎，停在 <i>r</i> 外，不反向</td></tr>
+<tr><td>3 m/s 回停機點互換位置（間隔 5 m）</td><td>≥ 0.9<i>r</i>、都回到停機點、不繞大圈</td></tr>
+<tr><td>兩側夾擊（距離 &lt; <i>r</i>）</td><td>進入緊急，往兩台都變遠的方向</td></tr>
+</table>
+<p class="note"><code>test_avoidance</code> 15 項、<code>test_cbf</code> 16 項、<code>test_motion</code> 8 項、<code>test_skeleton</code> 41 項全部通過，零警告。</p>
+
+<h3>9.2 PX4 SITL（yard 100 × 80 m、3 台 x500、3 m/s、<code>itest.py demo --world yard --scenario assign_random --seed 7</code>）</h3>
+<p>情境含固定任務、人工指派（路上起火）、隨機插入的任務（同一點起火），並把一個任務放在「正在懸停的無人機」後方，讓另一台的航線經過它
+（CBBA 依距離分配，兩台在飛行中交叉的分配幾乎不會出現，所以用經過懸停的無人機來製造交會）。</p>
+<table>
+<tr><th>項目</th><th>結果</th></tr>
+<tr><td>交會（uav1 經過在火點上空懸停的 uav2）</td><td>uav1 約 5 s 前預測到衝突、用 VO 轉向，<b>最近 2.25 m</b>，過程中不減速到停</td></tr>
+<tr><td>全程最近距離</td><td>2.25 m（≥ <i>r</i> = 1 m）</td></tr>
+<tr><td>其他</td><td>兩個火點都由地面機器人處理完、三台回到停機點 0.05～0.26 m、所有任務完成</td></tr>
+</table>
+<p class="note">對照：一階 CBF、約束一直開著時，錯開 2.36 m 的錯身也從 2.8 減到 0.6 m/s；一階＋提前繞行在 3 m/s、停機點 2 m 時相撞（0.31 m）。</p>
+
+<h2>10. 限制與後續</h2>
+<ul>
+<li><b>可行性</b>：多約束＋輸入限制的相容性不保證（第 5 節）；密集區用場景設定避免。後續：MPC-CBF，或依可行性設計 ρ。</li>
+<li><b>延遲</b>：τ 用安全距離的餘量處理，沒有嚴格證明；後續可用 input-to-state safety 或把延遲納入模型。</li>
+<li><b>非合作鄰機</b>：不跑這套的鄰機（被人工接管、PX4 自己返航）沒有位置廣播的狀態，當成待命；不會替自己分擔的情況由 ρ = 1 涵蓋（對方沒有在靠近時）。</li>
+<li><b>保守性</b>：(3) 只看連線方向。兩台約 6 m/s 相對速度對飛時，讓的那台在 14 m 外就判成剎不住而短暫觸發緊急（VO 已經讓航線錯開，不危險）。</li>
+<li><b>更高速</b>：實驗規劃的 8～12 m/s 時剎車距離約 30～60 m，水平避碰的作用範圍涵蓋大半個場地，建議改用不同高度分層，水平 CBF 只用在任務點附近。</li>
+</ul>
+
+<h2>參考文獻</h2>
+<ol class="ref">
+<li>A. D. Ames, X. Xu, J. W. Grizzle, P. Tabuada, "Control Barrier Function Based Quadratic Programs for Safety Critical Systems," <i>IEEE Trans. Automatic Control</i>, 2017.</li>
+<li>A. D. Ames, S. Coogan, M. Egerstedt, G. Notomista, K. Sreenath, P. Tabuada, "Control Barrier Functions: Theory and Applications," <i>European Control Conference</i>, 2019.</li>
+<li>L. Wang, A. D. Ames, M. Egerstedt, "Safety Barrier Certificates for Collisions-Free Multirobot Systems," <i>IEEE Trans. Robotics</i>, 2017.</li>
+<li>Q. Nguyen, K. Sreenath, "Exponential Control Barrier Functions for Enforcing High Relative-Degree Safety-Critical Constraints," <i>American Control Conference</i>, 2016.</li>
+<li>W. Xiao, C. Belta, "Control Barrier Functions for Systems with High Relative Degree," <i>IEEE Conference on Decision and Control</i>, 2019.</li>
+<li>M. F. Reis, A. P. Aguiar, P. Tabuada, "Control Barrier Function-Based Quadratic Programs Introduce Undesirable Asymptotically Stable Equilibria," <i>IEEE Control Systems Letters</i>, 2021.</li>
+<li>J. S. Grover, C. Liu, K. Sycara, "Deadlock Analysis and Resolution for Multi-Robot Systems," <i>Workshop on the Algorithmic Foundations of Robotics</i>, 2020.</li>
+<li>P. Fiorini, Z. Shiller, "Motion Planning in Dynamic Environments Using Velocity Obstacles," <i>Int. J. Robotics Research</i>, 1998.</li>
+<li>J. van den Berg, S. J. Guy, M. Lin, D. Manocha, "Reciprocal n-Body Collision Avoidance," <i>Robotics Research (ISRR)</i>, 2011.</li>
+</ol>
+<p class="note">文獻資訊依記憶整理，引用前請核對原文的卷期與頁碼。</p>
+
+</body>
+</html>

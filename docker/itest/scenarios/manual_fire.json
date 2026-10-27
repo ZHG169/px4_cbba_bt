@@ -1,0 +1,14 @@
+{
+  "_說明": "新的模擬端測試（2026-10-20，使用者定的流程）：1. 全部起飛 → 2. 開始出價 → 2-1 固定任務 G1、G2、G3 → 2-2a 突發人工指派 M：從正在做 G 的無人機隨機挑一台（target busy），M 的位置隨機；那台交還 G（PREEMPTED_BY_MANUAL）、去 M，G 重新競標由別台做 → 2-2b 同時在那台飛往 M 的路上（route，線段比例）或 M 旁（near 公尺內）隨機起火，照火警 BT 發布地面任務、監控到狗處理完，M 延遲（BT log「警告：人工指派 … 延遲」）→ 3. M 指派後隨機幾秒插入任務 T（位置隨機），由沒任務或做完的那台執行。位置、時間都隨機（隨機才測得到 CBBA），同一個 --seed 重現。報告的 M1～M3 是這個情境的檢查。manuals 的欄位：target（busy = 正在做固定任務的那幾台隨機挑一台，或 uav2）、random（位置隨機；或 point、x y）、duration、at／delay_range（開始後 at 秒起、再等 delay_range 之間的隨機秒數）、fire（route [a, b]：線段比例；near：M 旁幾公尺內；route_prob：放路上的機率）。tasks 多了 random、after_manual、delay_range。用法：python3 docker/itest/itest.py demo --scenario manual_fire --seed 7",
+  "tasks": [
+    {"name": "G1", "point": "G1", "duration": 4},
+    {"name": "G2", "point": "G2", "duration": 4},
+    {"name": "G3", "point": "G3", "duration": 4},
+    {"name": "T", "random": true, "duration": 4, "after_manual": "M", "delay_range": [8, 20]}
+  ],
+  "manuals": [
+    {"name": "M", "random": true, "target": "busy", "duration": 5, "at": 1, "delay_range": [1, 6],
+     "fire": {"route": [0.4, 0.8], "near": 3.0, "route_prob": 0.5}}
+  ],
+  "timeout": 540
+}

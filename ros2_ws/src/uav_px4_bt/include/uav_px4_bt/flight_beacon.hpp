@@ -7,7 +7,9 @@
 // 格式（大端序，42 B）：
 //   magic 0x4346（'CF'）2 | version 1 | sender_id 2 | session_id 8 | sequence 4 | flags 1 |
 //   x、y、z 4×3 | vx、vy、vz 4×3（map ENU，float32）
-//   flags bit 0 在空中（armed 且沒有 landed）、bit 1 位置有效、bit 2 執行任務中（前往或停留；待命的會讓路）
+//   flags bit 0 在空中（armed 且沒有 landed）、bit 1 位置有效、bit 2 執行任務中（前往或停留；待命的會讓路）、
+//         bit 3 任務中懸停（BT 已經到任務點、正在停留／辨識／監控；避碰的路權最高，2026-10-24）。
+//         加 bit 不改大小、不改版本：舊的程式收到新封包會忽略 bit 3，新的收到舊封包讀成 0
 // 收端只保留每台最新的一筆：同一個 session 的 sequence 比較舊就丟掉；換 session（重開機）直接接受。
 // 資料的年齡用收到的時間算（不用對時）。
 #pragma once
@@ -35,6 +37,7 @@ struct Beacon
   bool airborne{false};
   bool position_valid{false};
   bool busy{false};
+  bool task_hover{false};
   Vec3 position;
   Vec3 velocity;
 };

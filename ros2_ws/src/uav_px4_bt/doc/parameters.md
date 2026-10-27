@@ -35,7 +35,7 @@ NavigateTo / AirRecon / 待命 / 回起飛點
 |---|---|---|---|
 | `tick_period_ms` | 50 | BT tick 週期 | 換任務的中斷是 callback 直接 tick，不受它影響；調小只讓動作更新得更密 |
 | `min_battery` | 20 % | 電量 ≤ 這個值就返航（PX4 RTL），手上的任務回報 `BATTERY_RTL`；觸發後不恢復 | 要和 cbba_node 的 `safety_reserve`（20 %）一致 |
-| `return_home_delay` | 2 s | 做完任務、待命這麼久後飛回起飛點上空 | 負值 = 原地懸停；新任務來時中途就走 |
+| `return_home_delay` | 1 s（2026-10-20 從 2 s） | 做完任務、待命這麼久後飛回起飛點上空 | 負值 = 原地懸停；新任務來時中途就走 |
 | `fire_task.idle_watch_tag` | 101 | 待命（含做完任務飛回起飛點）時也看這個火警 tag：看到新火點 → 發布地面任務 → 到火點上空監控到地面任務結束或 `monitor_timeout` → 回到待命（2026-10-19）；監控中 CBBA 派了任務就去做任務。0 = 待命時不看（只有執行任務時看） | 正式 BT（`uav_task_manager_node`）才有 |
 | `fire_task.monitor_timeout` | 120 s | 看到火警後懸停監控，等地面任務結束（`task_closed`）最多多久 | 0 = 不等（停留時間到就走）；沒有狗時會等滿這麼久，排在後面的任務在 `overrun_margin` 後交給別台 |
 | `mission_timeout` | 0（= 1800 s） | 一趟（佇列跑完）最長多久，超過就中止 | 通常不用改 |
@@ -65,54 +65,102 @@ u_nom 大小 = min(cruise_speed, k_att × 距離, √(2 × brake_accel × 距離
 | 參數 | 預設 | 作用 | 調大 | 調小 |
 |---|---|---|---|---|
 | `cbf.k_att` | 1.0 1/s | 最後幾公尺的收斂 | 收得快，可能衝過頭 | 最後一段慢 |
-| `cbf.brake_accel` | 0.2 m/s²（2026-10-19 試過 0.15，沒有改善：實測本來就沒有衝過頭） | 水平剎車曲線 | 晚剎車，容易衝過頭 | 早剎車、比較穩，飛得比較久 |
+| `cbf.brake_accel` | 0.5 m/s²（2026-10-20 從 0.2：最後 6 m 要約 8 s、看起來拖；0.15、0.2 實測都沒有衝過頭，0.5 要用 `hover_error.py` 確認） | 水平剎車曲線 | 晚剎車，容易衝過頭 | 早剎車、比較穩，飛得比較久 |
 | `cbf.brake_vertical_accel` | 0.1 m/s² | 垂直剎車曲線 | 爬升快，容易衝過頭 | 爬升、換高度比較慢；巡檢高度 25 m 以上時爬升可能超過 20 s，會出現「爬升 20 s 還沒到」的警告 |
 
 `brake_accel` 要 ≤ `motion.max_accel`，`brake_vertical_accel` 要 ≤ `motion.max_vertical_accel`。
 
-### 避碰（只看水平）
+### 避碰（只看水平；2026-10-24 定案，`include/uav_px4_bt/avoidance.hpp`）
 
-對 `influence_radius` 內的每台鄰機 j（p_j 用廣播的速度外推 age 秒，最多 `max_extrapolation`）：
+目標：路線交叉時不碰撞、不互相卡住（不要「停下來等人過」）。每個控制週期、每台鄰機 j（p_j 用廣播的速度外推 age 秒，
+最多 `max_extrapolation`）依序做：
 
+**1. 預測會不會碰（ConflictPredictor）**：自己用名目速度 u_nom（意圖，不是量到的速度——剛起步時量到的是 0）、鄰機用廣播的速度：
 ```
-h_j = |p − p_j|² − r²                    r = safe_radius（讓路時 yield_radius）
-約束  a_j·u ≥ b_j
-      a_j = 2 (p − p_j)
-      b_j = λ a_j·v_j − ρ γ h_j
+r = p − p_j          v_r = u_nom − v_j
+T  = min(ttc_horizon, 自己到目標的水平距離 / |u_nom|)     自己幾乎不動（|u_nom| < 0.05 m/s）時 T = ttc_horizon
+t* = clamp(−r·v_r / |v_r|², 0, T)       d* = |r + v_r t*|
+衝突 = 正在靠近（−r·v_r > 0、|v_r| ≥ 1 cm/s）而且 d* < 要求的距離
+要求的距離 = miss_clearance；自己沒在動時 ≤ safe_radius + 0.5 m；
+             最近點就是自己到目標的那一刻（目標就在鄰機旁）時只要 safe_radius；
+             現在已經比要求的近時，不要再更近就好（往外、維持距離都可以）
 ```
+沒有衝突：不比路權、不繞、不加 CBF 約束（距離 < `guard_radius` 時例外），照原路飛。
+「到目標那一刻只要 safe_radius」是因為目標本來就在鄰機旁時（起飛點只隔 2 m）做不到 miss_clearance，原本會一直繞（10/24 SITL 相撞）；
+最近點在到目標之前（對方從路上經過）照常要 miss_clearance——否則待命的讓開後，名目速度又把它拉回對方的航線上。
 
-| 情況 | λ | ρ | r |
-|---|---|---|---|
-| 同樣狀態（都執行中或都待命） | 0 | 0.5 | safe_radius |
-| 自己待命、鄰機執行中（讓路） | 1 | 1 | yield_radius |
-| 自己執行中、鄰機待命 | 0 | 0.5 | safe_radius |
+**2. 誰讓（RightOfWayPolicy）**：路權鍵 K = (任務中懸停, 執行中, −機號)，大的直行、小的讓。
+- 任務中懸停：BT 正在任務點停留、辨識 AprilTag、監控火點（`UavContext::moveTo`：執行中而且已經到 goal，水平 < max(2 × `reach_tolerance`, 0.5 m)），
+  用位置廣播 flags 的 bit 3 送出去；**不是看速度猜**（剛起步、減速、短暫停頓都會是 0）。
+- 執行中：ExecMode 是 NAVIGATING／EXECUTING（位置廣播的 busy）。
+- 兩台用同一份位置廣播算，結果一定唯一（不會兩台都不讓）。
 
-1. 往右繞：名目速度違反的約束，名目速度加 `k_tan` × 違反量（(b − a·u_nom)/|a|）的「面向鄰機的右手邊」分量。
-2. 求 u = argmin |u − u_nom'|²，使所有約束成立（Dykstra 交替投影）。
-3. 垂直用名目值、限制在 `max_vertical_speed`；總和限制在 `cruise_speed`。
+**3. 鎖定角色（EncounterState）**：衝突開始時記下誰讓、往哪邊繞；交會途中任務完成、busy 改變、速度變 0 都不換。
+解除：已經通過（不再靠近）而且距離連續 3 個週期變大；或預測不衝突而且距離 > `yield_exit`；或沒有位置廣播。
 
-**推導量**（ρ = 0.5、對單一鄰機）：
+**4. 讓的那台怎麼繞（AvoidancePlanner，VO）**：找離 u_nom 最近、對所有鄰機都安全的速度（讓的對象：預測最近距離 ≥ 要求的距離；
+其他鄰機 ≥ safe_radius）：
+- 先保持速度只轉方向（每 3°，往左右各到 180°）：左右都行時選偏轉小的，一樣時往自己的右邊；選定後鎖定那一側。
+- 保持速度找不到才降速（75、50、25 %，log「保持速度繞不開，降到 …」）；再找不到取餘裕最大的，交給 CBF 和緊急處理。
+- 自己沒在動（懸停的讓路，例如待命的停在執行中那台的航線上）：留在原地就安全就不動，否則往旁邊移開，
+  速度只要「剛好來得及讓開」= 1.5 ×（要求的距離 − 預測最近距離）/ 距離交會的時間，最低 0.2 m/s，找不到安全方向才加快到 cruise_speed
+  （2026-10-24：原本用 max(0.3 × cruise_speed, 對方的速度)，3 m/s 時起降板上只要讓 1 m 的那台衝出去 4.6 m 再繞回來）。
+  讓行**不是**設成零速度。
+- 在動的讓路、保持速度找不到時，先用讓路速度 max(0.3 × cruise_speed, 對方的速度) 試，再降速。
+- 直行的那台照 u_nom。
 
-| 量 | 公式 |
-|---|---|
-| 距離 d 時允許「往鄰機靠近」的速度 | c(d) = ρ γ (d² − r²) / (2d) |
-| γ 的上限（剎得住） | γ ≤ 2 × `motion.max_accel` / (ρ × cruise_speed) |
-| influence_radius 的下限（一進來不急剎） | R ≥ (V + √(V² + (ρ γ r)²)) / (ρ γ) |
-| 讓路時退到的距離（鄰機以 v 飛過來） | d² − 2 d v / γ − yield_radius² = 0 的正根 |
-| 懸停的會不會被推 | u = 0 在 h ≥ 0 時滿足，不會（只有 h < 0 或讓路時才動） |
+**5. CBF 保底**：只對需要的鄰機加約束（2026-10-24 起預設**二階**，`cbf.second_order: true`）
 
-| 參數 | 預設（程式／yaml） | 作用 | 調大 | 調小 |
+| 鄰機 | 什麼時候加 | ρ |
+|---|---|---|
+| 自己讓的對象 | VO 找不到安全速度、繞完預測還不夠遠、距離 < `guard_radius`，或（二階）剎車距離的餘裕 < 0.5 m | 1（全額負責） |
+| 直行時的對象、沒有衝突的鄰機 | 距離 < `guard_radius`，或（二階）剎車距離的餘裕 < 0.5 m | 0.5 |
+
+二階（`cbf2Filter`；模型 ṗ = v、v̇ = a、|a| ≤ `motion.max_accel`）：
+```
+d = |p − p_j|、n = (p − p_j)/d、ḋ = n·(v − v_j)（< 0 在靠近；v 用實際量到的速度）、A = max_accel / ρ（相對減速度）
+r = safe_radius ＋ response_delay × 靠近速度          反應延遲期間還會往前飛
+h = √(2 A (d − r)) + ḋ                              照 A 全力剎，靠近速度在剩下的距離內剎得住才 ≥ 0
+約束 ḣ ≥ −γ h、鄰機的加速度當 0：  n·a ≥ ρ [ −(|Δv|² − ḋ²)/d − A ḋ / √(2A(d − r)) − γ h ]
+剎車距離的餘裕 = d − safe_radius − response_delay × 靠近速度 − 靠近速度² / (2A)
+```
+ρ（二階）：讓的那台 1；其他 0.5，但對方往自己的速度 < 0.2 m/s（停著或正在離開）時也是 1——它不會替你剎那一半
+（2026-10-24 單元測試：直行的那台以為對方會剎一半，3 m/s 時剎太晚，靠到 0.57 m）。
+VO 的速度先換成加速度 a_ref = (u_ref − v_ref)/dt（v_ref = 平滑層上一個週期的參考速度，限制在 max_accel），投影到所有約束和
+|a| ≤ max_accel 的交集（Dykstra），再積分回速度 v_ref + a·dt 交給平滑層——平滑層的加速度上限就是 max_accel，不會再改掉 CBF 的結果
+（一階時平滑層會把 CBF 要的急轉、急剎拖慢，3 m/s 時 CBF 的保證被延遲吃掉）。速度越快，h 越早變小、越早開始剎，
+所以 3 m/s 時不用把 guard_radius 加大到 4 m（一階時那樣做，起降板上三台互相減速）。
+
+一階（`cbfFilter`，`cbf.second_order: false`，對照用）：h = |p − p_j|² − r²、a·u ≥ λ a·v_j − ρ γ h（a = 2(p − p_j)；讓的 λ = 1、其他 λ = 0），
+u = argmin |u − u_ref|²。
+
+**6. 緊急**：距離 < `safe_radius`，或投影後還有約束不成立 → 不用投影的結果。二階：最大加速度、在一圈方向（每 7.5°）裡
+挑對**所有**鄰機的約束違反最少的（`cbf2Escape`；原本只往遠離最近那台的方向，最近的是停著的鄰機時被推向高速飛來的另一台）；
+一階：往外退，速度 = max(`emergency_speed`, 最近那台往自己靠近的速度)，最多 `cruise_speed`。log「警告：避碰緊急退讓 …」。
+
+log（BT）：「避碰：預測 t* s 後和 uavN 最近 d* m（現在 x m）→ 我讓行（VO 繞）｜對方讓行，我直行」、
+「避碰：和 uavN 解除（我讓行、往右繞，現在 x m）」、「避碰：這次最接近鄰機 x m」。
+
+| 參數 | 預設（yaml） | 作用 | 調大 | 調小 |
 |---|---|---|---|---|
-| `cbf.safe_radius` | 1.2／1.0 m | 水平最小距離 | 保守，但**要 < 出生點間隔（2 m）** | 允許更近；x500 約 0.7 m，不建議 < 1.0 |
-| `cbf.gamma` | 1.0 1/s | 靠近速度隨距離放寬的速率 | 靠得快、晚剎，PX4 落後時可能進 safe_radius | 早減速、繞得早 |
-| `cbf.influence_radius` | 21／3 m | 只對這距離內的鄰機加約束 | 多算一些、不影響結果（約束本來就鬆） | 太小時一進範圍就急剎 |
-| `cbf.yield_radius` | 2.5／2.0 m | 待命讓路給執行中的鄰機時保持的距離 | 讓得多 | 要 > safe_radius，否則執行中的那台到不了停在待命機旁的任務點 |
-| `cbf.k_tan` | 0.8 | 往右繞的比例 | 繞得大 | 0 = 不繞，正對面會停住 |
+| `cbf.safe_radius` | 1.0 m（程式預設也是 1.0，全專案統一） | 水平最小距離 | 保守，但**要 < 出生點間隔（2 m）** | x500 約 0.7 m，不建議 < 1.0 |
+| `cbf.ttc_horizon` | 5 s | 預測最近點只看這麼多秒 | 更早發現、更早繞 | 晚一點才繞 |
+| `cbf.miss_clearance` | 1.5 m | 預測最近距離小於這個才算衝突；讓的那台繞到這麼遠 | 繞得早、繞得大 | **要 > guard_radius**，否則繞完 CBF 還是會砍速度 |
+| `cbf.guard_radius` | 1.3 m | 小於這個距離時 CBF 一定加約束 | 保守（速度快時要大：剎車距離） | 要 > safe_radius |
+| `cbf.yield_exit` | 2.0 m | 交會解除的距離 | 角色鎖得久 | 要 > miss_clearance |
+| `cbf.second_order` | true | 二階 CBF（管加速度、考慮剎車距離）；false = 一階（對照） | | |
+| `cbf.gamma` | 1.0 1/s | CBF 約束裡 h 下降的速率 | 晚剎，PX4 落後時可能進 safe_radius | 早減速 |
+| `cbf.emergency_speed` | 0.3 m/s | 一階的緊急退讓速度（二階用最大減速度） | | |
+| `cbf.response_delay` | 0.3 s | 二階：反應延遲；安全距離加上 延遲 × 靠近速度 | 速度快時更早剎 | PX4 追得很緊時可以小一點 |
 | `cbf.max_extrapolation` | 0.5 s | 鄰機位置最多外推多久 | | |
 | `cbf.neighbor_timeout` | 1 s | 鄰機的廣播超過這麼久沒更新就不管 | 掉包時還記得，但位置舊 | 掉包時當作沒有鄰機 |
+| `cbf.influence_radius`、`cbf.yield_radius`、`cbf.k_tan` | 3 m、2 m、0.8 | 只有舊的 `cbfVelocity`（單元測試對照）用；`yield_radius` 另外是 skeleton 待命讓路的範圍（2 ×） | | |
 
-限制：速度命令還要經過運動平滑層與 PX4，實際速度會落後，最近距離可能比 safe_radius 小一點（單元測試要求 > 0.9 × safe_radius）。
-不跑這套的鄰機（PX4 自己 RTL、手動）也被當成會分攤一半。
+**換速度時**（itest `--speed` 不是 0.5 時自動給，`itest.py` 的 `cbf_speed_args`）：二階時只改 `miss_clearance` = safe_radius + 0.5 + 0.2 V
+（3 m/s → 2.1 m）、`yield_exit` = miss + 0.5 m；剎車距離由 CBF 自己處理。（一階時要 γ 1.5、guard 4.0 m、miss 4.5 m。）
+
+限制：PX4 追 setpoint 還有延遲（沒有算進 CBF）；鄰機的加速度當 0（對方急轉時保守度不夠，靠 safe_radius 的餘量）。
+不跑這套的鄰機（PX4 自己 RTL、手動）沒有位置廣播的 busy，當成待命。
 
 ### 運動平滑層（給 PX4 的 setpoint）
 
@@ -175,6 +223,8 @@ h_j = |p − p_j|² − r²                    r = safe_radius（讓路時 yield
 | 交會時太近（log「避碰：這次最接近鄰機 x m」） | `cbf.gamma`、`cbf.safe_radius` | gamma 調小、safe_radius 調大 |
 | 交會前一下子急剎 | `cbf.influence_radius` | 調大（看上面的下限公式） |
 | 對飛時卡在中間 | `cbf.k_tan` | 調大 |
+| 交會時還是減速、停一下才過（log 沒有「避碰：預測 …」） | `cbf.ttc_horizon`、`cbf.miss_clearance` | 調大（更早發現、繞得開一點） |
+| 沒有要撞也在繞（log 一直出現「避碰：預測 …」） | `cbf.miss_clearance` | 調小（要 > guard_radius） |
 | 閃避時機身傾斜大、看起來很急 | `motion.max_accel`、`motion.leash` | 調小 |
 | 起飛一直不算完成（沒有「到達 5.0 m」；爬升 20 s 後會印「警告：爬升 20 s 還沒到 …」） | `takeoff_tolerance` | 調大 |
 | 「警告：被接管」／「警告：PX4 失效保護」／「警告：切回 offboard，高度 … 差 …」 | 不是參數 | 被遙控器、地面站切了模式，或 PX4 自己的失效保護：任務交還、mode MANUAL；切回 offboard 從目前位置接回 |

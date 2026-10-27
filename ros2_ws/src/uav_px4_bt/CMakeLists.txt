@@ -17,7 +17,7 @@ find_package(std_msgs REQUIRED)
 find_package(swarm_interfaces REQUIRED)
 
 # BT 節點、CBF、位置廣播：不依賴 ROS（PX4、cbba_node 的介面由 UavPlatform 注入），可以不開模擬器測
-add_library(${PROJECT_NAME}_core src/cbf.cpp src/motion.cpp src/flight_beacon.cpp src/bt_nodes.cpp)
+add_library(${PROJECT_NAME}_core src/cbf.cpp src/avoidance.cpp src/motion.cpp src/flight_beacon.cpp src/bt_nodes.cpp)
 target_include_directories(${PROJECT_NAME}_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -34,13 +34,17 @@ add_executable(uav_task_manager_node src/uav_task_manager_node.cpp src/px4_platf
 target_link_libraries(uav_task_manager_node ${PROJECT_NAME}_core rclcpp::rclcpp ament_index_cpp::ament_index_cpp
   ${px4_msgs_TARGETS} ${std_msgs_TARGETS} ${swarm_interfaces_TARGETS})
 
+# 避碰的離線對照（舊的一階 CBF vs 新的避碰，報告用；不安裝，執行檔在 build 目錄）
+add_executable(avoidance_compare tools/avoidance_compare.cpp)
+target_link_libraries(avoidance_compare ${PROJECT_NAME}_core)
+
 install(TARGETS ${PROJECT_NAME}_core ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS uav_bt_node uav_task_manager_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY trees config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(test_name test_cbf test_motion test_flight_beacon test_tree)
+  foreach(test_name test_cbf test_avoidance test_motion test_flight_beacon test_tree)
     ament_add_gtest(${test_name} test/${test_name}.cpp TIMEOUT 120)
     target_link_libraries(${test_name} ${PROJECT_NAME}_core)
     target_compile_definitions(${test_name} PRIVATE

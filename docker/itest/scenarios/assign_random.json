@@ -1,0 +1,15 @@
+{
+  "_說明": "固定任務＋指定 agent＋隨機任務＋隨機火警＋航線經過懸停的無人機（G、M、T、火，2026-10-24）。1. G1～G3：固定巡檢任務，一開始建立、由 CBBA 分配。2. M1（人工指派，地面站／平板的 manual_override；指派期間 mode MANUAL、不參與 CBBA，停留 duration 秒後自動回到 AUTO）：從正在做 G 的無人機隨機挑一台（10～20 s，位置隨機），交還 G、別台接手，而且在它飛往 M1 的路上或 M1 旁隨機起火（fire：route 線段 40～80 % 處，或 M1 旁 3 m 內）→ 照火警 BT 發布地面任務、懸停監控到假狗處理完，M1 延遲。3. T1（behind manual）：開始後 25～40 s 起，放在「正在 M1 懸停的那台」後方——閒著的那台往它的延長線上、後方 6～10 m，CBBA 會把 T1 給那台閒著的，航線經過懸停中、路權比較高的 M1 那台，要用 VO 繞過去（報告 X1 列兩台最近距離和 BT 的避碰 log）；等 40 s 找不到就改成隨機位置。CBBA 的出價看距離，兩台在飛行中交叉的分配幾乎不會出現，所以用「經過不會讓開的懸停無人機」製造交會（10/24 原本用對調 X1：打斷正在盯火的那台、兩台搶同一點，拿掉）。4. T2：開始後 20～90 s 隨機插入，位置同時起火（fire: true，第二個隨機火點）。人工指派在 terminal 和 2D 動畫上用 M1、M2… 表示，不寫座標。位置、時間都照 --seed 重現。用法：python3 docker/itest/itest.py demo --world yard --scenario assign_random --seed 7（--speed 預設 3 m/s）",
+  "tasks": [
+    {"name": "G1", "point": "G1", "duration": 4},
+    {"name": "G2", "point": "G2", "duration": 4},
+    {"name": "G3", "point": "G3", "duration": 4},
+    {"name": "T1", "behind": "manual", "at_range": [25, 40], "duration": 4, "wait": 40},
+    {"name": "T2", "random": true, "at_range": [20, 90], "duration": 4, "fire": true}
+  ],
+  "manuals": [
+    {"name": "M1", "target": "busy", "random": true, "duration": 8, "at": 10, "delay_range": [0, 10],
+     "fire": {"route": [0.4, 0.8], "near": 3.0, "route_prob": 0.5}}
+  ],
+  "timeout": 600
+}

@@ -10,8 +10,12 @@
 #    CBBA_WORLD=fire_site px4_sitl.sh 1   用 docker/gz/worlds 的場景（第 1 台負責開；之後的台不用設，
 #                                         自動加入正在跑的場景）
 #
+#    UAV_SPAWN_ORIGIN=-40,-30 CBBA_WORLD=yard px4_sitl.sh 1
+#                                         出生原點（map ENU，預設 0,0）；uav 容器的 cbba_uav.sh 要設同一個值。
+#                                         yard 的 (0, 0) 是變壓器，起降板在 (−40, −30)，沒設對會拒絕啟動
+#
 #  每台會：
-#    - 用 PX4 實例編號 -i N，在 y 方向錯開出生點
+#    - 用 PX4 實例編號 -i N，出生點 = 出生原點 ＋ (0, (N − 1) × UAV_SPAWN_SPACING)
 #    - 把 uXRCE-DDS client 指向 uavN 容器的 Agent（domain 42）
 #    - topic 加上命名空間：/uavN/fmu/...
 #  多台時每台開一個 terminal（或用 tmux 分割），先開第 1 台再開第 2 台
@@ -26,6 +30,7 @@ MODEL="${2:-${PX4_SIM_MODEL:-gz_x500}}"
 AGENT_PORT="${XRCE_AGENT_PORT:-8888}"
 DOMAIN="${ROS_DOMAIN_ID:-42}"
 SPACING="${UAV_SPAWN_SPACING:-2.0}"
+IFS=, read -r ORIGIN_X ORIGIN_Y <<< "${UAV_SPAWN_ORIGIN:-0,0}"
 NS="uav${N}"
 BIN="${PX4_DIR}/build/px4_sitl_default/bin"
 AIRFRAME_DIR="${PX4_DIR}/ROMFS/px4fmu_common/init.d-posix/airframes"
@@ -56,8 +61,9 @@ if [ -z "${AIRFRAME}" ]; then
 fi
 AUTOSTART="${AIRFRAME%%_*}"
 
-# ---------- 出生點：沿 y 方向排開 ----------
-POSE_Y="$(awk -v n="${N}" -v s="${SPACING}" 'BEGIN { printf "%.2f", (n - 1) * s }')"
+# ---------- 出生點：出生原點起沿 y 方向排開（2026-10-24 加出生原點）----------
+POSE_X="$(awk -v x="${ORIGIN_X}" 'BEGIN { printf "%.2f", x }')"
+POSE_Y="$(awk -v y="${ORIGIN_Y}" -v n="${N}" -v s="${SPACING}" 'BEGIN { printf "%.2f", y + (n - 1) * s }')"
 
 # ---------- Gazebo：第一個啟動的負責開，之後的加入 ----------
 GZ_ENV=()
@@ -116,6 +122,7 @@ if [ -n "${CBBA_WORLD:-}" ] && ! pgrep -f "gz[ ]sim" >/dev/null 2>&1; then
             patrol_site) CAMERA_POSE="-60 -55 55 0 0.57 0.76" ;;
             demo_site)   CAMERA_POSE="-22 -24 20 0 0.52 0.78" ;;
             fire_site)   CAMERA_POSE="-28 -30 28 0 0.61 0.77" ;;
+            yard)        CAMERA_POSE="-75 -70 60 0 0.52 0.76" ;;
             *)           CAMERA_POSE="-30 -30 30 0 0.6 0.785" ;;
         esac
         GUI_CONFIG="/tmp/cbba_gui_${CBBA_WORLD}.config"
@@ -128,6 +135,19 @@ if [ -n "${CBBA_WORLD:-}" ] && ! pgrep -f "gz[ ]sim" >/dev/null 2>&1; then
     done
     GZ_ENV=()            # 世界已經在跑：PX4 走「gazebo already running world」，自己生成機體
     GZ_MSG="加入場景 ${CBBA_WORLD}"
+fi
+
+# ---------- 場景要求的出生原點（原點上有障礙物的場景）----------
+# uav 容器的節點用同一個 UAV_SPAWN_ORIGIN 換算座標，這裡沒辦法替它改，所以不合就停下來（2026-10-24）
+case "${CBBA_WORLD:-}" in
+    yard) NEED_ORIGIN="-40,-30" ;;     # 起降板 uav_pad；(0, 0) 是變壓器 TB4
+    *)    NEED_ORIGIN="" ;;
+esac
+if [ -n "${NEED_ORIGIN}" ] && [ "${UAV_SPAWN_ORIGIN:-0,0}" != "${NEED_ORIGIN}" ]; then
+    echo "[px4_sitl] 場景 ${CBBA_WORLD} 的出生原點要是 ${NEED_ORIGIN}（目前 ${UAV_SPAWN_ORIGIN:-0,0}）。sim 和每台 uav 都要設："
+    echo "[px4_sitl]   sim：UAV_SPAWN_ORIGIN=${NEED_ORIGIN} CBBA_WORLD=${CBBA_WORLD} px4_sitl.sh ${N}"
+    echo "[px4_sitl]   uav：UAV_SPAWN_ORIGIN=${NEED_ORIGIN} CBBA_ALTITUDE=8 cbba_uav.sh"
+    exit 1
 fi
 
 # ---------- 背景：等 PX4 開好後，把 DDS client 指向 uavN ----------
@@ -163,7 +183,7 @@ configure_dds() {
     echo "[px4_sitl] uav${N}: uXRCE-DDS client -> ${AGENT_IP}:${AGENT_PORT}  domain ${DOMAIN}  namespace /${NS}"
 }
 
-echo "[px4_sitl] uav${N}  機型 ${MODEL} (${AUTOSTART})  出生點 y=${POSE_Y}  ${GZ_MSG}"
+echo "[px4_sitl] uav${N}  機型 ${MODEL} (${AUTOSTART})  出生點 (${POSE_X}, ${POSE_Y})  ${GZ_MSG}"
 echo "[px4_sitl] Agent ${AGENT_IP}:${AGENT_PORT}，DDS 設定紀錄：${LOG}"
 configure_dds > "${LOG}" 2>&1 &
 
@@ -171,7 +191,7 @@ cd "${PX4_DIR}"
 exec env \
     PX4_SYS_AUTOSTART="${AUTOSTART}" \
     PX4_SIM_MODEL="${MODEL}" \
-    PX4_GZ_MODEL_POSE="0,${POSE_Y}" \
+    PX4_GZ_MODEL_POSE="${POSE_X},${POSE_Y}" \
     "${GZ_ENV[@]}" \
     ${CBBA_WORLD:+PX4_GZ_WORLD="${CBBA_WORLD}"} \
     "${BIN}/px4" -i "${N}"

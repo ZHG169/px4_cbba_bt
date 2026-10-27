@@ -1,0 +1,22 @@
+# GCS ↔ 載具的白名單（2026-10-21）。名稱是 namespace 底下的相對名稱：/<ns>/<名稱>（ns = uav1、v60…）
+# 改這份就好；zenoh_bridge 依角色（vehicle／gcs）產生 bridge 的 allow 規則。
+# 載具之間的 CBBA（UDP 14600）、位置廣播（UDP 14601）不在這裡，也不要加進來（它們有自己的掉包處理）。
+
+# 載具 → GCS：監看
+to_gcs:
+  topics:
+    - robot_state       # 位置、電量、mode（AUTO／MANUAL／ESTOP）；下面限頻
+    - current_task      # 現在在做哪個任務（CBBA 指派）
+    - task_closed       # 任務結束（完成、取消）
+    - task_orphaned     # 孤兒任務警告（開著但沒人得標）
+
+# GCS → 載具：指令
+to_vehicle:
+  topics:
+    - emergency_stop    # std_msgs/Bool；無人機各台分開（/<ns>/emergency_stop）
+  services:
+    - manual_override   # swarm_interfaces/ManualOverride：人工指派、clear 解除
+
+# 最高頻率（Hz）：bridge 只轉這麼快，robot_state 機內可能 10 Hz，mesh 上不需要
+max_frequency:
+  robot_state: 2.0

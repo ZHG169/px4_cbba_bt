@@ -35,12 +35,12 @@ export ROS_DOMAIN_ID=95 CBBA_LOCK_DIR=/tmp/cbba_fail_lock CFG=$(ros2 pkg prefix 
 | terminal | 做什麼 | 指令 |
 |---|---|---|
 | 1 | 狗 A（機號 50，`/v60`） | `ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 -r __node:=t_v60 --params-file $CFG/cbba_v60.yaml -p agent_id:=50 -p udp_port:=14695` |
-| 2 | 狗 B（機號 51，`/v60b`） | `ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60b -r __node:=t_v60b --params-file $CFG/cbba_v60.yaml -p agent_id:=51 -p udp_port:=14695` |
-| 3 | 兩隻狗的狀態（代替狗的 BT） | `python3 ~/CBBA_BT/docker/scripts/fake_robot_state.py --ns v60 --id 50 --pos 0 -10 & python3 ~/CBBA_BT/docker/scripts/fake_robot_state.py --ns v60b --id 51 --pos 0 -30` |
+| 2 | 狗 B（機號 51，`/v60_1`） | `ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60_1 -r __node:=t_v60_1 --params-file $CFG/cbba_v60.yaml -p agent_id:=51 -p udp_port:=14695` |
+| 3 | 兩隻狗的狀態（代替狗的 BT） | `python3 ~/CBBA_BT/docker/scripts/fake_robot_state.py --ns v60 --id 50 --pos 0 -10 & python3 ~/CBBA_BT/docker/scripts/fake_robot_state.py --ns v60_1 --id 51 --pos 0 -30` |
 | 4 | 下指令（建任務、回報、切 mode） | 下面各項 |
 
 - 狗 A 在 (0, −10)、狗 B 在 (0, −30)；任務放在誰旁邊，誰就先得標。
-- 切 mode：`echo 1 > /tmp/fake_mode_v60`（MANUAL）、`echo 2 > …`（ESTOP）、`echo 0 > …`（AUTO）；狗 B 的檔案是 `/tmp/fake_mode_v60b`。
+- 切 mode：`echo 1 > /tmp/fake_mode_v60`（MANUAL）、`echo 2 > …`（ESTOP）、`echo 0 > …`（AUTO）；狗 B 的檔案是 `/tmp/fake_mode_v60_1`。
 - 兩隻都印出「開始參與出價」、「收斂：0 個任務，1 個鄰居」再開始。
 
 terminal 4 先定義幾個指令（之後直接用）：
@@ -49,10 +49,10 @@ terminal 4 先定義幾個指令（之後直接用）：
 # 狗 A 建立地面任務：task_id = 50 × 65536 + 流水號（log 裡是 8 位十六進位，例如流水號 1 → 00320001）
 ground() { ros2 topic pub --once -w 1 /v60/new_task swarm_interfaces/msg/Task \
   "{task_id: $((50 * 65536 + $1)), type: 2, position: {x: $2, y: $3, z: 0.0}, value: 100.0, duration_sec: 20.0, deadline_sec: 300.0}"; }
-# 回報：result <v60|v60b> <流水號> <true|false> <reason> [detail]
+# 回報：result <v60|v60_1> <流水號> <true|false> <reason> [detail]
 result() { ros2 topic pub --once -w 1 /$1/task_result swarm_interfaces/msg/TaskResult \
   "{task_id: $((50 * 65536 + $2)), success: $3, reason: $4, detail: '${5:-}'}"; }
-# 取消：cancel <v60|v60b> <流水號>
+# 取消：cancel <v60|v60_1> <流水號>
 cancel() { ros2 topic pub --once -w 1 /$1/cancel_task swarm_interfaces/msg/Task "{task_id: $((50 * 65536 + $2))}"; }
 ```
 
@@ -70,12 +70,12 @@ result v60 1 false 2 'NAV_FAILED(TIMEOUT)'
 | `任務 00320001 這台失敗 1 次，估計成功率 0.50，之後的出價打折` | terminal 1 |
 | 約 0.5 s 內 `指派給 BT：00320001` | terminal 2（狗 B 接手） |
 
-收尾：`result v60b 1 true 0` → 兩邊都印「已確認完成」。
+收尾：`result v60_1 1 true 0` → 兩邊都印「已確認完成」。
 
 ### A2. 只剩一隻能做 → 60 s 後打折重試＋孤兒任務
 
 ```bash
-echo 1 > /tmp/fake_mode_v60b                     # 狗 B 平板接管中（不出價）
+echo 1 > /tmp/fake_mode_v60_1                     # 狗 B 平板接管中（不出價）
 ground 2 0 -12
 # 狗 A 得標後
 result v60 2 false 2 'NAV_FAILED(TIMEOUT)'
@@ -87,17 +87,17 @@ result v60 2 false 2 'NAV_FAILED(TIMEOUT)'
 | 約 30 s | `孤兒任務 00320002 …：開著但 30 s 沒有人得標`（terminal 2 也會印） |
 | 約 60 s | `路徑：00320002`、`任務 00320002 有人得標了（agent 50）`、`指派給 BT：00320002`（只有它能做，打折了還是會派回來） |
 
-收尾：`result v60 2 true 0`、`echo 0 > /tmp/fake_mode_v60b`。
+收尾：`result v60 2 true 0`、`echo 0 > /tmp/fake_mode_v60_1`。
 
 ### A3. PERMANENT → 永久不接、孤兒任務、別隻回來才接
 
 ```bash
-echo 1 > /tmp/fake_mode_v60b
+echo 1 > /tmp/fake_mode_v60_1
 ground 3 0 -12
 # 狗 A 得標後
 result v60 3 false 1 'NAV_FAILED(204)'
 # 等孤兒任務警告出現後
-echo 0 > /tmp/fake_mode_v60b                     # 狗 B 回到 AUTO
+echo 0 > /tmp/fake_mode_v60_1                     # 狗 B 回到 AUTO
 ```
 
 | 要看到 | 在哪 |
@@ -107,7 +107,7 @@ echo 0 > /tmp/fake_mode_v60b                     # 狗 B 回到 AUTO
 | 狗 B 回 AUTO 後：`有人得標了（agent 51）`、terminal 2 `指派給 BT：00320003` | terminal 1、2 |
 | 之後狗 A **一直不再**對 00320003 出價（等 60 s 以上也一樣） | terminal 1 的「路徑」不會出現它 |
 
-收尾：`result v60b 3 true 0`。
+收尾：`result v60_1 3 true 0`。
 
 ### A4. 平板接管 → 交給別隻
 
@@ -126,12 +126,12 @@ echo 1 > /tmp/fake_mode_v60
 | `mode 0 → 1（AUTO → MANUAL）`、`停止參與出價，釋放手上的任務` | terminal 1 |
 | 狗 B：`指派給 BT：00320004` | terminal 2 |
 
-收尾：`result v60b 4 true 0`、`echo 0 > /tmp/fake_mode_v60`。
+收尾：`result v60_1 4 true 0`、`echo 0 > /tmp/fake_mode_v60`。
 
 ### A5. 平板接管做完 → 回來接回原本的任務（5 s 的意義）
 
 ```bash
-echo 1 > /tmp/fake_mode_v60b                     # 狗 B 不能接，任務只能等狗 A
+echo 1 > /tmp/fake_mode_v60_1                     # 狗 B 不能接，任務只能等狗 A
 ground 5 0 -12
 # 狗 A 得標後
 result v60 5 false 3 'PREEMPTED_BY_MANUAL'
@@ -145,7 +145,7 @@ echo 0 > /tmp/fake_mode_v60
 | 接管期間沒有人接 00320005（15 s 內不會有孤兒任務警告，30 s 才會） | terminal 1、2 |
 | 回 AUTO 後**馬上**（1 s 內）`指派給 BT：00320005`：5 s 的排除早就過了，不用等到 60 s | terminal 1 |
 
-收尾：`result v60 5 true 0`、`echo 0 > /tmp/fake_mode_v60b`。
+收尾：`result v60 5 true 0`、`echo 0 > /tmp/fake_mode_v60_1`。
 
 ### A6. 急停（ESTOP）
 
@@ -163,14 +163,14 @@ echo 0 > /tmp/fake_mode_v60
 | 狗 B 接手 `指派給 BT：00320006` | terminal 2 |
 | 狗 A 回 AUTO 後開始參與出價，但 00320006 已經被狗 B 鎖住，不會搶回來 | terminal 1 |
 
-收尾：`result v60b 6 true 0`。
+收尾：`result v60_1 6 true 0`。
 
 ### A7. 地面端取消（建立者才可以）
 
 ```bash
 ground 7 0 -28                                   # 靠近狗 B，由狗 B 執行
 # 狗 B 得標後
-cancel v60b 7                                    # 不是建立者（建立者是狗 A，機號 50）
+cancel v60_1 7                                    # 不是建立者（建立者是狗 A，機號 50）
 cancel v60 7                                     # 建立者
 ```
 

@@ -26,6 +26,10 @@
 // 超過 neighbor_timeout 沒更新的不算。
 // 限制：速度命令還要經過運動平滑層（加速度上限）與 PX4，實際速度會落後；γ 要配合加速度上限（doc/parameters.md 第五節）。
 // 不跑這套的鄰機（PX4 自己 RTL、手動）也被當成會分攤一半。
+//
+// 2026-10-24：正式 BT（UavContext::moveTo）改用 avoidance.hpp 的 CollisionAvoider（預測衝突 → 路權 → VO 繞行 →
+// cbfFilter 只對需要的鄰機加約束）；cbfVelocity（約束一直開著＋往右繞）保留給單元測試和對照。
+// 共用的部分拆成 nominalVelocity（名目速度）、cbfFilter（指定鄰機與 λ、ρ 的約束＋投影）。
 #pragma once
 
 #include <cstdint>
@@ -54,6 +58,7 @@ struct Neighbor
   Vec3 velocity;
   double age{0.0};    // 資料的年齡（秒）：收到之後經過的時間
   bool busy{false};   // 正在執行任務（前往或停留）：待命的要讓路給它
+  bool task_hover{false};   // 在任務點懸停（BT 已經到點、正在停留／辨識／監控；位置廣播 flags bit 3，2026-10-24）
 };
 
 struct CbfParams
@@ -63,15 +68,26 @@ struct CbfParams
   double k_att{1.0};                // 1/s：離目標 1 m 時 1 m/s
   double brake_accel{1.2};          // m/s²：接近目標時的減速度（剎車曲線，和運動平滑層的加速度上限配合）
   double brake_vertical_accel{0.5}; // m/s²：垂直方向的剎車曲線
-  double safe_radius{1.2};          // d_s：h = |p − p_j|² − d_s²，水平距離不小於這個。要比出生點間隔（2 m）小，否則一起飛就在不安全區
+  double safe_radius{1.0};          // d_s（2026-10-24 預設改成和 yaml 一樣的 1.0）：h = |p − p_j|² − d_s²，水平距離不小於這個。要比出生點間隔（2 m）小，否則一起飛就在不安全區
   double gamma{1.0};                // γ（1/s）：ḣ ≥ −γ h。大 = 允許靠得快、晚剎；要 ≤ 2 × motion.max_accel / (ρ × max_speed)
   double influence_radius{21.0};    // 只對這個水平距離內的鄰機加約束；要 ≥ (V + √(V² + (ρ γ d_s)²)) / (ρ γ)（ρ = 0.5），
                                     // 在這個距離允許的靠近速度才 ≥ max_speed，否則一進來就急剎
-  double yield_radius{2.5};         // 讓路時（待命對執行中）保持的水平距離；> safe_radius。執行中的鄰機停下來（懸停做任務）時
+  double yield_radius{2.0};         // （只有 cbfVelocity 用；預設 2026-10-24 改成和 yaml 一樣）讓路時（待命對執行中）保持的水平距離；> safe_radius。執行中的鄰機停下來（懸停做任務）時
                                     // 待命的也會被推到這個距離外
   double k_tan{0.8};                // 往右繞：名目速度違反約束時加「違反量 × k_tan」的右手邊分量（0 = 不繞，正對面會停住）
   double max_extrapolation{0.5};    // 鄰機位置最多外推幾秒
   double neighbor_timeout{1.0};     // 超過就不算
+  // ---------- 避碰的路權與繞行（avoidance.hpp，2026-10-24）----------
+  double ttc_horizon{5.0};          // 預測最近點只看這麼多秒內（也不超過自己到目標的時間）
+  double miss_clearance{1.5};       // 預測最近距離 < 這個才算衝突；讓的那台用 VO 繞到至少這麼遠
+  double guard_radius{1.3};         // 現在距離 < 這個時，不管預測、不管路權，CBF 一定對這台鄰機加約束
+  double yield_exit{2.0};           // 衝突解除：預測不衝突而且距離 > 這個（或已經通過、距離一直變大）
+  double emergency_speed{0.3};      // 一階：緊急退讓（距離 < safe_radius 或 CBF 無解）的水平速度（m/s）
+  // ---------- 二階 CBF（2026-10-24）----------
+  bool second_order{true};          // true：CBF 管加速度（考慮剎車距離）；false：一階（管速度，假設 ṗ = u）
+  double accel_max{1.5};            // 水平加速度上限（m/s²）＝ motion.max_accel（declareConfig 自動帶入，兩個要一樣）
+  double response_delay{0.3};       // 從下命令到真的開始剎的延遲（s：PX4 追 setpoint、位置廣播）；二階的安全距離加上
+                                    // 延遲 × 靠近速度（2026-10-24 單元測試：3 m/s 時延遲多飛 0.9 m，靠到 0.57 m）
 };
 
 struct CbfOutput
@@ -80,6 +96,65 @@ struct CbfOutput
   double min_distance{-1.0};        // 目前離最近鄰機的距離（3D；沒有鄰機時 −1），log 用
   int active_neighbors{0};          // 約束有作用（名目速度會違反）的鄰機數；> 0 時運動平滑層不直接位置保持
 };
+
+// 名目速度：往目標、速度 = min(max_speed, k_att × 距離, √(2 × brake_accel × 距離))，垂直照 brake_vertical_accel 縮小
+Vec3 nominalVelocity(const Vec3 & position, const Vec3 & goal, const CbfParams & params);
+
+// cbfFilter 的一個約束：鄰機（位置已經外推）、λ、ρ（a·u ≥ λ a·v_j − ρ γ h，h 用 safe_radius）
+struct CbfPair
+{
+  Neighbor neighbor;
+  double lambda{0.0};
+  double rho{0.5};
+};
+
+struct CbfFilterResult
+{
+  Vec3 velocity;
+  bool feasible{true};              // 投影＋速度上限之後，所有約束都成立
+  double worst{0.0};                // 最大的違反量（m/s，≤ 0 = 都成立）
+};
+
+// u_ref 投影到所有約束的交集（水平，Dykstra）；垂直限制在 max_vertical_speed，總和限制在 max_speed。
+// 沒有約束時就是 u_ref（加上速度上限）
+CbfFilterResult cbfFilter(const Vec3 & position, const Vec3 & u_ref, const std::vector<CbfPair> & pairs,
+  const CbfParams & params);
+
+// ---------- 二階 CBF（2026-10-24）----------
+// 模型 ṗ = v、v̇ = a、|a| ≤ accel_max（水平）。對每台鄰機（位置已經外推）：
+//   d = |p − p_j|、n = (p − p_j) / d、ḋ = n·(v − v_j)（< 0 = 在靠近）、A = accel_max / ρ（相對減速度：ρ = 1 只有自己剎、
+//   ρ = 0.5 兩台各剎一半 → 2 × accel_max）
+//   h = √(2 A (d − r)) + ḋ          照 A 全力剎車，靠近速度在剩下的距離內剎得住才 ≥ 0
+//                                   r = safe_radius ＋ response_delay × 靠近速度（反應延遲期間還會往前飛）
+//   ḣ = n·(a − a_j) + (|v − v_j|² − ḋ²) / d + A ḋ / √(2 A (d − r))
+//   約束 ḣ ≥ −γ h，鄰機的加速度 a_j 當 0、自己負責 ρ：  n·a ≥ ρ [−(|Δv|² − ḋ²) / d − A ḋ / √(2A(d − r)) − γ h]
+// 速度越快，h 越早變小、越早開始剎（一階只看距離，3 m/s 時剎不住）
+struct Cbf2Pair
+{
+  Neighbor neighbor;
+  double rho{0.5};
+};
+
+struct Cbf2Result
+{
+  Vec3 accel;                       // 水平（z = 0）
+  bool feasible{true};              // 投影＋加速度上限之後，所有約束都成立（d ≤ safe_radius 時一定是 false）
+  double worst{0.0};                // 最大的違反量（m/s²）
+};
+
+// a_ref（水平）投影到所有約束和 |a| ≤ accel_max 的交集（Dykstra）
+Cbf2Result cbf2Filter(const Vec3 & position, const Vec3 & velocity, const Vec3 & a_ref,
+  const std::vector<Cbf2Pair> & pairs, const CbfParams & params);
+
+// 緊急時的加速度（2026-10-24）：在 |a| = accel_max 的一圈方向（每 7.5°）裡，挑對所有鄰機的約束違反最少的
+// （max over a of min_j (n_j·a − b_j)；已經在安全距離內的鄰機當成剛好在邊上，b 會很大）。
+// 原本只往「遠離最近那台」退：最近的是停著的鄰機時，會被推向另一台高速飛來的（單元測試 0.31 m）
+Vec3 cbf2Escape(const Vec3 & position, const Vec3 & velocity, const std::vector<Cbf2Pair> & pairs,
+  const CbfParams & params);
+
+// 剎車距離的餘裕：d − r − 靠近速度² / (2A)（A = accel_max / ρ）；< 0 = 現在開始全力剎也來不及
+double brakingMargin(const Vec3 & position, const Vec3 & velocity, const Neighbor & n, double rho,
+  const CbfParams & params);
 
 // yield_to_busy：自己在待命、起飛（讓路給執行任務中的鄰機）
 CbfOutput cbfVelocity(

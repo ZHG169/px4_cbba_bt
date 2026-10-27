@@ -17,6 +17,9 @@
 //               （2026-10-20 使用者：cbba_overrun 裡 uav1 在 G1 只停 1 s 就去盯火，狗處理完直接回報 G1 完成）。
 //               結束時 results 記 {wp, "air_recon", "OK"}，骨架的 ReportTaskResult 據此發 task_result
 //
+// 人工指派（manual_ 點，地面站／平板）看到火警時照樣走上面的火警流程（2026-10-20 使用者：要確認照火警 BT 執行），
+// 另外印「警告：人工指派 … 延遲」給地面站看：開始監控、回到航線／指定點、做完時的總延遲（只印 log）
+//
 // 樹外（node 層，uav_task_manager_node.cpp）：起飛、待命時盤旋與讓路、低電量返航、送 setpoint、位置廣播。
 // 共用的 UavContext（blackboard "uav_ctx"）和備用 BT 相同：CBF、運動平滑、火點去重複。
 #pragma once
@@ -46,6 +49,11 @@ inline std::string fmt1(double v)
   char b[32];
   std::snprintf(b, sizeof(b), "%.1f", v);
   return b;
+}
+
+inline bool isManualPoint(const std::string & id)
+{
+  return id.rfind("manual_", 0) == 0;
 }
 
 class NavigateTo : public BT::StatefulActionNode
@@ -169,8 +177,13 @@ private:
     fire_goal_ = {f->position.x, f->position.y, goal_.z};
     phase_ = Phase::TO_FIRE;
     monitor_start_ = -1.0;
+    divert_start_ = now;
     task_manager::say("NavigateTo", "↪ 轉向火點上空 (" + fmt1(fire_goal_.x) + ", " + fmt1(fire_goal_.y) +
       ")，懸停監控後再回去 " + wp_.id);
+    if (isManualPoint(wp_.id)) {
+      ctx.platform.log("警告：人工指派 " + wp_.id + " 延遲：飛往指定點的路上發現火警，先依火警流程監控地面處置任務 " +
+        taskName(fire_task_) + "（最多 " + fmt1(getInput<double>("monitor_timeout").value_or(120.0)) + " s）");
+    }
     divertStep(ctx, now);
     return true;
   }
@@ -206,6 +219,10 @@ private:
     start_ = now;
     deadline_ = now + left / std::max(ctx.config.cbf.max_speed, 0.1) * 2.0 + ctx.config.fly_timeout_margin;
     task_manager::say("NavigateTo", "↩ " + why + "，回去 " + wp_.id + "（剩 " + fmt1(left) + " m）");
+    if (isManualPoint(wp_.id)) {
+      ctx.platform.log("警告：人工指派 " + wp_.id + " 繼續：" + why + "，因火警延遲 " + fmt1(now - divert_start_) +
+        " s，繼續飛往指定點（剩 " + fmt1(left) + " m）");
+    }
   }
 
   static std::string taskName(std::uint32_t id)
@@ -225,6 +242,7 @@ private:
   Vec3 fire_goal_;
   std::uint32_t fire_task_{0};
   double monitor_start_{-1.0};
+  double divert_start_{-1.0};
 };
 
 class AirRecon : public BT::StatefulActionNode
@@ -350,6 +368,11 @@ private:
           fmt1(o.confidence) + "）在 (" + fmt1(o.position.x) + ", " + fmt1(o.position.y) + ")");
         fire_task_ = ctx.reportFire(o.position);
       }
+      if (isManualPoint(task_manager::g_ctx.current_waypoint) && !ctx.platform.taskClosed(*fire_task_)) {
+        ctx.platform.log("警告：人工指派 " + task_manager::g_ctx.current_waypoint + " 延遲：在指定點看到火警，"
+          "先依火警流程監控地面處置任務 " + taskName(*fire_task_) + "（停留 " + fmt1(duration_) + " s 之後最多再等 " +
+          fmt1(getInput<double>("monitor_timeout").value_or(120.0)) + " s）");
+      }
       // 週計畫：到火點上空懸停等待（2026-10-14；原本留在巡檢點上空）。已經處理完的火點不用過去
       if (!ctx.platform.taskClosed(*fire_task_)) {
         hold_ = {o.position.x, o.position.y, hold_.z};
@@ -400,6 +423,13 @@ private:
 
   BT::NodeStatus done(UavContext & ctx, const std::string & detail, const std::string & msg)
   {
+    // 在指定點盯火多花的時間（路上轉向的延遲由 NavigateTo 印）
+    const std::string & wp = task_manager::g_ctx.current_waypoint;
+    const double late = ctx.platform.timeNow() - start_ - duration_;
+    if (isManualPoint(wp) && fire_task_ && late > 0.5) {
+      ctx.platform.log("警告：人工指派 " + wp + " 完成：停留 " + fmt1(duration_) + " s，因火警延遲 " + fmt1(late) +
+        " s（" + msg + "）");
+    }
     task_manager::g_ctx.results.push_back({task_manager::g_ctx.current_waypoint, "air_recon", "OK",
       fire_task_ ? (detail.empty() ? "fire" : detail) : ""});
     ctx.setExec(ExecMode::IDLE, -1.0, nullptr);

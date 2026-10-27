@@ -9,6 +9,9 @@ tag 的高度要和 patrol_scenario.sh 的 TAG_Z_RED 一致。
 用法：python3 docker/gz/gen_patrol_site.py              patrol_site（預設）
       python3 docker/gz/gen_patrol_site.py demo_site    worlds/demo_site_points.csv → worlds/demo_site.sdf
                                                         （展示用的小場景：點都在 ±22 m 內，鏡頭拉近時無人機看得清楚）
+      python3 docker/gz/gen_patrol_site.py yard         worlds/yard_points.csv＋yard_env.sdf.inc → worlds/yard.sdf
+                                                        （伯宇的變電所場景，100 × 80 m，2026-10-24）
+有 worlds/<場景>_env.sdf.inc 時（障礙物等靜態物件），原樣插進場景。
 """
 import argparse
 import csv
@@ -63,15 +66,19 @@ def tag(name, tag_id, x, y, z):
 # 2026-10-19 同日：透視的視差讓 5 m 高的無人機看起來沒停在點上（偏移 ≈ 離畫面中心的水平距離 × 5 ／（鏡頭高度 − 5）：
 #   35 m 時 R4 處 1.1 m、場地邊緣 3.3 m）。改成 150 m 高＋窄視角（像望遠鏡頭），拍到的範圍一樣 59 m × 33 m，
 #   視差降到 R4 處 0.22 m、邊緣 0.7 m。視角 = 2 × atan(29.5 / 150) = 0.389 rad
-OVERVIEW_POSE = {"demo_site": "1 -1.5 150 0 1.5708 1.5708", "patrol_site": "-60 -55 55 0 0.57 0.76"}
-OVERVIEW_FOV = {"demo_site": 0.389}
+# yard（2026-10-24）：圍牆 100 × 80 m，正上方 300 m 往下看、視角 2 × atan(71 / 300) = 0.464 rad，約看 142 m × 80 m
+# （x −71～71、y −40～40）；8 m 高的無人機在場地邊緣的視差約 1.9 m
+OVERVIEW_POSE = {"demo_site": "1 -1.5 150 0 1.5708 1.5708", "patrol_site": "-60 -55 55 0 0.57 0.76",
+                 "yard": "0 0 300 0 1.5708 1.5708"}
+OVERVIEW_FOV = {"demo_site": 0.389, "yard": 0.464}
 
 # 地面網格（2026-10-19）：視窗的網格是 GUI 外掛（docker/gz/gui/cbba_gui.config 的 GridConfig），只畫在視窗裡，
 # 伺服器的錄影鏡頭看不到。要錄到網格，改成場景裡貼地的細長方塊（只有 visual、沒有 collision，不影響物理）。
 # 間距、範圍和視窗的網格一樣：2 m 一格、往四個方向各 30 格。線寬 6 cm：35 m 高俯視時約 1 px 寬
 # （太細會時有時無），無人機 5 m 高的下視相機看到的是細灰線，不會被當成 AprilTag。
 # 場景名稱 → (格子邊長 m, 每個方向幾格, 線寬 m)；沒列的場景不加
-GRID = {"demo_site": (2.0, 30, 0.06)}
+# yard：5 m 一格、往四個方向各 12 格（±60 m）；300 m 高時 1 px 約 0.11 m，線寬 0.15 m
+GRID = {"demo_site": (2.0, 30, 0.06), "yard": (5.0, 12, 0.15)}
 GRID_COLOR = "0.35 0.35 0.35 1"
 
 
@@ -133,7 +140,8 @@ def main():
     points_csv = HERE / "worlds" / f"{world}_points.csv"
     out = HERE / "worlds" / f"{world}.sdf"
     points = read_points(points_csv)
-    body = []
+    env_inc = HERE / "worlds" / f"{world}_env.sdf.inc"
+    body = [env_inc.read_text(encoding="utf-8")] if env_inc.exists() else []
     for p in points:
         name, x, y, tag_id = p["point"], p["x"], p["y"], p["tag"]
         if name.startswith("G"):

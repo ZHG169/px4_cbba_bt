@@ -66,8 +66,9 @@ source install/setup.bash     # 已經開著的 terminal 都要重新 source（�
 |---|---|---|
 | `SIM_BAT_DRAIN` | 900 | PX4 模擬電池的續航（秒）；`cbba_uav.sh` 用它算能量模型。要各台電量不同就各台設不同值 |
 | `SIM_BAT_MIN_PCT` | 20 | PX4 模擬電池最低停在這裡（= BT 返航門檻） |
-| `CBBA_SPEED`、`CBBA_ALTITUDE` | 5 m/s、5 m | cbba_node 的出價和執行者的飛行一致 |
-| `CBBA_WORLD` | （PX4 預設場景） | `fire_site`、`patrol_site`：只有第 1 台要設 |
+| `CBBA_SPEED`、`CBBA_ALTITUDE` | 0.5 m/s（2026-10-24 從 5 改）、5 m | cbba_node 的出價和執行者的飛行一致；yard 用 8 m |
+| `UAV_SPAWN_ORIGIN` | `0,0` | 出生原點（map ENU）；第 N 台出生在原點 ＋ (0, (N − 1) × `UAV_SPAWN_SPACING`)。yard 要 `-40,-30`（起降板），沒設對 `px4_sitl.sh` 會拒絕啟動（2026-10-24） |
+| `CBBA_WORLD` | （PX4 預設場景） | `fire_site`、`patrol_site`、`demo_site`、`yard`：只有第 1 台要設 |
 | `EXECUTOR` | `task_manager`（2026-10-17 起） | `task_manager` = 正式 BT（`uav_task_manager_node`）＋`apriltag_fire_detector`；`bt` = 備用 BT（`uav_bt_node`）；`task_executor` = 舊的簡易執行者 |
 
 **每台開好之後要看到**（細節見 `sitl_test.md` 第 1 節）：`[bt] 到達 5.0 m，等待指派` →
@@ -154,6 +155,24 @@ R3 (25, −25)、R4 (−10, 38)、R5 (40, 35)（tag 3～7，插入時才出現�
 - PX4 的模擬電池都從 100 % 開始，不能設初始電量；Gazebo 的「電量不同」只能用不同的 `SIM_BAT_DRAIN`。
   離線對照：`cbba_sim insert … --batteries 100,100,100 --endurance 600,300,200`。
 - `ros2 topic pub` 啟動約 1 s，replay 的插入時刻整體晚約 1 s。
+
+## C2. 變電所場景（yard，2026-10-24）
+
+伯宇的狗端世界（`ros2_ws/src/world/`，100 × 80 m）照我們的格式產生成 `docker/gz/worlds/yard.sdf`
+（`python3 docker/gz/gen_patrol_site.py yard`：障礙物來自 `yard_env.sdf.inc`，任務點 `yard_points.csv`）。
+(0, 0) 是變壓器，無人機生在起降板 (−40, −30)；鋼構棚頂 5.15 m、儲槽 6 m，所以巡檢高度 8 m（全隊同一個高度）。
+
+```bash
+# 每台 uav（N = 1、2、3）
+UAV_SPAWN_ORIGIN=-40,-30 CBBA_ALTITUDE=8 SIM_BAT_DRAIN=1800 cbba_uav.sh
+# sim
+UAV_SPAWN_ORIGIN=-40,-30 SIM_BAT_DRAIN=1800 CBBA_WORLD=yard px4_sitl.sh 1    # 之後 px4_sitl.sh 2、3（同樣的 UAV_SPAWN_ORIGIN）
+gz_bridge.sh
+CBBA_SCENARIO=yard patrol_scenario.sh init                                   # G1～G3 巡檢任務
+CBBA_SCENARIO=yard patrol_scenario.sh fire 1                                 # R1（伯宇原本的火情點 (30, −10)）起火＋建立偵巡任務
+```
+自動：`python3 docker/itest/itest.py demo --world yard`（設定在 `docker/itest/config.json` 的 `worlds.yard`）。
+`SIM_BAT_DRAIN=1800`：場地大、0.5 m/s 時一趟 2～3 分鐘，預設 900 s 約 12 分鐘就降到 20 % 返航。
 
 ## D. 弱網（mesh_tc）
 

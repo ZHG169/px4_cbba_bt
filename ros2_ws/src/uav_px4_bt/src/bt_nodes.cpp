@@ -50,8 +50,17 @@ double remainingHover(const UavContext & ctx, const AssignedTask & t)
 // ===========================================================================
 double UavContext::moveTo(const Vec3 & goal, bool yield_to_busy)
 {
+  (void)yield_to_busy;   // 2026-10-24 起由路權決定（見 bt_nodes.hpp）
   const VehicleState v = platform.vehicle();
-  const CbfOutput out = cbfVelocity(v.position, goal, platform.neighbors(), config.cbf, yield_to_busy);
+  // 路權：執行中（和位置廣播的 busy 同一個來源）、任務中懸停（執行中而且已經到 goal：BT 正在任務點停留、辨識、監控）
+  const bool busy = exec_mode_ == ExecMode::NAVIGATING || exec_mode_ == ExecMode::EXECUTING;
+  const double hover_radius = std::max(2.0 * config.reach_tolerance, 0.5);
+  const bool task_hover = busy && std::hypot(goal.x - v.position.x, goal.y - v.position.y) < hover_radius;
+  platform.setTaskHover(task_hover);
+  const double now = platform.timeNow();
+  const AvoidOutput out = avoider_.step({v.position, goal, {task_hover, busy, platform.agentId()}, v.velocity,
+      motion_.referenceVelocity(now, v.velocity), motion_.sinceLast(now, 0.05)}, platform.neighbors(), config.cbf);
+  logAvoidEvents(out.events);
   const Setpoint sp = motion_.step(platform.timeNow(), v.position, v.velocity, out.velocity, goal,
       out.active_neighbors > 0);
   platform.setSetpoint(sp.position, sp.velocity);
@@ -118,8 +127,42 @@ std::optional<std::uint32_t> UavContext::fireTaskNear(const Vec3 & p) const
   return std::nullopt;
 }
 
+void UavContext::logAvoidEvents(const std::vector<AvoidEvent> & events)
+{
+  for (const AvoidEvent & e : events) {
+    char buf[220] = {};
+    const unsigned id = e.neighbor;
+    switch (e.kind) {
+      case AvoidEvent::Kind::START:
+        std::snprintf(buf, sizeof(buf), "避碰：預測 %.1f s 後和 uav%u 最近 %.2f m（現在 %.2f m）→ %s", e.t_cpa, id, e.d_cpa,
+          e.distance, e.self_yields ? "我讓行（VO 繞）" : "對方讓行，我直行");
+        break;
+      case AvoidEvent::Kind::RELEASE:
+        if (e.distance < 0.0) {
+          std::snprintf(buf, sizeof(buf), "避碰：和 uav%u 解除（沒有位置廣播了）", id);
+        } else {
+          std::snprintf(buf, sizeof(buf), "避碰：和 uav%u 解除（%s%s，現在 %.2f m）", id,
+            e.self_yields ? "我讓行" : "對方讓行",
+            e.side > 0 ? "、往左繞" : (e.side < 0 ? "、往右繞" : ""), e.distance);
+        }
+        break;
+      case AvoidEvent::Kind::VO_SLOW:
+        std::snprintf(buf, sizeof(buf), "避碰：保持速度繞不開，降到名目速度的 %.0f %%", 100.0 * e.speed_frac);
+        break;
+      case AvoidEvent::Kind::EMERGENCY_ON:
+        std::snprintf(buf, sizeof(buf), "警告：避碰緊急退讓（最近鄰機 %.2f m，CBF 違反 %.2f m/s）", e.distance, e.worst);
+        break;
+      case AvoidEvent::Kind::EMERGENCY_OFF:
+        std::snprintf(buf, sizeof(buf), "避碰：緊急退讓結束（最近鄰機 %.2f m）", e.distance);
+        break;
+    }
+    platform.log(buf);
+  }
+}
+
 void UavContext::setExec(ExecMode mode, double remaining, const AssignedTask * active)
 {
+  exec_mode_ = mode;
   ExecStatus s;
   s.mode = mode;
   s.preemptible = true;     // 無人機隨時可以改飛別的任務

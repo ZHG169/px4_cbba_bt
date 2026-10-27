@@ -10,6 +10,7 @@
   t G2 [d=秒]       用場景的點名
   tf [x y] [d=秒]   任務點、而且那裡起火
   f [x y]           只起火、不建任務
+  m uav2 [x y] [d=秒]   人工指派（地面站／平板）：指定那台去那裡、期間不參與 CBBA；m dog51 …、m uav2 clear
   l 列出  a 範圍  h 說明  q 不再插入（做完就結束）
 
 和 itest 之間只靠 docker/itest/out/interactive/ 的檔案：指令加到 commands.txt，itest 處理後回覆寫到 replies.txt，
@@ -82,7 +83,7 @@ def main():
         sys.exit(1)
     x0, x1, y0, y1 = s["area"]
     print(f"連到 itest（輸出 {s['out']}，場景 {s['world']}，範圍 x {x0:g}～{x1:g}、y {y0:g}～{y1:g}）")
-    print("指令：t [x y] [d=秒]｜t G2｜tf [x y]｜f [x y]｜l 列出｜a 範圍｜h 說明｜q 不再插入｜exit 離開這個 terminal")
+    print("指令：t [x y] [d=秒]｜t G2｜tf [x y]｜f [x y]｜m uav2 [x y] [d=秒]（人工指派）｜l 列出｜a 範圍｜h 說明｜q 不再插入｜exit 離開這個 terminal")
     while True:
         try:
             line = input("insert> ")

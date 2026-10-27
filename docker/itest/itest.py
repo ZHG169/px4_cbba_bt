@@ -9,7 +9,7 @@
   python3 docker/itest/itest.py demo     展示：demo_site 開 Gazebo 畫面（錄成 gazebo.mp4），全部起飛後才開始 CBBA，3 個固定任務；出發後火點出現在某台的
                                          航線上，飛行途中發現、發布地面任務（給 V60，先不開狗）、繼續飛；結束後畫俯視動畫
                                          demo.mp4（要主機的 ffmpeg）。
-                                         --seed N 重現同一個情境、--speed 3（m/s）、--hold 10、--no-record
+                                         --seed N 重現同一個情境、--speed 3（m/s，預設；2026-10-23 改成 0.5、10-24 改回 3，CBF 參數照速度自動算）、--hold 10、--no-record
   python3 docker/itest/itest.py loss     第 5 週弱網量測（不開 PX4、BT）：掉包梯度 0／10／30／50／70%（延遲 50±30 ms），
                                          每個掉包率試驗 N 次、每次三台各建立一個任務（多源插單），記錄收斂時間、
                                          5 s 內收斂率、重複認領、完成後撤下的時間、mesh 頻寬（trials.csv、levels.csv）
@@ -32,6 +32,7 @@ import select
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +41,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # =============================================================================
 # 設定、容器
 # =============================================================================
+def cbf_speed_args(speed, safe_radius=1.0, max_accel=1.5):
+    """巡航速度改了時，避碰跟著要改的參數（yaml 是照 0.5 m/s 定的，≤ 0.6 m/s 不給）。
+    2026-10-24 起預設二階 CBF（cbf.second_order：CBF 管加速度、h 用剎車距離），剎車由 CBF 自己處理，
+    guard_radius、γ、emergency_speed 不用跟著改（一階時 3 m/s 要 guard 4 m，起降板上三台互相減速）：
+      miss_clearance  safe_radius + 0.5 + 0.2 V：讓的那台繞到預計最近距離這麼遠（3 m/s → 2.1 m；一階時是 4.5 m，繞太大）
+      yield_exit      miss_clearance + 0.5 m"""
+    if speed <= 0.6:
+        return ""
+    miss = safe_radius + 0.5 + 0.2 * speed
+    return f"-p cbf.miss_clearance:={miss:.1f} -p cbf.yield_exit:={miss + 0.5:.1f}"
+
+
 class Env:
     def __init__(self, cfg_path):
         with open(cfg_path, encoding="utf-8") as f:
@@ -49,6 +62,37 @@ class Env:
         self.host_repo = os.path.normpath(os.path.join(os.path.dirname(self.cfg_path), p["host_repo"]))
         self.repo = p["container_repo"]
         self.ids = self.cfg["vehicles"]["ids"]
+        self.spawn_origin = tuple(self.cfg["vehicles"].get("spawn_origin", [0.0, 0.0]))
+        self.bat_drain = None      # 模擬電池續航（s）；None = 腳本預設 900 s
+
+    def apply_world(self, name):
+        """demo 換場景（--world，2026-10-24）：config 的 worlds.<場景> 蓋掉 demo 的同名欄位、巡檢高度、出生原點、
+        假狗的出生點。沒列在 worlds 的場景（demo_site、fire_site…）照 config 原本的值"""
+        self.cfg["demo"]["world"] = name
+        w = self.cfg.get("worlds", {}).get(name, {})
+        self.cfg["demo"].update(w.get("demo", {}))
+        if "altitude" in w:
+            self.cfg["uav"]["altitude"] = w["altitude"]
+        if "spawn_origin" in w:
+            self.spawn_origin = tuple(w["spawn_origin"])
+        if "spawn_spacing" in w:
+            self.cfg["vehicles"]["spawn_spacing"] = w["spawn_spacing"]
+        self.bat_drain = w.get("bat_drain")
+        for u in (self.cfg.get("dog") or {}).get("units", []):
+            if u["ns"] in w.get("dog_start", {}):
+                u["start_xy"] = w["dog_start"][u["ns"]]
+
+    def home(self, vid):
+        """第 vid 台的出生點（map ENU）：出生原點 + (0, (vid − 1) × spawn_spacing)，和 px4_sitl.sh、cbba_uav.sh 一樣"""
+        return (self.spawn_origin[0], self.spawn_origin[1] + (vid - 1) * self.cfg["vehicles"]["spawn_spacing"])
+
+    def spawn_env(self):
+        """給 px4_sitl.sh、cbba_uav.sh 的 UAV_SPAWN_ORIGIN（兩邊要一樣，節點才換算得對）"""
+        out = {"UAV_SPAWN_ORIGIN": f"{self.spawn_origin[0]:g},{self.spawn_origin[1]:g}",
+               "UAV_SPAWN_SPACING": f"{self.cfg['vehicles']['spawn_spacing']:g}"}
+        if self.bat_drain:
+            out["SIM_BAT_DRAIN"] = f"{self.bat_drain:g}"    # px4_sitl.sh 設模擬電池、cbba_uav.sh 算能量模型，兩邊要一樣
+        return out
 
     def ns(self, vid):
         return self.cfg["vehicles"]["ns"].format(id=vid)
@@ -145,7 +189,8 @@ class Run:
         open(self.cmd_file, "w").close()
         open(os.path.join(out_dir, "events.jsonl"), "w").close()
         env.exec(env.sim(), f"exec python3 {env.repo}/docker/itest/ros_bridge.py --config {env.to_container(env.cfg_path)}"
-                 f" --dir {self.cout}" + (" --px4" if with_px4 else ""), detach=True, log=f"{self.cout}/ros_bridge.log")
+                 f" --dir {self.cout}" + (" --px4" if with_px4 else ""), detach=True, log=f"{self.cout}/ros_bridge.log",
+                 env=env.spawn_env())     # PX4 的位置換成 map 要出生原點
         if not self.wait(lambda e: e["kind"] == "ready", 20):
             raise SystemExit(f"ros_bridge 沒有啟動，看 {out_dir}/ros_bridge.log")
 
@@ -703,13 +748,15 @@ class UavSuite(Suite):
         ids = env.ids
         world = world or u.get("world")
         # 無人機的 BT：bt（備用）或 task_manager（照機器狗端骨架，2026-10-13）
-        stack_env = {**(stack_env or {}), "EXECUTOR": env.executor}
+        # 巡檢高度、出生原點一定要給（場景決定，2026-10-24）；速度沒給時用 uav.speed（uav 這組照舊 5 m/s）
+        stack_env = {"CBBA_ALTITUDE": f"{u['altitude']:g}", **({"CBBA_SPEED": f"{u['speed']:g}"} if "speed" in u else {}),
+                     **(stack_env or {}), **env.spawn_env(), "EXECUTOR": env.executor}
         for vid in ids:
             env.exec(env.uav(vid), u["start"].format(id=vid, ns=env.ns(vid)), detach=True, env=stack_env,
                      log=f"{run.cout}/stack_uav{vid}.log")
         run.sleep(8.0)
         for i, vid in enumerate(ids):
-            senv = {"HEADLESS": "1"} if headless else {}
+            senv = {**env.spawn_env(), **({"HEADLESS": "1"} if headless else {})}
             if i == 0 and world:
                 senv["CBBA_WORLD"] = world
             env.exec(env.sim(), u["px4_start"].format(id=vid), detach=True, env=senv,
@@ -848,9 +895,12 @@ class DemoSuite(UavSuite):
         d = self.cfg["demo"]
         self.area = area or d.get("area", [-22.0, 24.0, -14.0, 11.0])   # 手動、隨機插入的範圍 [x0, x1, y0, y1]
         self.min_gap = d.get("min_gap", 3.0)
+        # 下視相機看得到的半徑（2026-10-24 從固定 6.5 m 改成看高度）：水平視角 1.74 rad → 半寬 ≈ 1.19 × 高度；
+        # 5 m 高時 6.5 m（照舊），yard 8 m 高時 9.6 m。用在「火只讓被指派的那台看到」
+        self.view_keep = max(6.5, 1.2 * self.cfg["uav"]["altitude"])
         self.rng = random.Random(seed)
         self.console_done = not interactive
-        self.n_task = self.n_fire = 0
+        self.n_task = self.n_fire = self.n_manual = 0
 
     def points(self):
         path = os.path.join(self.env.host_repo, "docker", "gz", "worlds", f"{self.cfg['demo']['world']}_points.csv")
@@ -875,25 +925,45 @@ class DemoSuite(UavSuite):
     def scenario_items(self, sc, pts):
         """情境檔的 tasks、fires → 待插入的項目（座標用 point 查 CSV，或直接給 x、y）"""
         items = []
-        for kind in ("task", "fire"):
-            for i, it in enumerate(sc.get(kind + "s", [])):
-                if "point" in it:
+        for kind in ("task", "fire", "manual"):
+            # count N（2026-10-24）：同一筆展開成 N 個（名稱後面加 1～N），位置要 random；at_range [a, b]：開始後幾秒在這之間隨機
+            entries = []
+            for it in sc.get(kind + "s", []):
+                if int(it.get("count", 1)) > 1:
+                    base = it.get("name") or kind[0].upper()
+                    entries += [{**it, "name": f"{base}{k + 1}", "count": 1} for k in range(int(it["count"]))]
+                else:
+                    entries.append(it)
+            for i, it in enumerate(entries):
+                if "at_range" in it:
+                    it = {**it, "at": round(self.rng.uniform(*it["at_range"]), 1)}
+                if it.get("random") or it.get("pair") or it.get("behind"):
+                    x = y = None              # 插入時才在範圍內隨機（2026-10-20，使用者：隨機才測得到 CBBA）；對調時才知道
+                elif "point" in it:
                     if it["point"] not in pts:
                         raise SystemExit(f"情境檔：{kind} 的 point {it['point']} 不在 {self.cfg['demo']['world']}_points.csv")
                     x, y, _ = pts[it["point"]]
                 else:
                     x, y = float(it["x"]), float(it["y"])
                 name = it.get("name") or it.get("point") or f"{kind[0].upper()}{i + 1}"
-                items.append(dict(kind=kind, name=name, x=x, y=y, known_point="point" in it,
+                # delay_range [a, b]：等待秒數在這之間隨機（種子固定就重現）
+                delay = self.rng.uniform(*it["delay_range"]) if "delay_range" in it else float(it.get("delay", 0.0))
+                items.append(dict(kind=kind, name=name, x=x, y=y, known_point="point" in it and not it.get("random"),
                                   duration=float(it.get("duration", 5.0)),
                                   at=float(it.get("at", 0.0)), after_arrival=it.get("after_arrival"),
-                                  after_done=it.get("after_done"), delay=float(it.get("delay", 0.0)),
-                                  creator=it.get("creator")))
+                                  after_done=it.get("after_done"), after_manual=it.get("after_manual"),
+                                  delay=round(delay, 1), creator=it.get("creator"),
+                                  target=it.get("target"), fire=it.get("fire"),
+                                  pair=it.get("pair"), min_dist=float(it.get("min_dist", 15.0)),
+                                  wait=float(it.get("wait", 30.0)), behind=it.get("behind")))
         names = [it["name"] for it in items if it["kind"] == "task"]
+        manuals = [it["name"] for it in items if it["kind"] == "manual"]
         for it in items:
             for k in ("after_arrival", "after_done"):
                 if it[k] and it[k] not in names:
                     raise SystemExit(f"情境檔：{it['name']} 的 {k} = {it[k]}，沒有這個任務（任務：{', '.join(names)}）")
+            if it["after_manual"] and it["after_manual"] not in manuals:
+                raise SystemExit(f"情境檔：{it['name']} 的 after_manual = {it['after_manual']}，沒有這個人工指派")
         return items
 
     def insert_due(self, items, plan, t0):
@@ -911,7 +981,14 @@ class DemoSuite(UavSuite):
                 p = by_name.get(ref) if ref else None
                 if ref and not p:
                     continue
-                if it["after_arrival"]:
+                if it["after_manual"]:
+                    m = next(m for m in items if m["kind"] == "manual" and m["name"] == it["after_manual"])
+                    if not m.get("done"):
+                        continue
+                elif it["kind"] == "manual" and it["target"] == "busy" and (
+                        now - t0 < it["at"] or not self.busy_uavs(plan)):
+                    continue        # 要等到有一台正在做固定任務（G）
+                elif it["after_arrival"]:
                     if not any(v in run.positions and math.hypot(run.positions[v][0] - p["x"],
                                                                  run.positions[v][1] - p["y"]) < 1.0
                                for v in run.holders(p["task_id"])):
@@ -925,14 +1002,37 @@ class DemoSuite(UavSuite):
                 it["ready_t"] = now
             if now - it["ready_t"] < it["delay"]:
                 continue
-            self.insert_now(it, plan, t0)
+            if it["kind"] == "manual":
+                (self.manual_pair_now if it.get("pair") else self.manual_now)(it, plan, t0, items)
+            else:
+                self.insert_now(it, plan, t0, items)
 
-    def insert_now(self, it, plan, t0):
+    def insert_now(self, it, plan, t0, items=()):
         """插入一個任務或起火點。任務點不是場景裡的點（自訂 x、y）時生成藍色平台（models/task_pad）"""
         env, d = self.env, self.cfg["demo"]
         now = time.time()
         it["done"] = True
         scen = {"CBBA_SCENARIO": d["world"]}
+        if it.get("x") is None and it.get("behind"):
+            xy = self.behind_spot(it, plan, items)
+            if xy is None:
+                if now - it.get("ready_t", now) < it.get("wait", 30.0):
+                    it["done"] = False          # 等下一輪（還沒有懸停中的人工指派、或沒有閒著的無人機）
+                    return
+                self.reply(f"  {now - t0:5.1f} s  {it['name']}：等了 {it.get('wait', 30.0):g} s 找不到懸停的無人機後方的位置，"
+                           f"改成隨機位置")
+            else:
+                it["x"], it["y"] = xy
+        if it.get("x") is None:
+            xy = self.random_spot(plan, items, min_from_uavs=0.0)
+            if xy is None:
+                it["done"] = False
+                return
+            it["x"], it["y"] = xy
+        if it["kind"] == "task" and it.get("fire") is True:
+            # 任務點同時起火（2026-10-24，情境檔 tasks 的 "fire": true；同互動的 tf）：接到這個任務的那台到點時看到火
+            self.n_fire += 1
+            self.insert_now(dict(kind="fire", name=f"F_{it['name']}", x=it["x"], y=it["y"]), plan, t0)
         if it["kind"] == "task":
             if not it.get("known_point"):
                 env.exec(env.sim(), f"patrol_scenario.sh mark-at {it['x']} {it['y']} {it['name']}", env=scen)
@@ -946,6 +1046,453 @@ class DemoSuite(UavSuite):
             plan["fires"].append(dict(name=it["name"], x=it["x"], y=it["y"], custom=True, spawned=now))
             self.reply(f"  {now - t0:5.1f} s  起火 {it['name']} ({it['x']:g}, {it['y']:g})")
 
+    # ------------------------------------------------------------------ 情境檔的人工指派（2026-10-20）
+    def busy_uavs(self, plan):
+        """正在做固定任務（plan 的巡檢任務、還沒完成）的無人機 → {uav: 點名}"""
+        f_id, f_ok = self.cfg["fields"]["task_id"], self.cfg["fields"]["success"]
+        done = {e["msg"].get(f_id) for e in self.run.events if e["kind"] == "result" and e["msg"].get(f_ok) is True}
+        out = {}
+        for p in plan["patrol"]:
+            if p["task_id"] in done:
+                continue
+            for v in self.run.holders(p["task_id"]):
+                if v in self.run.positions:
+                    out[v] = p["point"]
+        return out
+
+    def random_spot(self, plan, items, min_from_uavs=0.0, near=None, keep_away=()):
+        """範圍內隨機一點：離場景的點、已插入的任務／火點、起飛點都 ≥ min_gap，離每台現在的位置 ≥ min_from_uavs，
+        離 keep_away 的點 ≥ view_keep（下視相機看得到的範圍：火不要被別台順路看到）、不在障礙物範圍（demo.keep_out）內。
+        near = (x, y, r1, r2)：改成在那一點周圍 r1～r2 m 內隨機。找不到回傳 None"""
+        x0, x1, y0, y1 = self.area
+        taken = [(p["x"], p["y"]) for p in plan["points"].values()] + [(p["x"], p["y"]) for p in plan["patrol"]] + \
+            [(f["x"], f["y"]) for f in plan["fires"] if "x" in f] + [self.env.home(v) for v in self.env.ids] + \
+            [(it["x"], it["y"]) for it in items if it.get("x") is not None and it.get("done")]
+        uavs = [self.run.positions[v][:2] for v in self.env.ids if v in self.run.positions]
+        for _ in range(1000):
+            if near:
+                a, r = self.rng.uniform(0, 2 * math.pi), self.rng.uniform(near[2], near[3])
+                x, y = round(near[0] + r * math.cos(a), 1), round(near[1] + r * math.sin(a), 1)
+                gap = 1.0     # 火在 M 旁：只要不疊在別的點上
+            else:
+                x, y = round(self.rng.uniform(x0, x1), 1), round(self.rng.uniform(y0, y1), 1)
+                gap = self.min_gap
+            if not (x0 <= x <= x1 and y0 <= y <= y1) or self.blocked(x, y):
+                continue
+            if all(math.hypot(x - a, y - b) >= gap for a, b in taken) and \
+                    all(math.hypot(x - a, y - b) >= min_from_uavs for a, b in uavs) and \
+                    all(math.hypot(x - a, y - b) >= self.view_keep for a, b in keep_away):
+                return x, y
+        return None
+
+    def blocked(self, x, y):
+        """(x, y) 在障礙物的範圍裡（config 的 demo.keep_out，[x0, x1, y0, y1]；yard 的變壓器、管架、棚子…）"""
+        return any(a <= x <= b and c <= y <= d for a, b, c, d in self.cfg["demo"].get("keep_out", []))
+
+    def manual_now(self, it, plan, t0, items):
+        """情境檔的人工指派 M（2026-10-20，使用者的新測試流程 2-2）：
+        a. target "busy"：從正在做固定任務（G）的無人機隨機挑一台；M 的位置隨機（離每台 ≥ 8 m，要飛一段）→ 那台交還 G、去 M
+        b. fire：同時在那台飛往 M 的路上（線段 route 比例處）或 M 旁（near m 內）隨機起火，離其他無人機、其他任務點 ≥ 6.5 m，
+           只有它會看到（≥ view_keep）→ 照火警 BT 發布地面任務、監控到狗處理完，M 延遲（BT 印「人工指派 … 延遲」）"""
+        env, d = self.env, self.cfg["demo"]
+        now = time.time()
+        busy = self.busy_uavs(plan)
+        if it["target"] == "busy" and not busy:
+            it.pop("ready_t", None)      # 等的時候 G 都做完了：等下一台開始做 G
+            return
+        if it["target"] == "busy":
+            v = self.rng.choice(sorted(busy))
+        else:
+            v = int(str(it["target"]).replace("uav", ""))
+        if v not in self.run.positions:
+            return
+        px, py = self.run.positions[v][:2]
+        others = [self.run.positions[u][:2] for u in env.ids if u != v and u in self.run.positions]
+        open_pts = [(p["x"], p["y"]) for p in plan["patrol"] if p["point"] != busy.get(v)]
+        if it["x"] is None:
+            xy = None
+            for _ in range(50):
+                xy = self.random_spot(plan, items, min_from_uavs=7.0)
+                if xy and math.hypot(xy[0] - px, xy[1] - py) >= 8.0:
+                    break
+                xy = None
+            if xy is None:
+                return      # 下一輪再試
+            it["x"], it["y"] = xy
+        mx, my = it["x"], it["y"]
+        fire = None
+        fc = it.get("fire")
+        if fc:
+            route = fc.get("route", [0.4, 0.8])
+            near = fc.get("near", 3.0)
+            keep = others + open_pts + [env.home(u) for u in env.ids]
+            use_route = self.rng.random() < fc.get("route_prob", 0.5) and math.hypot(mx - px, my - py) >= 8.0
+            if use_route:
+                L = math.hypot(mx - px, my - py)
+                for _ in range(100):
+                    k, off = self.rng.uniform(*route), self.rng.uniform(-0.5, 0.5)
+                    fx = round(px + (mx - px) * k - (my - py) / L * off, 2)
+                    fy = round(py + (my - py) * k + (mx - px) / L * off, 2)
+                    if not self.blocked(fx, fy) and all(math.hypot(fx - a, fy - b) >= self.view_keep for a, b in keep):
+                        fire = (fx, fy, f"uav{v} 往 {it['name']} 的路上（{k:.0%}）")
+                        break
+            if fire is None:
+                xy = self.random_spot(plan, items, near=(mx, my, 1.5, near), keep_away=keep)
+                if xy:
+                    fire = (xy[0], xy[1], f"{it['name']} 旁 {math.hypot(xy[0] - mx, xy[1] - my):.1f} m")
+        it["done"] = True
+        it["uav"], it["from"], it["t"] = v, busy.get(v), now
+        held = self.run.assigned.get(v, (0, 0, 0))[0]
+        it["held"] = held
+        if v in busy:
+            self.reply(f"  {now - t0:5.1f} s  uav{v} 原本在做 {busy[v]}，人工指派後交還")
+        self.manual_cmd([f"uav{v}", str(mx), str(my)], it["duration"], plan, t0, {})
+        label = plan["manual"][-1]["label"] if plan.get("manual") else it["name"]
+        it["label"] = label
+        env.exec(env.sim(), f"patrol_scenario.sh mark-at {mx} {my} {label}", env={"CBBA_SCENARIO": d["world"]})
+        it["n"] = self.n_manual
+        if plan.get("manual"):
+            plan["manual"][-1].update(name=it["name"], held=held, held_point=busy.get(v))
+            if not plan["manual"][-1]["ok"]:
+                it["finished"] = True      # 被拒絕：不用等它做完（M1 會標 FAIL）
+        if fire:
+            fx, fy, where = fire
+            fname = f"F_{it['name']}"
+            env.exec(env.sim(), f"patrol_scenario.sh fire-at {fx} {fy} {fname}", env={"CBBA_SCENARIO": d["world"]})
+            plan["fires"].append(dict(name=fname, x=fx, y=fy, custom=True, spawned=time.time(), manual=it["name"],
+                                      where=where))
+            it["fire_xy"] = (fx, fy)
+            self.reply(f"  {time.time() - t0:5.1f} s  起火 {fname} ({fx:g}, {fy:g})：{where}")
+        elif fc:
+            self.reply(f"  找不到放火的位置（離其他無人機、任務點都 ≥ {self.view_keep:.1f} m），這次 M 沒有火")
+
+    def manual_pair_now(self, it, plan, t0, items):
+        """對調（2026-10-24，使用者：要看到航線交叉時的避碰）：兩台用人工指派互相飛到對方「現在」的位置，一定正面交會。
+        pair：["uav1", "uav3"]，或 "auto" = 當下距離最遠、不在人工指派中的兩台；兩台要相距 ≥ min_dist（預設 15 m），
+        否則等下一輪；等超過 wait 秒（預設 30 s）就略過這次（2026-10-24：排在大家都做完、回到起降板之後，最遠只有 4 m，
+        一直等到時限，看起來像卡住）。被指派的那台手上有 CBBA 任務時照人工指派的規則交還（PREEMPTED_BY_MANUAL）"""
+        env = self.env
+
+        def give_up(why):
+            if time.time() - it.get("ready_t", time.time()) < it["wait"]:
+                return
+            it.update(done=True, finished=True, skipped=why)
+            self.reply(f"  {time.time() - t0:5.1f} s  對調 {it['name']} 略過：{why}（等了 {it['wait']:g} s）")
+        # 只挑停著的（水平速度 < 0.3 m/s）：指派要 3～4 s 才送到，飛行中的這段時間會跑掉 10 m 以上，兩條航線就不交會了
+        # （2026-10-24 SITL：記下位置 4 s 後才出發，最近 20 m，看不到 CBF）
+        pos = {v: self.run.positions[v][:2] for v in env.ids
+               if v in self.run.positions and self.uav_speed(v) < 0.3}
+        in_manual = set()
+        for i in items:
+            if i["kind"] == "manual" and i.get("done") and not self.manual_finished(i):
+                in_manual |= {i.get("uav"), i.get("uav_b")}
+        if it["pair"] == "auto":
+            free = sorted(v for v in pos if v not in in_manual)
+            pairs = [(math.hypot(pos[a][0] - pos[b][0], pos[a][1] - pos[b][1]), a, b)
+                     for k, a in enumerate(free) for b in free[k + 1:]]
+            if not pairs:
+                give_up("沒有兩台停著、不在人工指派中的無人機")
+                return
+            d, a, b = max(pairs)
+        else:
+            a, b = (int(str(x).replace("uav", "")) for x in it["pair"])
+            if a not in pos or b not in pos or a in in_manual or b in in_manual:
+                give_up(f"uav{a}、uav{b} 沒有位置或在人工指派中")
+                return
+            d = math.hypot(pos[a][0] - pos[b][0], pos[a][1] - pos[b][1])
+        if d < it["min_dist"]:
+            give_up(f"最遠的兩台只相距 {d:.1f} m（< {it['min_dist']:g} m）")
+            return
+        (ax, ay), (bx, by) = pos[a], pos[b]
+        now = time.time()
+        it.update(done=True, uav=a, uav_b=b, t=now, x=round(bx, 1), y=round(by, 1), xb=round(ax, 1), yb=round(ay, 1),
+                  dist=d)
+        jobs = [self.manual_prepare([f"uav{a}", str(it["x"]), str(it["y"])], it["duration"], plan, {}),
+                self.manual_prepare([f"uav{b}", str(it["xb"]), str(it["yb"])], it["duration"], plan, {})]
+        self.reply(f"  {now - t0:5.1f} s  對調 {it['name']}：uav{a} ↔ uav{b}（{jobs[0]['label']}、{jobs[1]['label']}，"
+                   f"相距 {d:.1f} m，互相飛到對方的位置、同時出發，正面交會）")
+        # 兩個指派同時送（一台一台送時第二台晚 3～4 s 出發，航線就錯開了）
+        threads = [threading.Thread(target=self.manual_send, args=(j,)) for j in jobs]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        for j, key in zip(jobs, ("n", "n_b")):
+            self.manual_record(j, plan, t0)
+            it[key] = j["n"]
+            plan["manual"][-1].update(name=j["label"], pair=it["name"])
+            env.exec(env.sim(), f"patrol_scenario.sh mark-at {j['x']} {j['y']} {j['label']}",
+                     env={"CBBA_SCENARIO": self.cfg["demo"]["world"]})
+
+    def behind_spot(self, it, plan, items):
+        """「behind": "manual"（2026-10-24，使用者：找會讓路徑交叉的任務點，不用對調）：任務放在「正在人工指派點懸停」的
+        那台 H 後方——閒著的 I 往 H 的延長線上、H 後方 6～10 m（左右偏 0～1 m）。CBBA 的出價看距離，兩台在飛行中交叉的
+        分配幾乎不會出現（交叉的話對調一定更近），所以改成讓 I 的航線經過不會讓開的 H（人工指派中、不參與 CBBA，不會把任務
+        搶走；任務懸停、路權比較高）→ I 要用 VO 繞過 H。條件：I 到 T 的距離 < 0.8 × 其他每一台（閒著的用目前位置；正在做任務的
+        用它目前任務點的位置——CBBA 會把新任務排在它手上的任務後面，2026-10-24 SITL：只比閒著的，T1 被做 G2 的 uav1 接走、
+        沒經過 H），在範圍內、不在障礙物裡、離其他任務點和火 ≥ min_gap。回傳 (x, y)，記下 it["via"] = (H, I)；找不到回傳 None"""
+        pos = {v: self.run.positions[v][:2] for v in self.env.ids if v in self.run.positions}
+        hovering = [i.get("uav") for i in items if i["kind"] == "manual" and i.get("done") and not i.get("pair")
+                    and not self.manual_finished(i)]
+        hovering = [v for v in hovering if v in pos and self.uav_speed(v) < 0.3]
+        busy_manual = set(hovering) | {i.get("uav") for i in items if i["kind"] == "manual" and i.get("done")
+                                       and not self.manual_finished(i)}
+        idle = [v for v in pos if v not in busy_manual and self.run.assigned.get(v, (0,))[0] in (0, None)]
+        # 其他可能接 T 的：不在人工指派中的每一台；正在做任務的用任務點的位置（CBBA 從那裡算新任務的距離）
+        task_xy = {p["task_id"]: (p["x"], p["y"]) for p in plan["patrol"]}
+        start = {}
+        for v in pos:
+            if v in busy_manual:
+                continue
+            tid = self.run.assigned.get(v, (0,))[0]
+            start[v] = task_xy.get(tid, pos[v]) if tid not in (0, None) else pos[v]
+        x0, x1, y0, y1 = self.area
+        taken = [(p["x"], p["y"]) for p in plan["patrol"]] + [(f["x"], f["y"]) for f in plan["fires"] if "x" in f]
+        for h in hovering:
+            for i in sorted(idle, key=lambda v: -math.hypot(pos[v][0] - pos[h][0], pos[v][1] - pos[h][1])):
+                hx, hy = pos[h]
+                ix, iy = pos[i]
+                L = math.hypot(hx - ix, hy - iy)
+                if L < 8.0:
+                    continue                    # 太近：I 一出發就在 H 旁邊，看不出繞行
+                ux, uy = (hx - ix) / L, (hy - iy) / L
+                for dist in (8.0, 6.0, 10.0):
+                    for lat in (0.0, 0.5, -0.5, 1.0, -1.0):
+                        x, y = round(hx + ux * dist - uy * lat, 1), round(hy + uy * dist + ux * lat, 1)
+                        if not (x0 <= x <= x1 and y0 <= y <= y1) or self.blocked(x, y):
+                            continue
+                        if any(math.hypot(x - a, y - b) < self.min_gap for a, b in taken):
+                            continue
+                        di = math.hypot(x - ix, y - iy)
+                        if any(math.hypot(x - start[j][0], y - start[j][1]) * 0.8 <= di for j in start if j != i):
+                            continue            # 別台（閒著的或做完手上任務後）比較近，CBBA 會給它
+                        it["via"] = (h, i)
+                        return x, y
+        return None
+
+    def uav_speed(self, v):
+        """uav v 最近的水平速度（events 裡最後兩筆位置）"""
+        last = []
+        for e in reversed(self.run.events):
+            if e["kind"] == "pos" and e["uav"] == v:
+                last.append(e)
+                if len(last) == 2:
+                    break
+        if len(last) < 2 or last[0]["t"] - last[1]["t"] <= 0:
+            return math.inf
+        return math.hypot(last[0]["x"] - last[1]["x"], last[0]["y"] - last[1]["y"]) / (last[0]["t"] - last[1]["t"])
+
+    def pair_report(self, it, t0):
+        """對調的紀錄：兩台之間的最近距離（events 的位置）、BT 記到的避碰（誰讓、往哪邊）"""
+        a, b = it["uav"], it["uav_b"]
+        track = {a: [], b: []}
+        for e in self.run.events:
+            if e["kind"] == "pos" and e["uav"] in track and e["t"] >= it["t"]:
+                track[e["uav"]].append((e["t"], e["x"], e["y"]))
+        best = None
+        j = 0
+        tb = track[b]
+        for t, x, y in track[a]:
+            while j + 1 < len(tb) and abs(tb[j + 1][0] - t) <= abs(tb[j][0] - t):
+                j += 1
+            if tb and abs(tb[j][0] - t) <= 0.3:
+                d = math.hypot(x - tb[j][1], y - tb[j][2])
+                if best is None or d < best[0]:
+                    best = (d, t)
+        notes = []
+        for v in (a, b):
+            path = os.path.join(self.run.out, f"stack_uav{v}.log")
+            if not os.path.exists(path):
+                continue
+            for line in open(path, encoding="utf-8", errors="replace"):
+                m = re.search(r"\[(\d+\.\d+)\] \[[^\]]+\]: (避碰：(預測|和).*|警告：避碰.*)", line)
+                if m and float(m.group(1)) >= it["t"] and (f"uav{b if v == a else a}" in m.group(2) or "警告" in m.group(2)):
+                    notes.append(f"uav{v} {float(m.group(1)) - t0:.1f} s {m.group(2)}")
+        return best, notes
+
+    def manual_log(self, v):
+        """uav v 的 BT log 裡跟人工指派有關的行：[(牆上時間, 內容)]"""
+        out = []
+        path = os.path.join(self.run.out, f"stack_uav{v}.log")
+        if not os.path.exists(path):
+            return out
+        for line in open(path, encoding="utf-8", errors="replace"):
+            if "人工指派" not in line and "平板任務" not in line and "地面站" not in line:
+                continue
+            m = re.search(r"\[(\d+\.\d+)\] \[[^\]]+\]: (.*)", line)
+            if m:
+                out.append((float(m.group(1)), m.group(2).strip()))
+        return out
+
+    def manual_finished(self, it):
+        """M 做完了沒（BT 的「平板任務 N 完成」）；log 每 2 s 才讀一次"""
+        if it.get("finished"):
+            return True
+        if not it.get("done") or "n" not in it:
+            return False
+        if time.time() - it.get("checked", 0.0) >= 2.0:
+            it["checked"] = time.time()
+            jobs = [(it["uav"], it["n"])] + ([(it["uav_b"], it["n_b"])] if it.get("pair") and "n_b" in it else [])
+            it["finished"] = all(any(f"平板任務 {n} 完成" in text for _, text in self.manual_log(v)) for v, n in jobs)
+        return bool(it.get("finished"))
+
+    def ground_station_watch(self, plan, t0):
+        """地面站／平板的即時通知（2026-10-20 使用者：人工指派延遲、交還這些現象要在 terminal 警告使用者，不是錯誤）：
+        - 被人工指派的無人機的 BT log（stack_uavN.log）裡「人工指派／地面站／平板任務」的行（延遲、繼續、完成）
+        - task_result 的 PREEMPTED_BY_MANUAL（交還 CBBA 任務）→ 之後別台拿到那個任務時印「改由 uavK 接手」
+        --interactive 時也寫給 insert.py 的 terminal。每 0.5 s 看一次"""
+        now = time.time()
+        if now - getattr(self, "_gs_t", 0.0) < 0.5:
+            return
+        self._gs_t = now
+        off = self.__dict__.setdefault("_gs_off", {})
+        handover = self.__dict__.setdefault("_gs_handover", {})    # task_id → 交還的那台
+        names = {p["task_id"]: p["point"] for p in plan["patrol"]}
+        f_id = self.cfg["fields"]["task_id"]
+        events = self.run.events
+        for e in events[self.__dict__.get("_gs_ev", 0):]:
+            tid = e.get("msg", {}).get(f_id) if isinstance(e.get("msg"), dict) else None
+            if e["kind"] == "result" and "PREEMPTED_BY_MANUAL" in (e["msg"].get("detail") or ""):
+                handover[tid] = e["uav"]
+                self.reply(f"  ⚠ {e['t'] - t0:5.1f} s  地面站通知：uav{e['uav']} 被人工指派，交還 "
+                           f"{names.get(tid, f'{tid:08X}')}，重新競標")
+            elif e["kind"] == "assigned" and tid in handover and e["uav"] != handover[tid]:
+                self.reply(f"  ℹ {e['t'] - t0:5.1f} s  地面站通知：{names.get(tid, f'{tid:08X}')} 改由 uav{e['uav']} 接手")
+                del handover[tid]
+        self._gs_ev = len(events)
+        for v in sorted({int(m["target"][3:]) for m in plan.get("manual", [])
+                         if m.get("ok") and str(m.get("target", "")).startswith("uav")}):
+            path = os.path.join(self.run.out, f"stack_uav{v}.log")
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as f:
+                f.seek(off.get(v, 0))
+                lines = f.readlines()
+                off[v] = f.tell()
+            for line in lines:
+                if ("人工指派" not in line and "平板任務" not in line and "地面站" not in line) or "交還 CBBA" in line:
+                    continue      # 交還由上面的 task_result 印
+                m = re.search(r"\[(\d+\.\d+)\] \[[^\]]+\]: (.*)", line)
+                if not m:
+                    continue
+                text = m.group(2).strip()
+                mark = "⚠" if text.startswith("警告") else "ℹ"
+                self.reply(f"  {mark} {float(m.group(1)) - t0:5.1f} s  地面站通知 uav{v}：{text}")
+
+    def check_manual(self, items, plan, t0, closed_at):
+        """新的模擬端測試（2026-10-20）的紀錄：M1 做 G 的那台轉去 M、G 交還由誰接手；M2 去 M 時看到火 → 火警 BT、M 延遲多久；
+        M3 之後插入的任務由誰做、當時在做什麼。**都是 INFO**（使用者：延遲、交還是要通知地面站的現象，不是錯誤；
+        跑的時候 ground_station_watch 已經在 terminal 印警告），只列出發生了什麼"""
+        run, res = self.run, self.res
+        f_id, f_ok = self.cfg["fields"]["task_id"], self.cfg["fields"]["success"]
+        names = {p["task_id"]: p["point"] for p in plan["patrol"]}
+
+        def results(tid, ok):
+            return [e for e in run.events if e["kind"] == "result" and e["msg"].get(f_id) == tid and e["msg"].get(f_ok) is ok]
+
+        finished = {}      # 人工指派 → 完成的時刻（BT 的「平板任務 N 完成」）
+        for it in (i for i in items if i["kind"] == "manual"):
+            if it.get("pair"):
+                if "uav" not in it:
+                    res.add("X1", f"對調 {it['name']}", "INFO", f"沒有下指派（{it.get('skipped', '時限內條件沒有成立')}）")
+                    continue
+                best, notes = self.pair_report(it, t0)
+                done = "都完成" if self.manual_finished(it) else "沒有都完成"
+                res.add("X1", f"對調 {it['name']}：兩台互相飛到對方的位置（正面交會）→ 避碰", "INFO",
+                        f"{it['t'] - t0:.1f} s uav{it['uav']} ({it['xb']:g}, {it['yb']:g}) ↔ uav{it['uav_b']} "
+                        f"({it['x']:g}, {it['y']:g})，相距 {it['dist']:.1f} m；" +
+                        (f"兩台最近 {best[0]:.2f} m（{best[1] - t0:.1f} s）" if best else "沒有位置紀錄") +
+                        f"；{done}" + ("；" + "／".join(notes[:6]) if notes else "；BT 沒有記到避碰"))
+                continue
+            if "uav" not in it:
+                res.add("M1", f"人工指派 {it['name']}", "INFO", "沒有下指派（等不到有一台在做固定任務）")
+                continue
+            v, held, hp, n = it["uav"], it.get("held"), it.get("from"), it.get("n")
+            rec = next((m for m in plan.get("manual", []) if m.get("name") == it["name"]), {})
+            back = [e for e in results(held, False) if e["uav"] == v] if held else []
+            why = back[0]["msg"].get("detail", "") if back else ""
+            by = [e["uav"] for e in results(held, True)] if held else []
+            ok1 = bool(rec.get("ok")) and (not held or ("PREEMPTED_BY_MANUAL" in why and bool(by) and by[0] != v))
+            text = (f"{it['t'] - t0:.1f} s uav{v}" + (f"（在做 {hp}）" if hp else "（手上沒有 CBBA 任務）") +
+                    f" ← {it['name']} ({it['x']:g}, {it['y']:g})、停留 {it['duration']:g} s：" +
+                    ("接受" if rec.get("ok") else f"拒絕（{rec.get('message', '沒有回應')}）"))
+            if held:
+                text += (f"；{names.get(held, f'{held:08X}')} 交還（{why or '沒看到交還'}）→ " +
+                         (f"uav{by[0]} 完成" if by else "沒有完成"))
+            res.add("M1", f"人工指派 {it['name']}：做 G 的那台交還 G、轉去 M；G 重新競標", "INFO",
+                    text + ("" if ok1 else "（和預期不同，看 log）"))
+
+            logs = self.manual_log(v)
+            delay = [x for _, x in logs if f"manual_{n} 延遲" in x]
+            resume = [x for _, x in logs if f"manual_{n} 繼續" in x or f"manual_{n} 完成" in x]
+            fin = [t for t, x in logs if f"平板任務 {n} 完成" in x]
+            if fin:
+                finished[it["name"]] = (v, fin[0])
+            fire = next((f for f in plan["fires"] if f.get("manual") == it["name"]), None)
+            if fire:
+                gt, who = fire.get("ground_task"), fire.get("reported_by")
+                tc = closed_at(gt) if gt else None
+                ok2 = who == v and bool(tc) and bool(delay) and bool(fin) and fin[0] >= tc - 0.5
+                text = (f"火 {fire['name']}（{fire.get('where', '')}）：" +
+                        (f"uav{who} 發現、發布地面任務 {gt:08X}" if gt else "沒有人發現") +
+                        (f"（不是被指派的 uav{v}）" if who and who != v else "") +
+                        (f"；狗處理完 {tc - t0:.1f} s" if tc else "；地面任務沒有結束") +
+                        (f"；{it['name']} 完成 {fin[0] - t0:.1f} s（指派後 {fin[0] - it['t']:.1f} s）" if fin else
+                         f"；{it['name']} 沒有完成") +
+                        f"；延遲訊息：{delay[0] if delay else '沒有'}" + (f"／{resume[-1]}" if resume else ""))
+                res.add("M2", f"去 {it['name']} 時看到火警 → 火警 BT（發布地面任務、監控到狗處理完）→ {it['name']} 延遲", "INFO",
+                        text + ("" if ok2 else "（和預期不同，看 log）"))
+            else:
+                res.add("M2", f"{it['name']} 完成", "INFO",
+                        "這次沒有放火；" + (f"{it['name']} 完成 {fin[0] - t0:.1f} s" if fin else f"{it['name']} 沒有完成"))
+
+        for it in items:
+            if it["kind"] != "task" or not it.get("via") or not it.get("done"):
+                continue
+            p = next((p for p in plan["patrol"] if p["point"] == it["name"]), None)
+            h, i = it["via"]
+            ok_runs = results(p["task_id"], True) if p else []
+            who = ok_runs[0]["uav"] if ok_runs else i
+            best, notes = self.pair_report(dict(uav=who, uav_b=h, t=p["t"] if p else it.get("ready_t", t0)), t0)
+            res.add("X1", f"{it['name']} 放在懸停的 uav{h} 後方：航線經過它 → 避碰", "INFO",
+                    f"{(p['t'] if p else t0) - t0:.1f} s 插入 {it['name']}，預期 uav{i} 接、經過 uav{h}；" +
+                    (f"uav{who} 完成" if ok_runs else f"{it['name']} 沒有完成") + "；" +
+                    (f"兩台最近 {best[0]:.2f} m（{best[1] - t0:.1f} s）" if best else "沒有位置紀錄") +
+                    ("；" + "／".join(notes[:6]) if notes else "；BT 沒有記到避碰"))
+
+        for it in items:
+            if it["kind"] != "task" or not it.get("after_manual") or not it.get("done"):
+                continue
+            p = next((p for p in plan["patrol"] if p["point"] == it["name"]), None)
+            ok_runs = results(p["task_id"], True) if p else []
+            if not ok_runs:
+                res.add("M3", f"插入 {it['name']}", "INFO", f"{it['name']} 沒有完成")
+                continue
+            u, ins = ok_runs[0]["uav"], p["t"]
+            # T 由沒任務的那台直接做，或排在手上的任務（鎖定中、同級不搶占）後面、做完才開始（2026-10-20 使用者）：
+            # 看那台的 current_task 換成 T 的那一刻，前一個任務已經回報完成、而且不在人工指派中
+            hist = [h for h in run.history if h[1] == u]
+            k = next((i for i, h in enumerate(hist) if h[2] == p["task_id"]), None)
+            start_t = hist[k][0] if k is not None else None
+            before = next((h[2] for h in reversed(hist[:k]) if h[2] not in (0, p["task_id"])), 0) if k else 0
+            before_done = before == 0 or any(e["t"] <= start_t + 0.5 for e in results(before, True))
+            at_ins = [h for h in hist if h[0] <= ins]
+            cur = at_ins[-1][2] if at_ins else 0
+            cur_done = cur == 0 or any(e["t"] <= ins for e in results(cur, True))
+            m = next(((fv, ft) for _, (fv, ft) in finished.items() if fv == u), None)
+            manual_busy = start_t is not None and any(
+                i["kind"] == "manual" and i.get("uav") == u and i.get("t", math.inf) <= start_t and
+                not (m and m[1] <= start_t) for i in items)
+            state = ("閒著" if cur == 0 else f"{names.get(cur, f'{cur:08X}')} 已完成" if cur_done else
+                     f"還在做 {names.get(cur, f'{cur:08X}')}，T 排在後面")
+            ok3 = start_t is not None and before_done and not manual_busy
+            res.add("M3", f"插入 {it['name']}：由沒任務的那台做，或排在手上的任務後面、做完才開始（不打斷）", "INFO",
+                    f"{ins - t0:.1f} s 插入 {it['name']} ({p['x']:g}, {p['y']:g}) → uav{u}；插入時 {state}" +
+                    (f"；{start_t - t0:.1f} s 開始做 {it['name']}" if start_t else "；沒看到開始") +
+                    ("" if before_done else f"（{names.get(before, f'{before:08X}')} 還沒完成就換成 T）") +
+                    ("；開始時還在人工指派中" if manual_busy else "") + "，完成" +
+                    ("" if ok3 else "（和預期不同，看 log）"))
+
     # ------------------------------------------------------------------ 手動插入（--interactive，2026-10-14）
     CONSOLE_HELP = (
         "  手動插入（另開一個 terminal：python3 docker/itest/insert.py；或直接在這裡輸入後按 Enter）：\n"
@@ -953,6 +1500,8 @@ class DemoSuite(UavSuite):
         "    t G2 [d=秒]       用場景的點名\n"
         "    tf [x y] [d=秒]   任務點、而且那裡起火（飛到時看到火 → 發布地面任務 → 監控到狗處理完）\n"
         "    f [x y]           只起火、不建任務（無人機路過或到附近時發現）\n"
+        "    m uav2 [x y] [d=秒]   人工指派（地面站／平板）：指定那台去那裡停留，期間不參與 CBBA；做完自動回到 CBBA\n"
+        "    m dog51 R3 [d=秒]     狗也可以（dog50～52 或 v60、v60_1…）；m uav2 clear 提早解除\n"
         "    l 列出  a 範圍  h 說明  q 不再插入（做完就結束）")
 
     # 第二個 terminal（insert.py）和 itest 之間的檔案：insert.py 把指令一行一行加到 commands.txt，
@@ -1042,6 +1591,12 @@ class DemoSuite(UavSuite):
                       ("完成" if ok else f"uav{who[0]} 執行中" if who else "等待分配"))
             for f in plan["fires"]:
                 self.reply(f"  {f['name']:>4} ({f['x']:6.1f}, {f['y']:6.1f})  起火")
+            for m in plan.get("manual", []):
+                self.reply(f"  {m['target']:>6} " + ("解除人工指派" if m["clear"] else
+                           f"人工指派 ({m['x']:6.1f}, {m['y']:6.1f}) 停留 {m['duration']:g} s") +
+                           ("" if m["ok"] else f"（拒絕：{m['message']}）"))
+        elif cmd == "m":
+            self.manual_cmd(rest, dur, plan, t0, pts)
         elif cmd in ("t", "tf", "f"):
             xy = self.console_xy(rest, plan, pts)
             if xy is None:
@@ -1069,6 +1624,68 @@ class DemoSuite(UavSuite):
         else:
             self.reply(f"  不認得：{line.strip()}（h 看說明）")
 
+    def manual_cmd(self, rest, dur, plan, t0, pts):
+        """人工指派（2026-10-20）：m <uavN|dogN|ns> [x y | 點名] [d=秒]，或 m <…> clear。在 sim 容器呼叫
+        /<ns>/manual_override（swarm_interfaces/ManualOverride；無人機由 uav_task_manager_node、狗由 fake_dog.py 提供），
+        和伯宇 BT 的平板接管同一個介面：被指派的那台交還手上的 CBBA 任務（PREEMPTED_BY_MANUAL）、mode MANUAL、做完恢復。
+        每個指派編號 M1、M2…（2026-10-24 使用者：畫面上用 Mx 表示，不直接寫座標）"""
+        job = self.manual_prepare(rest, dur, plan, pts)
+        if job:
+            self.manual_send(job)
+            self.manual_record(job, plan, t0)
+
+    def manual_prepare(self, rest, dur, plan, pts):
+        """解析 m 指令 → 要送的請求（還沒送）；不合法回 None"""
+        if not rest:
+            self.reply("  用法：m uav2 [x y | 點名] [d=秒]，或 m uav2 clear")
+            return None
+        who, rest = rest[0].lower(), rest[1:]
+        units = (self.cfg.get("dog") or {}).get("units") or []
+        ns = None
+        if who.startswith("uav") and who[3:].isdigit() and int(who[3:]) in self.env.ids:
+            ns = self.cfg["vehicles"]["ns"].format(id=int(who[3:]))
+        else:
+            for u in units:
+                if who in (u["ns"], f"dog{u['id']}"):
+                    ns, who = u["ns"], f"dog{u['id']}"
+        if ns is None:
+            self.reply(f"  不認得 {who}：要是 " + "、".join([f"uav{v}" for v in self.env.ids] +
+                                                           [f"dog{u['id']}" for u in units]))
+            return None
+        clear = bool(rest) and rest[0].lower() == "clear"
+        job = dict(who=who, ns=ns, clear=clear, duration=dur, x=0.0, y=0.0, label="")
+        if clear:
+            job["req"] = "{clear: true}"
+        else:
+            xy = self.console_xy(rest, plan, pts)
+            if xy is None:
+                return None
+            job["x"], job["y"] = xy[0], xy[1]
+            self.n_manual += 1
+            job["n"] = self.n_manual
+            job["label"] = f"M{self.n_manual}"
+            job["req"] = (f"{{task: {{task_id: {self.n_manual}, position: {{x: {job['x']}, y: {job['y']}, z: 0.0}}, "
+                          f"duration_sec: {dur}}}, clear: false}}")
+        return job
+
+    def manual_send(self, job):
+        """送出（ros2 service call，約 3～4 s；可以在不同執行緒同時送）"""
+        r = self.env.exec(self.env.sim(), f"timeout 15 ros2 service call /{job['ns']}/manual_override "
+                          f"swarm_interfaces/srv/ManualOverride \"{job['req']}\"")
+        out = r.stdout or ""
+        job["ok"] = "accepted=True" in out
+        m = re.search(r"message='([^']*)'", out)
+        job["message"] = m.group(1) if m else ((r.stderr or out).strip().splitlines() or ["沒有回應"])[-1]
+        job["t"] = time.time()
+
+    def manual_record(self, job, plan, t0):
+        plan.setdefault("manual", []).append(dict(t=job["t"], target=job["who"], ns=job["ns"], clear=job["clear"],
+                                                  x=job["x"], y=job["y"], duration=job["duration"], ok=job["ok"],
+                                                  message=job["message"], label=job["label"]))
+        self.reply(f"  {job['t'] - t0:5.1f} s  {job['who']} " +
+                   ("解除人工指派" if job["clear"] else f"← {job['label']}（人工指派，停留 {job['duration']:g} s）") +
+                   ("：" + job["message"] if job["ok"] else f"：拒絕／沒有回應（{job['message']}）"))
+
     def console_xy(self, rest, plan, pts):
         """指令的位置：點名、x y、或沒給（範圍內隨機）。回傳 (x, y, 點名或 None)；不合法回 None"""
         x0, x1, y0, y1 = self.area
@@ -1091,13 +1708,12 @@ class DemoSuite(UavSuite):
         if rest:
             self.reply("  位置要嘛給點名、要嘛給 x y、要嘛不給（隨機）")
             return None
-        # 隨機：離場景的點、已插入的點、起飛點都 ≥ min_gap
-        spacing = self.cfg["vehicles"]["spawn_spacing"]
+        # 隨機：離場景的點、已插入的點、起飛點都 ≥ min_gap，不在障礙物範圍內
         taken = [(p[0], p[1]) for p in pts.values()] + [(p["x"], p["y"]) for p in plan["patrol"]] + \
-            [(f["x"], f["y"]) for f in plan["fires"]] + [(0.0, (v - 1) * spacing) for v in self.env.ids]
+            [(f["x"], f["y"]) for f in plan["fires"]] + [self.env.home(v) for v in self.env.ids]
         for _ in range(500):
             x, y = round(self.rng.uniform(x0, x1), 1), round(self.rng.uniform(y0, y1), 1)
-            if all(math.hypot(x - a, y - b) >= self.min_gap for a, b in taken):
+            if not self.blocked(x, y) and all(math.hypot(x - a, y - b) >= self.min_gap for a, b in taken):
                 return x, y, None
         self.reply(f"  範圍內找不到離其他點 ≥ {self.min_gap:g} m 的位置")
         return None
@@ -1187,7 +1803,6 @@ class DemoSuite(UavSuite):
         ids = env.ids
         rng = random.Random(self.seed)
         pts = self.points()
-        spacing = self.cfg["vehicles"]["spawn_spacing"]
         alt = self.cfg["uav"]["altitude"]
         plan = dict(seed=self.seed, world=d["world"], speed=self.speed, mode=mode,
                     points={k: dict(x=v[0], y=v[1], tag=v[2]) for k, v in pts.items()
@@ -1230,8 +1845,11 @@ class DemoSuite(UavSuite):
         gate, takeoff = "/tmp/cbba_demo_go", "/tmp/cbba_demo_takeoff"
         for vid in ids:
             env.exec(env.uav(vid), f"rm -f {gate} {takeoff}")
-        # 展示用的 BT 參數（config 的 demo.exec_args＋情境檔的 exec_args，例如速度 3 m/s 時 CBF 的 influence_radius）
-        exec_args = " ".join(a for a in (d.get("exec_args", ""), sc.get("exec_args", "")) if a)
+        # 展示用的 BT 參數（config 的 demo.exec_args＋情境檔的 exec_args，例如 --speed 調快時 CBF 的 influence_radius）
+        # 速度不是 yaml 的 0.5 m/s 時，CBF 的 γ、influence_radius、miss_clearance 照速度算（cbf_speed_args）；
+        # config、情境檔的 exec_args 接在後面，要手動蓋掉時寫在那裡
+        exec_args = " ".join(a for a in (cbf_speed_args(self.speed), d.get("exec_args", ""), sc.get("exec_args", ""))
+                             if a)
         stack_env = {"CBBA_SPEED": str(self.speed), "CBBA_START_GATE": gate, "CBBA_TAKEOFF_GATE": takeoff}
         if exec_args:
             stack_env["EXEC_ARGS"] = exec_args
@@ -1245,7 +1863,9 @@ class DemoSuite(UavSuite):
             env.exec(env.sim(), f"exec python3 {env.repo}/docker/itest/record_cameras.py {run.cout} "
                      f"--ids {' '.join(str(v) for v in ids)}", detach=True, log=f"{run.cout}/record_cameras.log")
         # 假狗：Gazebo 替身＋執行者在 sim、cbba_node 在 dog.container（要在 mesh 上），和無人機的 cbba_node 同時開始
-        if dog and (mode in ("point", "side") or (mode == "custom" and (sc.get("fires") or self.interactive))):
+        if dog and (mode in ("point", "side") or (mode == "custom" and (
+                sc.get("fires") or self.interactive or any(m.get("fire") for m in sc.get("manuals", [])) or
+                any(t.get("fire") is True for t in sc.get("tasks", []))))):
             # 2026-10-20 起可以多隻（dog.units，分散在場地各處，看狗之間對火警的競標）；紀錄檔 fake_dog_<ns>.log、dog_cbba_<ns>.log
             units = dog.get("units") or [dict(ns="v60", id=50, start_xy=dog["start_xy"])]
             plan["dog"] = []
@@ -1336,11 +1956,12 @@ class DemoSuite(UavSuite):
 
         pending = [f for f in plan["fires"] if "spawned" not in f]
         used = set()
-        deadline = t0 + d["timeout"]
+        deadline = t0 + max(d["timeout"], d.get("timeout_min", 0.0))
         finished = None
         settled_since = None
         if mode == "custom":
-            deadline = t0 + sc.get("timeout", d.get("interactive_timeout", 600.0) if self.interactive else d["timeout"])
+            deadline = t0 + max(sc.get("timeout", d.get("interactive_timeout", 600.0) if self.interactive else d["timeout"]),
+                                d.get("timeout_min", 0.0))     # 大場景（yard）的情境檔時限至少 timeout_min
             if self.interactive:
                 self.ia_session(ready=True)
                 self.reply(f"  CBBA 上線，開始接受指令（最長 {deadline - t0:.0f} s；模擬電池約 12 分鐘從 100% 降到 20%、"
@@ -1350,6 +1971,7 @@ class DemoSuite(UavSuite):
             run.read()
             if mode == "custom":
                 self.insert_due(items, plan, t0)
+                self.ground_station_watch(plan, t0)
                 self.console(items, plan, t0, pts)
             cands = [(p, a) for p in plan["patrol"] for a in [ahead(p)] if a] if pending else []
             if cands:
@@ -1368,7 +1990,8 @@ class DemoSuite(UavSuite):
             g = self.ground_tasks(t0)
             all_done = all(done(p["task_id"]) for p in plan["patrol"])
             dog_done = not plan["dog"] or all(closed_at(e["msg"][f_id]) for e in g)
-            waiting = mode == "custom" and (any(not it.get("done") for it in items) or not self.console_done)
+            waiting = mode == "custom" and (any(not it.get("done") for it in items) or not self.console_done or
+                                            any(it["kind"] == "manual" and not self.manual_finished(it) for it in items))
             # 自訂情境、手動插入（2026-10-15）：任務都做完、狗也處理完之後，還沒被發現的火再等 fire_grace 秒；
             # 還是沒人發現（不在任何航線、懸停點附近）就照常結束，D2 標「沒有發現」，不卡到 timeout
             settled = not pending and not waiting and all_done and dog_done
@@ -1391,7 +2014,7 @@ class DemoSuite(UavSuite):
             self.ia_close()
 
         # 做完之後回到起飛點上空（BT 的 return_home_delay）
-        homes = {v: (0.0, (v - 1) * spacing) for v in ids}
+        homes = {v: env.home(v) for v in ids}
 
         def at_home(v):
             p = run.positions.get(v)
@@ -1407,8 +2030,6 @@ class DemoSuite(UavSuite):
 
         who = {p["task_id"]: run.ever_held(p["task_id"], t0) for p in plan["patrol"]}
         missing = [it["name"] for it in items if it["kind"] == "task" and not it.get("done")] if mode == "custom" else []
-        if mode == "custom" and self.interactive:
-            plan["manual"] = [it["name"] for it in items if it["kind"] == "manual"]
         res.add("D1", f"{len(plan['patrol'])} 個巡檢任務：CBBA 分配 → 飛到 → 回報完成",
                 "PASS" if all(done(p["task_id"]) for p in plan["patrol"]) and not missing else "FAIL",
                 "；".join(f"{p['point']}→uav{'/'.join(map(str, who[p['task_id']])) or '?'}" +
@@ -1492,6 +2113,8 @@ class DemoSuite(UavSuite):
                           if tr and tc and drift is not None else "沒有看到「狗處理完 → 巡檢點完成」的順序")
             res.add("D4", "無人機懸停監控火點，狗處理完才完成那個巡檢點（別台先發現時：發現的那台監控到狗處理完）",
                     "PASS" if ok else "FAIL", detail)
+        if mode == "custom" and any(it["kind"] == "manual" for it in items):
+            self.check_manual(items, plan, t0, closed_at)
         home_rows = []
         for v in ids:
             p = run.positions.get(v)
@@ -1527,6 +2150,10 @@ class DemoSuite(UavSuite):
             elif r is None:
                 print(f"  主機沒有 ffmpeg（sudo apt install ffmpeg），每一格留在 {frames}；裝好後：\n"
                       f"    ffmpeg -framerate {fps} -i {frames}/%05d.png -c:v libx264 -pix_fmt yuv420p {mp4}")
+        # 出價表（2026-10-20）：各台 cbba_node 的「出價表」log → bids.md、bids.csv（主機、只用標準庫）
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "bid_table.py"),
+                            run.out], capture_output=True, text=True)
+        print(f"  出價表：{(r.stdout or r.stderr).strip()}")
         gz_ok = os.path.exists(os.path.join(run.out, "gazebo.mp4"))
         cams_mp4 = self.compose_cameras(run, rec.get("t0"), rec_end) if gz_ok else None
         res.add("D6", "影片", "INFO" if os.path.exists(mp4) and gz_ok else "FAIL",
@@ -1590,12 +2217,26 @@ def main():
     ap.add_argument("--fire-mode", choices=["point", "route", "side"], default=None,
                     help="demo 的起火方式（預設照 config.json 的 demo.fire_mode）：point 巡檢點上、route 航線上、"
                          "side 航線旁的固定點（demo.side_points）")
+    ap.add_argument("--world", default=None,
+                    help="demo 的場景（預設 config 的 demo.world＝demo_site）；yard = 伯宇的變電所（出生在起降板、巡檢高度 8 m，"
+                         "設定在 config 的 worlds.yard）")
     ap.add_argument("--executor", choices=["bt", "task_manager"], default="task_manager",
                     help="uav、demo：無人機的 BT（task_manager = 照機器狗端骨架的 uav_task_manager_node，預設；bt = 備用 uav_bt_node）")
     args = ap.parse_args()
     env = Env(args.config)
     env.executor = args.executor
+    if args.suite == "demo":
+        env.apply_world(args.world or env.cfg["demo"]["world"])
     only = {s.strip() for s in args.only.split(",") if s.strip()}
+
+    # 容器沒開時 docker exec 直接失敗，連紀錄檔都不會有（2026-10-24：容器停了 33 小時，只看到「ros_bridge 沒有啟動」）
+    need = [env.sim()] + [env.uav(v) for v in env.ids] + ([env.cfg["dog"]["container"]] if env.cfg.get("dog") else [])
+    down = [c for c in dict.fromkeys(need)
+            if subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", c],
+                              capture_output=True, text=True).stdout.strip() != "true"]
+    if down:
+        print(f"容器沒有在跑：{'、'.join(down)}。先在主機執行 docker/start.sh（會照 .env 開 sim、uav1～N、gcs）")
+        return 2
 
     # 已經有在跑的東西時先停下來（避免打斷使用者正在做的事）
     busy = []

@@ -154,6 +154,17 @@ public:
   AgentId winner(TaskId id) const;
   double score(TaskId id) const;
 
+  // 這台現在對任務的出價（2026-10-20，出價表的 log 用；不影響分配）。why：
+  //   in_bundle 已得標（bid = 得標時的出價）；bid 有出價但沒贏（和 buildBundle 同樣算法，受 bundle 上限）；
+  //   infeasible 不能做（能力不符、來不及、電量不夠）；excluded 失敗後排除中；locked 別台已接受；
+  //   suspended BT 暫時拒絕；busy 不接新任務；inactive 不參與出價；closed 已結束；unknown 不認得
+  struct BidInfo
+  {
+    double bid{0.0};
+    const char * why{"unknown"};
+  };
+  BidInfo bidFor(TaskId id, double now) const;
+
 private:
   bool isOpen(TaskId id) const;
   std::vector<Task> pathTasks(const std::vector<TaskId> & ids) const;

@@ -8,5 +8,5 @@
   "fires": [
     {"name": "F1", "point": "R1", "at": 0}
   ],
-  "timeout": 200
+  "timeout": 480
 }

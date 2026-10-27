@@ -154,6 +154,47 @@ bool CbbaAgent::releaseLost()
 //   插入式的邊際分數不保證「接的任務越多、分數越低」，例如新任務剛好在既有路徑附近時，
 //   分數反而會變高，這會讓 CBBA 無法收斂。做法是把新任務的出價壓在 bundle 中既有出價
 //   的最小值以下，出價就一定隨 bundle 變長而不增，收斂性得以保證。
+CbbaAgent::BidInfo CbbaAgent::bidFor(TaskId id, double now) const
+{
+  const auto it = tasks_.find(id);
+  if (it == tasks_.end()) {
+    return {0.0, "unknown"};
+  }
+  if (it->second.status != TaskStatus::OPEN) {
+    return {0.0, "closed"};
+  }
+  if (std::find(bundle_.begin(), bundle_.end(), id) != bundle_.end()) {
+    return {score(id), "in_bundle"};
+  }
+  if (!active_) {
+    return {0.0, "inactive"};
+  }
+  if (excluded(id, now)) {
+    return {0.0, "excluded"};
+  }
+  if (locked_.count(id) > 0) {
+    return {0.0, "locked"};
+  }
+  if (suspended_.count(id) > 0) {
+    return {0.0, "suspended"};
+  }
+  if (!exec_.accept_new) {
+    return {0.0, "busy"};
+  }
+  const InsertionLimits limits = limitsFor(it->second, path_, now);
+  const Insertion ins = bestInsertion(state_, pathTasks(path_), it->second, now, params_, limits);
+  if (!ins.feasible || !(ins.score > 0.0)) {
+    return {0.0, "infeasible"};
+  }
+  // 和 buildBundle 一樣：出價不超過 bundle 裡任務的分數，搶占不受限
+  double bid_cap = kInf;
+  for (TaskId held : bundle_) {
+    bid_cap = std::min(bid_cap, score(held));
+  }
+  const bool preempt = limits.preempt_drops_head && ins.position == 0;
+  return {preempt ? ins.score : std::min(ins.score, bid_cap), "bid"};
+}
+
 bool CbbaAgent::buildBundle(double now)
 {
   if (!active_ || !exec_.accept_new) {

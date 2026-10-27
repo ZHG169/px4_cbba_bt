@@ -103,6 +103,10 @@ public:
   // 全隊已知的地面處置任務（含別台建立的）。2026-10-14：別台報過的火不再發布、不轉向
   virtual std::vector<KnownGroundTask> groundTasks() const {return {};}
   virtual void log(const std::string & text) = 0;
+  // 自己的機號（位置廣播的 sender_id；避碰的路權同狀態時比機號）。測試用的平台預設 0（2026-10-24）
+  virtual std::uint16_t agentId() const {return 0;}
+  // 任務中懸停（BT 已經到任務點、正在停留／辨識／監控）：放進位置廣播的 flags bit 3，避碰時路權最高（2026-10-24）
+  virtual void setTaskHover(bool /*hover*/) {}
 };
 
 }  // namespace uav_px4_bt
