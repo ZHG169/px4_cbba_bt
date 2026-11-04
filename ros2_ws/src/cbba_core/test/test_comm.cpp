@@ -1,8 +1,9 @@
-// CbbaComm（協定版本 2）：經過模擬的廣播網路（誰聽得到誰、掉包、延遲）跑完整的機間協定
+// CbbaComm（協定版本 3）：經過模擬的廣播網路（誰聽得到誰、掉包、延遲）跑完整的機間協定
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <set>
+#include <vector>
 
 #include "swarm_harness.hpp"
 
@@ -273,7 +274,7 @@ TEST(CbbaComm, NonParticipantDoesNotBid)
   EXPECT_TRUE(b.stamps.empty());                     // 沒有 s
   ASSERT_EQ(b.records.size(), 1u);                   // 紀錄照送（正式指派要傳得出去），收的那端不交給規則
   EXPECT_EQ(wire::encodeCbbaState(wire::Header{PacketType::CBBA_STATE, 3, 1, 1, 0}, b).size(),
-    36u + 21u);
+    wire::cbbaStateSize(0, 1));                      // 37 + 21（協定版本 3 的固定大小多了 digest_count）
   EXPECT_TRUE(swarm.node(1).converged(swarm.now()));   // 不參與的鄰居不影響收斂判定
 
   swarm.node(3).setParticipating(true, swarm.now());  // 起飛
@@ -366,7 +367,7 @@ TEST(CbbaComm, LateJoinerGetsTasksAndCloses)
 
 TEST(CbbaComm, NonParticipantCatchesUpQuickly)
 {
-  // 還在地面（不出價）的晚加入者沒有附紀錄：鄰居看到摘要不同就全部補，不用等每 5 s 的保底重播
+  // 還在地面（不出價）的晚加入者：比對摘要、送缺口請求，鄰居只補它缺的，不用等每 5 s 的保底重播
   Swarm swarm;
   swarm.add(1, {0, 0, 5});
   swarm.add(2, {10, 0, 5});
@@ -707,12 +708,20 @@ TEST(CbbaComm, QuietWhenConverged)
   swarm.run(3.0);
   ASSERT_TRUE(swarm.consistent());
 
-  // 收斂後每架每秒：CBBA_STATE 5 則（5 架 5 任務：36 + 6×5 + 21×5 = 171 B）、
-  // AGENT_STATE 2 則（路徑 1、鄰居 4：74 + 4 + 8 = 86 B），加上每 5 s 一則保底重播（65 B）
+  // 收斂後每架每秒：CBBA_STATE 5 則（5 架 5 任務：37 + 6×5 + 21×5 = 172 B），其中 1 則帶摘要（5 個建立者 × 14 B）、
+  // AGENT_STATE 2 則（路徑 1、鄰居 4：74 + 4 + 8 = 86 B），加上每 5 s 一則保底重播（65 B）。沒有缺口請求、補發
+  // 缺口請求只看這 10 s（收斂之前五台同時建任務，摘要短暫不一致時有請求是正常的）
+  std::vector<int> requests_before;
+  for (AgentId a = 1; a <= 5; ++a) {
+    requests_before.push_back(swarm.node(a).stats().gap_requests);
+  }
   const std::size_t before = swarm.bytes();
   swarm.run(10.0);
   const double per_agent_per_sec = (swarm.bytes() - before) / 10.0 / 5.0;
-  EXPECT_NEAR(per_agent_per_sec, 5 * 171.0 + 2 * 86.0 + 65.0 / 5.0, 30.0);
+  EXPECT_NEAR(per_agent_per_sec, 5 * 172.0 + 5 * 14.0 + 2 * 86.0 + 65.0 / 5.0, 30.0);
+  for (AgentId a = 1; a <= 5; ++a) {
+    EXPECT_EQ(swarm.node(a).stats().gap_requests, requests_before[a - 1]) << "agent " << a;
+  }
   for (AgentId a = 1; a <= 5; ++a) {
     EXPECT_TRUE(swarm.node(a).converged(swarm.now()));
   }
@@ -940,4 +949,155 @@ TEST(Assignment, CancelStopsPendingCompletion)
   EXPECT_FALSE(swarm.node(3).completionPending(t));
   EXPECT_EQ(swarm.node(3).agent().tasks().at(t).status, TaskStatus::CANCELLED);
   EXPECT_EQ(swarm.node(1).agent().tasks().at(t).status, TaskStatus::CANCELLED);
+}
+
+// ===========================================================================
+// 補發（協定版本 3，2026-10-28，doc/protocol_v3_sync.md）
+// ===========================================================================
+namespace
+{
+int sentCount(const CbbaComm & node, PacketType type)
+{
+  const auto it = node.stats().sent.find(type);
+  return it != node.stats().sent.end() ? it->second : 0;
+}
+
+std::size_t sentBytes(const CbbaComm & node, PacketType type)
+{
+  const auto it = node.stats().sent_bytes.find(type);
+  return it != node.stats().sent_bytes.end() ? it->second : 0;
+}
+
+// 任務定義、結束紀錄總共送了幾則（單獨的封包＋SYNC_BATCH 裡的筆數），三台加起來
+int taskTraffic(Swarm & swarm)
+{
+  int n = 0;
+  for (AgentId a = 1; a <= 3; ++a) {
+    const CbbaComm & node = swarm.node(a);
+    n += sentCount(node, PacketType::TASK_ANNOUNCE) + sentCount(node, PacketType::TASK_CLOSE) +
+      node.stats().repair_items_sent;
+  }
+  return n;
+}
+
+// uav1 建立 count 個任務，再全部取消（已結束）
+void createAndCancel(Swarm & swarm, std::uint16_t count)
+{
+  for (std::uint16_t k = 1; k <= count; ++k) {
+    swarm.node(1).addLocalTask(
+      newTask(1, k, (k % 20) * 3.0, (k / 20) * 3.0, swarm.now(), 80.0, 600.0), swarm.now());
+  }
+  swarm.run(2.0);
+  for (std::uint16_t k = 1; k <= count; ++k) {
+    swarm.node(1).cancelTask(makeTaskId(1, k), swarm.now());
+  }
+}
+}  // namespace
+
+TEST(Sync, ClosedTasksAreNotResentWhenOneTaskIsMissing)
+{
+  // 全隊都知道 200 個已結束的任務，uav3 只漏掉 1 個新任務：只補那一個。
+  // 版本 2 會把 200 個已結束的任務各補一次（TASK_ANNOUNCE＋TASK_CLOSE），流量和已結束的任務數成正比
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.run(2.0);
+  createAndCancel(swarm, 200);
+  swarm.run(3.0);
+  ASSERT_EQ(swarm.node(3).roundKey(), swarm.node(1).roundKey());
+
+  const int before = taskTraffic(swarm);
+  swarm.setOnline(3, false);
+  swarm.node(2).addLocalTask(newTask(2, 1, 11, 0, swarm.now()), swarm.now());
+  swarm.run(0.5);
+  swarm.setOnline(3, true);
+  swarm.run(3.0);
+  EXPECT_TRUE(swarm.node(3).knows(makeTaskId(2, 1)));
+  EXPECT_EQ(swarm.node(3).roundKey(), swarm.node(1).roundKey());
+  EXPECT_TRUE(swarm.consistent());
+  // 新任務的建立與轉送、補給 uav3 的幾則、保底重播：遠少於 200
+  EXPECT_LT(taskTraffic(swarm) - before, 20);
+}
+
+TEST(Sync, RepairIsRateLimitedAndLateJoinerCatchesUp)
+{
+  // 晚加入的 uav3 缺 300 個已結束的任務：補發不超過 repair_rate，最後照樣補齊
+  CommConfig cc;
+  cc.repair_rate = 4000.0;
+  cc.repair_burst = 1200.0;
+  Swarm swarm(0.0, 1, cc);
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.setOnline(3, false);
+  swarm.run(2.0);
+  createAndCancel(swarm, 300);
+  swarm.run(3.0);
+
+  swarm.setOnline(3, true);
+  const std::size_t b1 = sentBytes(swarm.node(1), PacketType::SYNC_BATCH);
+  const std::size_t b2 = sentBytes(swarm.node(2), PacketType::SYNC_BATCH);
+  swarm.run(4.0);
+  // 4 s 的額度 + 一開始的 burst（取 max_packet 1200 B）
+  EXPECT_LE(sentBytes(swarm.node(1), PacketType::SYNC_BATCH) - b1, 4000u * 4 + 1200u);
+  EXPECT_LE(sentBytes(swarm.node(2), PacketType::SYNC_BATCH) - b2, 4000u * 4 + 1200u);
+  EXPECT_GT(sentBytes(swarm.node(1), PacketType::SYNC_BATCH) - b1, 0u);
+
+  swarm.run(20.0);
+  EXPECT_EQ(swarm.node(3).taskCount(), 300u);
+  EXPECT_EQ(swarm.node(3).roundKey(), swarm.node(1).roundKey());
+  EXPECT_GT(swarm.node(3).stats().gap_requests, 0);
+  EXPECT_GT(swarm.node(3).stats().repair_items_applied, 0);
+}
+
+TEST(Sync, LateJoinerCatchesUpUnderLoss)
+{
+  // 30% 掉包：缺口請求、分批回覆都會掉，靠重複請求（gap_request_gap）補齊
+  Swarm swarm(0.3, 7);
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.setOnline(3, false);
+  swarm.run(2.0);
+  for (std::uint16_t k = 1; k <= 40; ++k) {
+    swarm.node(1).addLocalTask(newTask(1, k, k * 2.0, 0, swarm.now(), 80.0, 600.0), swarm.now());
+  }
+  swarm.run(3.0);
+  for (std::uint16_t k = 1; k <= 20; ++k) {
+    swarm.node(1).cancelTask(makeTaskId(1, k), swarm.now());
+  }
+  swarm.run(3.0);
+  ASSERT_EQ(swarm.node(2).roundKey(), swarm.node(1).roundKey());
+
+  swarm.setOnline(3, true);
+  swarm.run(10.0);
+  EXPECT_EQ(swarm.node(3).taskCount(), 40u);
+  EXPECT_EQ(swarm.node(3).roundKey(), swarm.node(1).roundKey());
+  EXPECT_TRUE(swarm.consistent());
+}
+
+TEST(Sync, DigestMatchesRoundKeyState)
+{
+  // 摘要：每個建立者一筆，知道幾個、已結束幾個、流水號範圍正確；兩台知道的一樣時摘要一樣
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.run(2.0);
+  for (std::uint16_t k = 5; k <= 9; ++k) {
+    swarm.node(1).addLocalTask(newTask(1, k, k * 2.0, 0, swarm.now()), swarm.now());
+  }
+  swarm.node(2).addLocalTask(newTask(2, 3, 11, 0, swarm.now()), swarm.now());
+  swarm.run(1.0);
+  swarm.node(1).cancelTask(makeTaskId(1, 6), swarm.now());
+  swarm.run(1.0);
+  const auto d = swarm.node(1).digestMap();
+  ASSERT_EQ(d.size(), 2u);
+  EXPECT_EQ(d.at(1).min_seq, 5);
+  EXPECT_EQ(d.at(1).max_seq, 9);
+  EXPECT_EQ(d.at(1).known, 5);
+  EXPECT_EQ(d.at(1).closed, 1);
+  EXPECT_EQ(d.at(2).known, 1);
+  EXPECT_EQ(d.at(2).closed, 0);
+  EXPECT_EQ(swarm.node(2).digestMap(), d);
 }

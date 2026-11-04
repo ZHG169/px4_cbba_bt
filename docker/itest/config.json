@@ -48,6 +48,8 @@
     "result":      {"name": "/{ns}/task_result",   "type": "swarm_interfaces/msg/TaskResult", "reliable": true,  "transient_local": false},
     "robot_state": {"name": "/{ns}/robot_state",   "type": "swarm_interfaces/msg/RobotState", "reliable": true,  "transient_local": false},
     "closed":      {"name": "/{ns}/task_closed",   "type": "swarm_interfaces/msg/Task",       "reliable": true,  "transient_local": true},
+    "announced":   {"name": "/{ns}/task_announced", "type": "swarm_interfaces/msg/Task",      "reliable": true,  "transient_local": true, "depth": 256},
+    "path":        {"name": "/{ns}/cbba_path",     "type": "std_msgs/msg/UInt32MultiArray",   "reliable": true,  "transient_local": true},
     "px4_position": {"name": "/{ns}/fmu/out/vehicle_local_position_v1", "type": "px4_msgs/msg/VehicleLocalPosition", "reliable": false, "transient_local": false},
     "px4_status":   {"name": "/{ns}/fmu/out/vehicle_status_v1",         "type": "px4_msgs/msg/VehicleStatus",        "reliable": false, "transient_local": false},
     "px4_battery":  {"name": "/{ns}/fmu/out/battery_status_v1",         "type": "px4_msgs/msg/BatteryStatus",        "reliable": false, "transient_local": false}
@@ -106,6 +108,12 @@
     "stop_pattern": "__node:=v60[a-z0-9_]*_cbba_node( |$)",
     "sim_start": "exec python3 {repo}/docker/scripts/fake_dog.py --world {world} --ns {ns} --id {id} --model {ns}_standin --start {x} {y} --speed {speed}",
     "sim_stop_pattern": "fake_dog.py",
+    "bt_start": "exec dog_bt.sh start {ns} {id}",
+    "bt_stop_pattern": "lib/task_manager/task_manager_node",
+    "bt_check": "test -f /home/ncrl/CBBA_BT/dog_ws/install/setup.bash",
+    "bt_sim_start": "source {repo}/dog_ws/install/setup.bash && exec python3 {repo}/docker/scripts/fake_nav_body.py --world {world} --ns {ns} --model {ns}_standin --start {x} {y} --speed {speed} --ptz-sec {ptz}",
+    "bt_sim_stop_pattern": "fake_nav_body.py",
+    "ptz_sec": 5.0,
     "state_topic": "/{ns}/robot_state",
     "current_topic": "/{ns}/current_task",
     "units": [
@@ -114,7 +122,7 @@
       {"ns": "v60_2", "id": 52, "start_xy": [-18.0, -8.0]}
     ],
     "speed": 1.5,
-    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗。名稱 2026-10-24 起照伯宇的狗（v60、v60_1、v60_2；原本 v60b、v60c）；start_xy 是 demo_site 的位置，其他場景看 worlds.<場景>.dog_start"
+    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗。名稱 2026-10-24 起照伯宇的狗（v60、v60_1、v60_2；原本 v60b、v60c）；start_xy 是 demo_site 的位置，其他場景看 worlds.<場景>.dog_start。--dog bt（2026-10-27）：執行者換成伯宇的狗 BT（bt_start，dog.container 裡的 task_manager，要先 dog_bt.sh build），sim 只放方塊身體（bt_sim_start，fake_nav_body.py：假 Nav2、假雲台 ptz_sec 秒、TF）；cbba_node 不變"
   },
   "uav": {
     "start": "export EXECUTOR=${{EXECUTOR:-bt}}; exec cbba_uav.sh",

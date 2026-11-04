@@ -37,7 +37,7 @@ TEST(WireHeader, LayoutIsBigEndian)
   const auto out = packet(makeHeader(PacketType::CBBA_STATE), 3);
   const std::vector<std::uint8_t> expected = {
     0x43, 0x42,                                      // magic "CB"
-    0x02,                                            // version
+    0x03,                                            // version
     0x02,                                            // type = CBBA_STATE
     0x01, 0x02,                                      // sender_id
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,  // session_id
@@ -74,10 +74,16 @@ TEST(WireHeader, RejectsInvalid)
   bad = good;
   bad[2] = 1;
   EXPECT_FALSE(parseHeader(bad));                      // 版本 1（規格書的格式）
+  bad[2] = 2;
+  EXPECT_FALSE(parseHeader(bad));                      // 版本 2（2026-10-28 前；補發的方式不同，不互通）
   bad = good;
   bad[3] = 0;
   EXPECT_FALSE(parseHeader(bad));                      // 種類 0
   bad[3] = 7;
+  EXPECT_TRUE(parseHeader(bad));                       // GAP_REQUEST（版本 3）
+  bad[3] = 8;
+  EXPECT_TRUE(parseHeader(bad));                       // SYNC_BATCH（版本 3）
+  bad[3] = 9;
   EXPECT_FALSE(parseHeader(bad));                      // 不認得的種類
   EXPECT_FALSE(parseHeader(packet(makeHeader(PacketType::AGENT_STATE, 0))));        // 0 = 無人
   EXPECT_FALSE(parseHeader(packet(makeHeader(PacketType::AGENT_STATE, 0xFFFF))));   // 保留
@@ -98,6 +104,8 @@ TEST(WireHeader, RelayBlock)
   EXPECT_TRUE(isRelayed(PacketType::COMPLETION));
   EXPECT_TRUE(isRelayed(PacketType::COMPLETION_ACK));
   EXPECT_TRUE(isRelayed(PacketType::TASK_CLOSE));
+  EXPECT_FALSE(isRelayed(PacketType::GAP_REQUEST));   // 版本 3 的補發只在直接鄰居之間
+  EXPECT_FALSE(isRelayed(PacketType::SYNC_BATCH));
 
   std::vector<std::uint8_t> bytes;
   appendHeader(bytes, makeHeader(PacketType::TASK_ANNOUNCE));

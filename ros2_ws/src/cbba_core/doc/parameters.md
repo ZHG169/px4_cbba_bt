@@ -121,14 +121,17 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 | `lost_timeout` | 1.5 s | 某台的時間戳 s 這麼久沒更新就判定失聯，釋放它的任務重新分配（規格的 1.5 s）。CBBA_STATE 每 200 ms 一則，1.5 s 約 7 則都沒收到才判定。**全隊要一樣**，否則對同一台的判斷會不一致 |
 | `takeover_fire` | 10 s | 失聯接手（2026-10-12）：火警（GROUND_INTERVENTION）的持有者已接受（保留、執行中）、失聯後再過這麼久才撤銷、重新競標。「通訊斷了但還在做」和「墜毀」分不出來，火警寧可重複。**全隊要一樣**（各機自己撤銷） |
 | `takeover_patrol` | 30 s | 同上，其他任務（巡檢）：寧可等，避免兩台做同一個巡檢 |
-| `max_packet` | 1200 B | CBBA_STATE 每批（整個 UDP 封包）的上限。任務多時分批，每批 (1200 − 36 − 6 × 機數) / 16 筆；依 mesh 的 MTU 調整 |
+| `max_packet` | 1200 B | CBBA_STATE 每批（整個 UDP 封包）的上限。任務多時分批，每批 (1200 − 37 − 14 × 建立者數（帶摘要時） − 6 × 機數) / 21 筆；依 mesh 的 MTU 調整 |
+| `resend_gap` | 1.0 s | 同一個任務直接推送（最近新增、結束的）、保底重播的最短間隔（協定版本 3；`repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period` 也是參數，見第二節「補發」） |
+| `completion_retry`、`completion_max` | 1.0 s、10 次 | 完成宣告沒收齊確認時的重送間隔、次數；超過次數就以收到的確認送出 TASK_CLOSE（2026-11-04 開成參數）。高掉包時「完成 → 全隊確認」大約是 `completion_retry × completion_max`：2026-11-03 量到 70% 掉包 11.1 s |
 | `cancel_authorities` | `[]` | 除了任務的建立者，可以取消任何任務的機號（授權的管理端）。**全隊要一樣**：收到取消的 TASK_CLOSE 時也用它檢查，不一樣的話有的節點會拒絕取消 |
 
 ---
 
 ## 二、協定層（`CommConfig`，程式常數）
 
-這些沒有開成 ROS 參數，改了要重新編譯。大多數是規格書的數字，或和其他參數有連動，不建議單獨改。
+這些大多沒有開成 ROS 參數，改了要重新編譯（例外：補發的 `resend_gap`、`digest_period`、`gap_request_gap`、`push_recent_sec`、`repair_rate`，
+完成確認的 `completion_retry`、`completion_max` 是 cbba_node 參數）。大多數是規格書的數字，或和其他參數有連動，不建議單獨改。
 
 ### 傳送時機
 
@@ -152,7 +155,13 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 
 | 常數 | 值 | 說明 |
 |---|---|---|
-| `resend_gap` | 1.0 s | 同一個 TASK_ANNOUNCE 或 TASK_CLOSE，最短隔多久補一次。鄰居的摘要（round_key）不同時才補；地面上（不參與出價）的鄰居當成什麼都不知道，全部補一次 |
+| `resend_gap` | 1.0 s | 同一個任務直接推送（最近新增、結束的）的最短間隔 |
+| `digest_period` | 1.0 s | 收斂後多久在 CBBA_STATE 帶一次壓縮摘要（協定版本 3；不一致時每次都帶） |
+| `gap_request_gap` | 0.5 s | 同一個（鄰居, 建立者）的缺口請求最短間隔；掉包時靠它重複請求 |
+| `push_recent_sec` | 10 s | 摘要不同時，不等請求直接推送這麼久之內新增、結束的任務（高掉包時一來一回很難成功） |
+| `repair_rate` | 8000 B/s | 補發（SYNC_BATCH）的平均上限；晚加入、重開機時補齊的速度也受它限制（約 90 B／已結束的任務） |
+| `repair_burst` | 2400 B | 補發 token bucket 的容量 |
+| `stats_log_sec` | 10 s | 節點每隔多久印一次「封包統計」（送出的 kB/s、各種封包則數、缺口請求、補發筆數）；0 = 不印 |
 | `replay_period` | 5.0 s | 保底重播：每 5 s 輪流重播一個已知任務。摘要比對漏掉時的最後安全網 |
 
 ### 完成確認

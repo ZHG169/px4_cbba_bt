@@ -126,7 +126,6 @@ gcs 執行 `ros2 topic hz /uav1/fmu/out/vehicle_odometry` 頻率下降，但 Gaz
 | `cbba_uav.sh` | uavN | 一次啟動 XRCE Agent、BT（預設正式 BT `uav_task_manager_node`，`EXECUTOR=bt` 換備用 BT）、AprilTag 偵測、px4_state_bridge、cbba_node（步驟見 `cbba_core/doc/sitl_test.md`） |
 | `cbba_task.sh new/done/fail/watch` | uavN | 發任務、手動回報結果、看目前指派 |
 | `gz_bridge.sh` | sim | 把 /clock 送進 ROS 2 |
-| `scripts/zenoh_sim.sh start/status/logs/stop` | host | GCS ↔ 載具的 Zenoh bridge（GCS = router，uav1～3、3 隻假狗 = client；白名單見 `ros2_ws/src/swarm_zenoh/README.md`） |
 | `./enter.sh <容器>` | host | 進入容器（`uav` = `uav1`） |
 | `./stop.sh` | host | 刪除所有容器 |
 | `docker compose -f docker-compose.yaml stop` | host | 只暫停，保留容器 |

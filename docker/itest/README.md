@@ -23,6 +23,7 @@ python3 docker/itest/itest.py comm --only C1,C3     # 只跑某幾項
 python3 docker/itest/itest.py demo     # 展示（週計畫）：開 Gazebo 畫面，巡檢點起火 → 無人機發布地面任務、懸停監控 → 假狗處理 → 回起飛點，錄影＋俯視動畫 MP4
 python3 docker/itest/itest.py loss     # 第 5 週弱網量測：掉包 0／10／30／50／70% 各 20 次，約 15～25 分鐘
 python3 docker/itest/itest.py loss --levels 30 --trials 50     # 只量 30%、50 次
+python3 docker/itest/itest.py loss --tasks 3                   # 每次 3 個任務（每台 1 個，等於 10/27 以前的量法）
 ```
 
 容器裡已經有在跑的節點、PX4、Gazebo 時會停下來，避免打斷你正在做的事；加 `--kill-existing` 先關掉再跑。
@@ -44,6 +45,7 @@ python3 docker/itest/itest.py loss --levels 30 --trials 50     # 只量 30%、50
 | C6 | 重開機後重新加入 | 重開的那台拿到身邊的新任務，不重複 |
 | C7 | 掉包 30%、延遲 50±30 ms | 10 s 內恰好一台拿到；完成後撤下 |
 | C8 | 斷網 | 斷網時只有建立者拿到（證明協調走 mesh）；恢復後不重複 |
+| C9 | 100% 斷網（週計畫第 5 週） | 各台拿著身邊的任務 → 全部斷網 6 s：失聯後手上的照樣拿著、斷網中回報完成本機就確認結束、斷網中自己建的任務自己接（單機貪婪）；恢復後全隊都知道那些完成、知道新任務而且在原本那台，沒有重複認領、完成的沒再派。只跑這項：`--only C9` |
 
 **uav：UAV 整串**（`fire_site` 場景）
 
@@ -88,6 +90,13 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
   v60_2（52）在 (−18, −8)（yard 場景照伯宇的出生點：(−35, 7.5)、(−35, −7.5)、(−15, 25)），分散在場地三側，看狗之間對火警的競標。每隻的 cbba_node（UGV、`/<ns>`，`cbba_v60.yaml`）借 uav1 容器跑
   （要在 mesh 上）；執行者 `docker/scripts/fake_dog.py` 在 sim（收 `/<ns>/current_task`、直線走過去、停留、回報 `task_result`；
   Gazebo 放一個橘色方塊 `<ns>_standin` 當替身）。速度 1.5 m/s（兩邊一致）。紀錄在 `fake_dog_<ns>.log`、`dog_cbba_<ns>.log`。
+- **`--dog bt`：伯宇的狗 BT＋方塊身體**（2026-10-27）：執行者換成伯宇的 `task_manager`（handoff 原檔，不改；uav1 容器，`dog_bt.sh start`），
+  sim 只放方塊身體 `docker/scripts/fake_nav_body.py`：假的 Nav2（`/<ns>/navigate_to_pose`，直線走、cancel 立刻停）、
+  假雲台（`/<ns>/ptz_inspect`，等 `dog.ptz_sec` 5 s 回 OK）、TF `map → <ns>/base_link`。驗證他的 BT 本身（哨兵中斷、
+  `★ halt → cancel Nav2 goal` 的中斷延遲、回報恰好一次、平板接管、急停）；Nav2 的規劃、繞障礙不在範圍內。
+  和假狗不同：停在目標前 1.5 m（standoff）、處置時間是雲台的 5 s（不看 `duration_sec`）、robot_state 2 Hz。
+  第一次要先在 uav1 容器 `dog_bt.sh build`（編到 `dog_ws/`，不碰共用的 `ros2_ws/build`、`install`）；映像要重建
+  （`robot.Dockerfile`、`sim.Dockerfile` 加了 `ros-jazzy-nav2-msgs`）。紀錄在 `dog_body_<ns>.log`、`dog_bt_<ns>.log`、`dog_cbba_<ns>.log`。
   報告 D3 會寫每個火點由哪隻狗處理；`units` 只留一隻就是原本的單隻狗。
 - **Gazebo 錄影**（2026-10-13 改）：場景裡放一台固定的俯瞰攝影機（`overview_camera`，`CameraVideoRecorder` 系統，
   `gen_patrol_site.py` 產生），由 Gazebo **伺服器**錄，不用開視窗、不用按按鈕；場景開好就開始，完成後停 `--hold` 秒再停止，
@@ -129,22 +138,43 @@ python3 /home/ncrl/CBBA_BT/docker/itest/animate_demo.py /home/ncrl/CBBA_BT/docke
 沒出價時寫原因：不能做（能力不符、來不及、電量不夠）、失敗後排除中、別台已接受、不參與出價…。自己重做：
 `python3 docker/itest/bid_table.py docker/itest/out/<時間>_demo`（主機，只用標準庫）。
 
-**loss：第 5 週弱網量測**（不開 PX4、BT；2026-10-12）
+**loss：第 5 週弱網量測**（不開 PX4、BT；2026-10-12；2026-10-27 改成多任務、比對理論值）
 
 每個掉包率（`--levels`，預設 0,10,30,50,70；延遲 `--delay` 50 ± `--jitter` 30 ms，每台 uav 的 mesh 送出方向）
-試驗 `--trials` 次（預設 20）。每次三台**各建立一個任務**（多源插單），任務放在**別台**身邊（要靠協商），每次輪換：
+試驗 `--trials` 次（預設 20）。每次建立 `--tasks` 個任務（預設 9 個）：第 j 個放在第 j % 3 台身邊 2.5 m（角度每次輪換），
+由**別台**建立（多源插單，要靠協商）。別台的任務遠 20 m，所以**理論上每台分到身邊的 3 個、而且每台都知道全部 9 個**：
 
 | 指標 | 定義 |
 |---|---|
-| 收斂時間 | 建立 → 每個任務恰好一台持有、各台持有的不同（current_task 只看得到路徑第一個，所以任務數 = 台數），之後 1 s 不變 |
-| 重複認領 | 這次試驗裡同一個任務被兩台以上拿過 |
-| 5 s 收斂 | 收斂時間 ≤ 5 s 而且沒有重複認領。**L30 的通過條件：≥ 95%**（週計畫）；其他掉包率只記錄（INFO） |
-| 完成 → 撤下 | 持有者回報完成到全部撤下；「完成後又派」是之後又派給別台的次數（應該是 0） |
+| A 送達 | 每台知道幾個任務（cbba_node 的 `task_announced`）；「全部送到」= 每台都知道全部，記時間；`known_per_agent` 是每台知道幾個 |
+| B 分配 | 每台路徑（cbba_node 的 `cbba_path`，2026-10-27 加的話題）裡有幾個這次的任務，和理論值比（`expected_per_agent` 3/3/3、`got_per_agent`）；`wrong` = 不在理論執行者路徑裡、或在兩台以上路徑裡的任務數；「正確時間」= 建立 → 每個任務都在理論執行者的路徑裡 |
+| 收斂時間（無衝突） | 建立 → 每個任務恰好在一台的路徑裡（**不管分得對不對**，對不對看 B），之後 1 s 不變 |
+| 重複認領 | 這次試驗裡同一個任務被兩台以上當成 current_task 拿過（真的派給兩台的 BT） |
+| 5 s 收斂 | 收斂時間 ≤ 5 s 而且沒有重複認領。**L30 的通過條件：≥ 95%**（週計畫）；其他掉包率、A、B 只記錄（INFO） |
+| 完成 → 本機撤下 | 每個任務：測試回報完成 → 執行那台的 `current_task` 不再是它（每次試驗取中位數） |
+| 完成 → 全隊確認 | 每個任務：回報完成 → **三台都發了 `task_closed`**（COMPLETION → ACK → TASK_CLOSE 走完；中位數、P90）。這才是「完成」 |
+| 做不完 | 時限（30 s ＋ 每個任務 5 s）內沒有被全隊確認結束的任務數；有的話這個掉包率停止 |
+| 完成後又派 | 回報完成的任務之後又出現在某台 `current_task` 的次數（應該是 0；持有者當掉、失聯接手時會有） |
 | mesh 頻寬 | 每個掉包率從第一次到最後一次試驗，各台 mesh 網卡收＋送的平均 kB/s |
+
+每次試驗等到「全部送到而且分配正確」或 10 s。每台最多接 `max_bundle`（5）個，`--tasks` 超過 15 時理論值不成立。
+
+試驗隔離（2026-10-27）：
+- 下一次試驗開始前，等上一次的任務**全隊都確認結束**、三台的 `current_task` 和路徑都空，再等 3 s（最多 30 s，等不到的試驗 `clean = 0` 不計）。
+  原本只等 `current_task` 空，70% 時 19 次有 11 次開始時還有上一次的任務。
+- **每個掉包率重新啟動三台 cbba_node**（已結束的任務會一直記著，不帶到下一個掉包率）；log 分開：`node_uavN.log`（第一個掉包率）、
+  `node_uavN_L30.log`…。`--no-restart` 恢復原本整輪不重開（要重現長時間累積的問題時用）。
+- 每次試驗後檢查三台的 cbba_node 還在；不在時停止這個掉包率、報告 `LX` FAIL（2026-10-27 遇過 70% 時 Segmentation fault）。
+
+追當機（2026-10-28）：cbba_node 自己裝了當機處理，收到 SIGSEGV 等訊號時把呼叫堆疊印到 log
+（`===== cbba_node 當掉`），平常不影響時序，**不用加 `--gdb`**（gdb 會改變時序，10/28 在 gdb 底下跑 100 次沒重現）。
+位址換成行號：`addr2line -f -C -e $(ros2 pkg prefix swarm_cbba)/lib/swarm_cbba/cbba_node <+0x 位移>`，
+要用 `--cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo` 編 `cbba_core`、`swarm_cbba` 才有行號。
+`--gdb` 留著（節點在 gdb 底下跑），當機處理拿不到堆疊時再用。
 
 每次試驗從「三台都沒有任務、再等 3 s」開始（掉包時全隊確認完成要 1～3 s），收尾把這次的任務**全部**做完
 （含排在路徑後面、之後才輪到的）。開始時還有任務的試驗不計（`trials.csv` 的 `clean = 0`）；
-收尾 30 s 內做不完時（`leftover > 0`）停止量測、報告 FAIL，因為留下的任務會卡住之後的每一次試驗
+收尾 30 s ＋ 每個任務 5 s 內做不完時（`leftover > 0`）停止量測、報告 FAIL，因為留下的任務會卡住之後的每一次試驗
 （2026-10-12 第一次量測就是這樣：30% 以上全部「未收斂」，是測試的收尾漏掉排隊的任務，不是協定的問題）。
 
 輸出：`report.md`（每個掉包率一列）、`trials.csv`（每次試驗一列）、`levels.csv`（每個掉包率的統計）。畫圖要 matplotlib，
@@ -155,7 +185,23 @@ python3 /home/ncrl/CBBA_BT/docker/itest/animate_demo.py /home/ncrl/CBBA_BT/docke
 python3 /home/ncrl/CBBA_BT/docker/itest/plot_loss.py /home/ncrl/CBBA_BT/docker/itest/out/<時間>_loss   # → loss_sweep.png
 ```
 
-可以給多個目錄合併（例如分幾次量完）。
+四張圖：5 s 內收斂率、收斂時間、完成 → 全隊確認、mesh 頻寬。可以給多個目錄合併（例如分幾次量完）。
+另外 `plot_tasks.py`（同樣的用法 → `loss_tasks.png`）：每台平均分到幾個任務（誤差線＝最少～最多）、每次試驗的分配結果
+（和理論相同／不平均但全部做完／有任務沒做完）。
+
+### 比較 cbba_node 參數（`--node-param`，2026-11-04）
+
+`--node-param KEY=VALUE`（可以給多次）會加到每台 cbba_node 的 `-p KEY:=VALUE`，記在 `trials.csv`、`levels.csv` 的
+`node_params`。每組參數各跑一次，再把目錄一起給 `plot_loss.py`：參數不同的各畫一條線（最多 4 組）。
+例如第 5 週的補發、完成確認的間隔（`resend_gap`、`completion_retry` 都是 1.0 s；高掉包時
+「完成 → 全隊確認」約等於 `completion_retry × completion_max`）：
+
+```bash
+python3 docker/itest/itest.py loss --levels 30,50,70                                              # 預設 1.0 s
+python3 docker/itest/itest.py loss --levels 30,50,70 --node-param resend_gap=0.5 --node-param completion_retry=0.5
+python3 docker/itest/itest.py loss --levels 30,50,70 --node-param resend_gap=0.3 --node-param completion_retry=0.3
+# sim 容器：python3 …/plot_loss.py <目錄1> <目錄2> <目錄3>
+```
 
 ## 換成別人的 CBBA Node／BT 時
 

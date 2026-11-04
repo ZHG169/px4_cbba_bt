@@ -52,3 +52,8 @@ RUN git config --system --add safe.directory '*'
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ros-jazzy-ros-gz-bridge \
  && rm -rf /var/lib/apt/lists/*
+
+# 假的 Nav2（docker/scripts/fake_nav_body.py，2026-10-27）：用方塊代替狗的身體，提供 NavigateToPose action 給伯宇的狗 BT
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ros-jazzy-nav2-msgs \
+ && rm -rf /var/lib/apt/lists/*

@@ -24,7 +24,7 @@ from rosidl_runtime_py.utilities import get_message
 
 def qos_of(spec, depth=20):
     return QoSProfile(
-        depth=depth,
+        depth=spec.get("depth", depth),
         reliability=ReliabilityPolicy.RELIABLE if spec.get("reliable", True) else ReliabilityPolicy.BEST_EFFORT,
         durability=DurabilityPolicy.TRANSIENT_LOCAL if spec.get("transient_local") else DurabilityPolicy.VOLATILE)
 
@@ -43,7 +43,9 @@ class Bridge(Node):
         self.last_pos = {}          # 位置每台最多 5 Hz 寫一次
         ids = cfg["vehicles"]["ids"]
         topics = cfg["topics"]
-        watch = ["assigned", "result", "new_task"] + (["closed"] if "closed" in topics else []) + \
+        # announced（task_announced：這台知道的任務）、path（cbba_path：這台的 bundle）給弱網測試算「每台該收到幾個任務」
+        # （2026-10-27）；設定裡沒有就不訂（換成別人的 CBBA Node 時）
+        watch = ["assigned", "result", "new_task"] + [k for k in ("closed", "announced", "path") if k in topics] + \
             (["px4_position", "px4_status"] if with_px4 else []) + \
             (["px4_battery"] if with_px4 and "px4_battery" in topics else [])
         self.subs = []

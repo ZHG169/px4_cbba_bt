@@ -1,4 +1,4 @@
-// CBBA_STATE（協定版本 2）：大小、位元組排列、來回編解碼、分批、拒絕不合法的封包
+// CBBA_STATE（協定版本 3）：大小、位元組排列、來回編解碼、摘要、分批、拒絕不合法的封包
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -41,10 +41,15 @@ CbbaStateBody sample(std::size_t records = 2)
 
 TEST(WireCbbaState, Size)
 {
-  // 36 + 6N + 21R；不參與出價時 36 B
-  EXPECT_EQ(cbbaStateSize(0, 0), 36u);
-  EXPECT_EQ(encodeCbbaState(makeHeader(), CbbaStateBody{}).size(), 36u);
-  EXPECT_EQ(encodeCbbaState(makeHeader(), sample()).size(), 36u + 18u + 42u);
+  // 37 + 14D + 6N + 21R（版本 3 多了 digest_count 1 B 和摘要）；不參與出價、沒有摘要時 37 B
+  EXPECT_EQ(cbbaStateSize(0, 0), 37u);
+  EXPECT_EQ(cbbaStateSize(3, 2, 4), 37u + 56u + 18u + 42u);
+  EXPECT_EQ(encodeCbbaState(makeHeader(), CbbaStateBody{}).size(), 37u);
+  EXPECT_EQ(encodeCbbaState(makeHeader(), sample()).size(), 37u + 18u + 42u);
+  CbbaStateBody b = sample();
+  b.has_digest = true;
+  b.digest = {DigestEntry{1, 2, 9, 5, 1, 0xAABBCCDDu}, DigestEntry{50, 1, 1, 1, 0, 7}};
+  EXPECT_EQ(encodeCbbaState(makeHeader(), b).size(), 37u + 28u + 18u + 42u);
 }
 
 TEST(WireCbbaState, Layout)
@@ -68,6 +73,7 @@ TEST(WireCbbaState, Layout)
     0x07,                    // stable_steps
     0x08, 0x09,              // snapshot_id
     0x01, 0x02,              // part_index、part_count
+    0x00,                    // digest_count（沒有摘要）
     0x00, 0x01,              // stamp_count
     0x00, 0x32, 0x0A, 0x0B, 0x0C, 0x0D,
     0x00, 0x01,              // record_count
@@ -79,6 +85,58 @@ TEST(WireCbbaState, Layout)
     0x02,                    // assign_state：保留
   };
   EXPECT_EQ(body, expected);
+}
+
+TEST(WireCbbaState, DigestLayout)
+{
+  // 摘要（版本 3）：flags bit 1、每個建立者 14 B
+  CbbaStateBody b;
+  b.has_digest = true;
+  b.digest = {DigestEntry{0x0032, 0x0001, 0x0102, 0x0003, 0x0001, 0x0A0B0C0Du}};
+  const auto bytes = encodeCbbaState(makeHeader(), b);
+  const std::vector<std::uint8_t> body(bytes.begin() + kHeaderSize, bytes.end());
+  const std::vector<std::uint8_t> expected = {
+    0x00, 0x00, 0x00, 0x00,  // round_key
+    0x00, 0x00,              // exchange_step
+    0x02,                    // flags：有摘要、不參與
+    0x00,                    // stable_steps
+    0x00, 0x00,              // snapshot_id
+    0x00, 0x01,              // part_index、part_count
+    0x01,                    // digest_count
+    0x00, 0x32,              // creator
+    0x00, 0x01,              // min_seq
+    0x01, 0x02,              // max_seq
+    0x00, 0x03,              // known
+    0x00, 0x01,              // closed
+    0x0A, 0x0B, 0x0C, 0x0D,  // crc
+    0x00, 0x00,              // stamp_count
+    0x00, 0x00,              // record_count
+  };
+  EXPECT_EQ(body, expected);
+}
+
+TEST(WireCbbaState, DigestRoundTripAndEmptyDigest)
+{
+  // 有摘要而 D = 0（一個任務都不知道）和沒有摘要要分得出來
+  CbbaStateBody b = sample();
+  b.has_digest = true;
+  b.digest = {DigestEntry{1, 2, 9, 5, 1, 0xAABBCCDDu}, DigestEntry{50, 1, 1, 1, 0, 7}};
+  auto d = decodeCbbaState(encodeCbbaState(makeHeader(), b));
+  ASSERT_TRUE(d);
+  EXPECT_TRUE(d->has_digest);
+  ASSERT_EQ(d->digest.size(), 2u);
+  EXPECT_EQ(d->digest[0], b.digest[0]);
+  EXPECT_EQ(d->digest[1], b.digest[1]);
+  EXPECT_EQ(d->records.size(), 2u);
+
+  b.digest.clear();
+  d = decodeCbbaState(encodeCbbaState(makeHeader(), b));
+  ASSERT_TRUE(d);
+  EXPECT_TRUE(d->has_digest);
+  EXPECT_TRUE(d->digest.empty());
+  d = decodeCbbaState(encodeCbbaState(makeHeader(), sample()));
+  ASSERT_TRUE(d);
+  EXPECT_FALSE(d->has_digest);
 }
 
 TEST(WireCbbaState, RoundTrip)
@@ -125,8 +183,20 @@ TEST(WireCbbaState, SplitKeepsEveryPartUnderLimitWithFullStamps)
     }
   }
   EXPECT_EQ(ids.size(), 300u);
-  // (1200 − 36 − 18) / 21 = 54 筆一批 → 6 批
+  // (1200 − 37 − 18) / 21 = 54 筆一批 → 6 批
   EXPECT_EQ(parts.size(), 6u);
+  // 有摘要時每一批都帶，算在固定大小裡：(1200 − 37 − 140 − 18) / 21 = 47 筆一批 → 7 批
+  CbbaStateBody with_digest = full;
+  with_digest.has_digest = true;
+  for (std::uint16_t c = 1; c <= 10; ++c) {
+    with_digest.digest.push_back(DigestEntry{c, 1, 30, 30, 10, c});
+  }
+  const auto dparts = splitCbbaState(with_digest, 1200);
+  EXPECT_EQ(dparts.size(), 7u);
+  for (const auto & p : dparts) {
+    EXPECT_LE(encodeCbbaState(makeHeader(), p).size(), 1200u);
+    EXPECT_EQ(p.digest.size(), 10u);
+  }
   // 沒有紀錄時也有一批
   EXPECT_EQ(splitCbbaState(CbbaStateBody{}, 1200).size(), 1u);
   EXPECT_THROW(splitCbbaState(full, 40), std::invalid_argument);
@@ -150,8 +220,11 @@ TEST(WireCbbaState, RejectsInvalid)
   finishPacket(bad);
   EXPECT_FALSE(decodeCbbaState(bad));
   bad = good;
-  bad[kHeaderSize + 12] = 0xFF;   // stamp_count 很大：不會照著配置記憶體
-  bad[kHeaderSize + 13] = 0xFF;
+  bad[kHeaderSize + 13] = 0xFF;   // stamp_count 很大：不會照著配置記憶體
+  bad[kHeaderSize + 14] = 0xFF;
+  EXPECT_FALSE(decodeCbbaState(bad));
+  bad = good;
+  bad[kHeaderSize + 12] = 1;      // 沒有摘要旗標卻說有 1 筆摘要
   EXPECT_FALSE(decodeCbbaState(bad));
 
   b = sample();
@@ -175,4 +248,14 @@ TEST(WireCbbaState, RejectsInvalid)
   b = sample();
   b.stamps[0].agent_id = 0;
   EXPECT_THROW(encodeCbbaState(makeHeader(), b), std::invalid_argument);
+
+  // 摘要：建立者 0、known 0、closed > known、min_seq > max_seq 都不合法
+  for (const DigestEntry & d : {DigestEntry{0, 1, 1, 1, 0, 0}, DigestEntry{1, 1, 1, 0, 0, 0},
+      DigestEntry{1, 1, 1, 1, 2, 0}, DigestEntry{1, 5, 4, 1, 0, 0}})
+  {
+    b = sample();
+    b.has_digest = true;
+    b.digest = {d};
+    EXPECT_THROW(encodeCbbaState(makeHeader(), b), std::invalid_argument);
+  }
 }

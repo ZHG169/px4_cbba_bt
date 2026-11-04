@@ -1,0 +1,17 @@
+# 模擬用的狗 BT（伯宇的 task_manager，2026-10-27）：沒有巡檢點，只接外部任務（CBBA 的 current_task、平板的 manual_override）。
+# task_manager 的行為樹要第一次 startMission 才建（task_manager_node.cpp buildTree）；沒建時閒置中收到的外部任務不會開跑。
+# 所以 docker/scripts/dog_bt.sh 用 autostart:=true 載入這份：開機跑完空任務（COMPLETED）、樹建好，之後待命接外部任務。
+# frame_id 要和無人機的 map ENU 一樣（docker/scripts/fake_nav_body.py 發 map → <ns>/base_link）。
+mission: "模擬 待命（只接外部任務）"
+
+context:
+  map:      "sim"
+  frame_id: "map"
+
+policy:
+  on_nav_fail:     "skip_waypoint"
+  on_task_fail:    "skip_task"
+  mission_timeout: 3600   # 外部任務也照這個時限（g_ctx.mission_timeout），demo 一輪 15 分鐘內
+  loop:            false
+
+waypoints: []

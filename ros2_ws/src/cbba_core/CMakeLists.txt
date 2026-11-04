@@ -17,6 +17,7 @@ add_library(${PROJECT_NAME}_core
   src/wire_cbba_state.cpp
   src/wire_task_announce.cpp
   src/wire_completion.cpp
+  src/wire_sync.cpp
   src/cbba_comm.cpp
   src/assignment_manager.cpp
   src/udp_link.cpp
@@ -44,6 +45,7 @@ set(CBBA_CORE_TESTS
   test_wire_cbba_state
   test_wire_task_announce
   test_wire_completion
+  test_wire_sync
   test_comm
   test_exec_constraints
   test_assignment

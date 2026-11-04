@@ -1,15 +1,20 @@
-// CBBA_STATE（種類 2）：共識資料，可分批（協定版本 2，見 wire_header.hpp）
+// CBBA_STATE（種類 2）：共識資料，可分批（協定版本 3，見 wire_header.hpp）
 //
 //   表頭 20 | round_key 4 | exchange_step 2 | flags 1 | stable_steps 1 |
 //   snapshot_id 2 | part_index 1 | part_count 1 |
+//   digest_count 1 | (creator 2 + min_seq 2 + max_seq 2 + known 2 + closed 2 + crc 4) × D |
 //   stamp_count 2 | (agent_id 2 + stamp_ms 4) × N |
 //   record_count 2 | (task_id 4 + winner_id 2 + winning_bid 4 + assign_version 8 + assignee_id 2 +
 //                     assign_state 1) × R
-//   大小 = 20 + 16 + 6N + 21R
+//   大小 = 20 + 17 + 14D + 6N + 21R
 //
-//   round_key       已知任務與狀態（task_id、是否已結束）的 CRC-32 摘要；不同就互相補發
+//   round_key       已知任務與狀態（task_id、是否已結束）的 CRC-32 摘要；相同就不用比對摘要
 //   exchange_step   本機分配表變動的次數
-//   flags           bit 0 參與出價（不參與時 N = R = 0）
+//   flags           bit 0 參與出價（不參與時 N = 0）；bit 1 有摘要（版本 3）
+//   digest          壓縮的任務摘要（版本 3，2026-10-28）：每個建立者（task_id 的高 16 位元）一筆，
+//                   最小、最大流水號、知道幾個、已結束幾個、CRC-32（每個任務的流水號 2 B＋是否已結束 1 B，依流水號排序）。
+//                   和 round_key 對應同一個狀態。比對哪個建立者不同，再用 GAP_REQUEST 問缺口（wire_sync.hpp）。
+//                   不是每次都帶（flags bit 1）；有摘要而 D = 0 表示一個任務都不知道。有摘要時每一批都帶
 //   stable_steps    分配連續幾個週期沒變（0～255，收斂偵測）
 //   snapshot_id     同一次送出的各批共用；每次送出加 1
 //   part_index      第幾批（0 起），part_count 共幾批
@@ -40,10 +45,29 @@
 namespace cbba_core::wire
 {
 
-constexpr std::size_t kCbbaStateBaseSize = kHeaderSize + 16;   // N = R = 0
+constexpr std::size_t kCbbaStateBaseSize = kHeaderSize + 17;   // D = N = R = 0
+constexpr std::size_t kDigestSize = 14;
 constexpr std::size_t kStampSize = 6;
 constexpr std::size_t kRecordSize = 21;
 constexpr std::size_t kDefaultMaxPacket = 1200;
+
+// 一個建立者的摘要（版本 3）：known ≥ 1、closed ≤ known、min_seq ≤ max_seq
+struct DigestEntry
+{
+  std::uint16_t creator{0};
+  std::uint16_t min_seq{0};
+  std::uint16_t max_seq{0};
+  std::uint16_t known{0};
+  std::uint16_t closed{0};
+  std::uint32_t crc{0};
+};
+
+inline bool operator==(const DigestEntry & a, const DigestEntry & b)
+{
+  return a.creator == b.creator && a.min_seq == b.min_seq && a.max_seq == b.max_seq &&
+         a.known == b.known && a.closed == b.closed && a.crc == b.crc;
+}
+inline bool operator!=(const DigestEntry & a, const DigestEntry & b) {return !(a == b);}
 
 struct Stamp
 {
@@ -70,18 +94,20 @@ struct CbbaStateBody
   std::uint16_t snapshot_id{0};
   std::uint8_t part_index{0};
   std::uint8_t part_count{1};
+  bool has_digest{false};
+  std::vector<DigestEntry> digest;   // has_digest 時才有意義；最多 255 筆
   std::vector<Stamp> stamps;
   std::vector<Record> records;
 };
 
-constexpr std::size_t cbbaStateSize(std::size_t stamps, std::size_t records)
+constexpr std::size_t cbbaStateSize(std::size_t stamps, std::size_t records, std::size_t digests = 0)
 {
-  return kCbbaStateBaseSize + kStampSize * stamps + kRecordSize * records;
+  return kCbbaStateBaseSize + kDigestSize * digests + kStampSize * stamps + kRecordSize * records;
 }
 
-// 把完整的一次分成幾批，每批（整個封包）不超過 max_packet。每批的 s 都完整；
+// 把完整的一次分成幾批，每批（整個封包）不超過 max_packet。每批的摘要、s 都完整；
 // 沒有紀錄時也有一批。part_index、part_count 會填好，其他欄位照抄。
-// s 本身就放不下，或超過 255 批時丟出 std::invalid_argument。
+// 摘要和 s 本身就放不下，或超過 255 批時丟出 std::invalid_argument。
 std::vector<CbbaStateBody> splitCbbaState(const CbbaStateBody & full,
   std::size_t max_packet = kDefaultMaxPacket);
 
@@ -90,7 +116,7 @@ std::vector<std::uint8_t> encodeCbbaState(Header header, const CbbaStateBody & b
 
 // 解碼完整封包。表頭不合法、不是 CBBA_STATE、長度和筆數對不上、欄位不合法時回傳 nullopt：
 // part_index ≥ part_count、機號不合法、task_id 的建立者是 0、得標價不是有限的非負數、執行者是 0xFFFF、
-// 指派狀態不是 0～3，或狀態不是「無」卻沒有執行者。
+// 指派狀態不是 0～3，或狀態不是「無」卻沒有執行者；摘要的建立者不合法、known 是 0、closed > known、min_seq > max_seq。
 std::optional<CbbaStateBody> decodeCbbaState(const std::uint8_t * data, std::size_t size);
 inline std::optional<CbbaStateBody> decodeCbbaState(const std::vector<std::uint8_t> & bytes)
 {

@@ -3,7 +3,7 @@
 
   python3 docker/itest/itest.py comm     CBBA 之間的通訊（不開 PX4、BT）：每台在自己的容器啟動 CBBA Node，
                                          位置用假的 robot_state，測分配、完成、失敗交回、停止送狀態、節點停止、
-                                         重開機、掉包 30%、斷網
+                                         重開機、掉包 30%、斷網（C8 只有建立者知道、C9 100% 斷網後各自完成與恢復）
   python3 docker/itest/itest.py uav      UAV 整串（PX4 SITL＋Gazebo＋CBBA Node＋BT）：起飛、單一任務、火警、
                                          誘餌、三台分配與避碰、PX4 斷線接手
   python3 docker/itest/itest.py demo     展示：demo_site 開 Gazebo 畫面（錄成 gazebo.mp4），全部起飛後才開始 CBBA，3 個固定任務；出發後火點出現在某台的
@@ -11,14 +11,17 @@
                                          demo.mp4（要主機的 ffmpeg）。
                                          --seed N 重現同一個情境、--speed 3（m/s，預設；2026-10-23 改成 0.5、10-24 改回 3，CBF 參數照速度自動算）、--hold 10、--no-record
   python3 docker/itest/itest.py loss     第 5 週弱網量測（不開 PX4、BT）：掉包梯度 0／10／30／50／70%（延遲 50±30 ms），
-                                         每個掉包率試驗 N 次、每次三台各建立一個任務（多源插單），記錄收斂時間、
+                                         每個掉包率試驗 N 次、每次建立 9 個任務（多源插單，每台身邊 3 個），記錄
+                                         A 送達（每台知道幾個任務）、B 分配（每台分到幾個、和理論比）、收斂時間、
                                          5 s 內收斂率、重複認領、完成後撤下的時間、mesh 頻寬（trials.csv、levels.csv）
 
 在主機執行（要能用 docker），容器要先用 docker/start.sh 開好、套件要先編譯好。
   --config 檔案       換成別的設定（預設同目錄的 config.json）
   --only C1,C3        只跑指定的項目（前置步驟照跑）
   --kill-existing     容器裡已經有在跑的節點、PX4、Gazebo 時先關掉（預設會停下來，避免打斷你正在做的事）
-  --levels 0,10,30    loss：要測的掉包率（%）；--trials 20 每個掉包率試驗幾次；--delay 50 --jitter 30（ms）
+  --levels 0,10,30    loss：要測的掉包率（%）；--trials 20 每個掉包率試驗幾次；--delay 50 --jitter 30（ms）；
+                      --tasks 9 每次試驗的任務數（理論上每台分到 tasks／台數 個）
+  --node-param K=V    comm、loss：每台 cbba_node 多加的參數，可以給多次（例如 resend_gap=0.5、completion_retry=0.5）
 
 結果：每一項 PASS／FAIL／INFO，寫到 docker/itest/out/<時間>/report.md（各節點的輸出也在那個目錄）。
 """
@@ -157,6 +160,12 @@ class Env:
             return None
 
 
+# gdb 批次模式：跑到結束；收到訊號（SIGSEGV 等）停下時印出當機的位置、所有執行緒的 backtrace，然後結束。
+# SIGINT、SIGTERM 照常交給節點（itest 用 pkill 關節點），不讓 gdb 攔下來
+GDB_PREFIX = ("gdb -q -batch -ex 'handle SIGINT SIGTERM nostop noprint pass' -ex run -ex bt "
+              "-ex 'thread apply all bt' --args")
+
+
 def fill(obj, values):
     """把設定裡的 "{名稱}" 換成數值（整個字串是一個佔位符時保留數值型別）"""
     if isinstance(obj, dict):
@@ -185,6 +194,9 @@ class Run:
         self.history = []        # (t, uav, task_id, version)：每次 assigned 改變
         self.positions = {}      # uav -> (x, y, z, t)
         self.armed = {}
+        self.known = {}          # uav -> {task_id: 第一次知道的時刻}（task_announced，2026-10-27）
+        self.paths = {}          # uav -> [task_id…]（cbba_path：這台目前的 bundle，2026-10-27）
+        self.closed = {}         # uav -> {task_id: 收到 task_closed 的時刻}（這台確認任務結束，2026-10-27）
         self.cmd_file = os.path.join(out_dir, "commands.jsonl")
         open(self.cmd_file, "w").close()
         open(os.path.join(out_dir, "events.jsonl"), "w").close()
@@ -209,6 +221,12 @@ class Run:
                 ver = e["msg"].get(f_ver) if f_ver else None
                 self.assigned[e["uav"]] = (tid, ver, e["t"])
                 self.history.append((e["t"], e["uav"], tid, ver))
+            elif e["kind"] == "announced":
+                self.known.setdefault(e["uav"], {}).setdefault(e["msg"].get(f_id), e["t"])
+            elif e["kind"] == "path":
+                self.paths[e["uav"]] = list(e["msg"].get("data") or [])
+            elif e["kind"] == "closed":
+                self.closed.setdefault(e["uav"], {}).setdefault(e["msg"].get(f_id), e["t"])
             elif e["kind"] == "pos":
                 self.positions[e["uav"]] = (e["x"], e["y"], e["z"], e["t"])
             elif e["kind"] == "status":
@@ -277,6 +295,10 @@ class Run:
     def ever_held(self, tid, since=0.0):
         return sorted({u for (t, u, task, _) in self.history if task == tid and t >= since})
 
+    def in_paths(self, tid):
+        """路徑（bundle）裡有 tid 的載具"""
+        return sorted(u for u, p in self.paths.items() if tid in p)
+
 
 # =============================================================================
 # 測試項目
@@ -335,7 +357,7 @@ class Suite:
         fields = fill(self.cfg["messages"][key], dict(task_id=tid, version=ver if ver is not None else 0))
         if not self.cfg["fields"]["version"]:
             fields.pop("assignment_version", None)
-        self.run.publish("result", vid, fields)
+        return self.run.publish("result", vid, fields)   # ros_bridge 的 ack：t = 實際發出的時刻
 
     def wait_holder(self, tid, timeout, exclude=()):
         """等到有人（不在 exclude 裡）拿到 tid；回傳 (機號, 時刻) 或 (None, None)"""
@@ -375,8 +397,15 @@ class CommSuite(Suite):
 
     def start_node(self, vid):
         c = self.cfg["comm"]
-        self.env.exec(self.env.uav(vid), "exec " + c["start"].format(id=vid, ns=self.env.ns(vid)), detach=True,
-                      log=f"{self.run.cout}/node_uav{vid}.log")
+        cmd = c["start"].format(id=vid, ns=self.env.ns(vid))
+        # --node-param resend_gap=0.5（2026-11-04，第 5 週比較補發、完成確認的參數）：每台的 cbba_node 都加
+        cmd += "".join(f" -p {k}:={v}" for k, v in getattr(self.env, "node_params", []))
+        if getattr(self.env, "gdb", False):
+            # --gdb（2026-10-27，追 cbba_node 的 Segmentation fault）：在 gdb 底下跑，當掉時把 backtrace 印到 node_uavN.log
+            # （要 RelWithDebInfo 編譯才有行號；映像要有 gdb，robot.Dockerfile）
+            cmd = cmd.replace("ros2 run ", f'ros2 run --prefix "{GDB_PREFIX}" ', 1)
+        tag = getattr(self, "log_tag", "")     # loss 每個掉包率重新啟動時分開記（node_uavN_L30.log），當機的 log 不被蓋掉
+        self.env.exec(self.env.uav(vid), "exec " + cmd, detach=True, log=f"{self.run.cout}/node_uav{vid}{tag}.log")
 
     def stop_node(self, vid):
         self.env.pkill(self.env.uav(vid), self.cfg["comm"]["stop_pattern"].format(id=vid))
@@ -548,18 +577,104 @@ class CommSuite(Suite):
                      f"斷網時持有者 {run.ever_held(tid, t0)}（應該只有建立者）") + f"；恢復後持有者 {ever}")
             self.finish(tid)
 
+        if self.want("C9"):
+            self.blackout()
+
+    def blackout(self, cut_sec=6.0):
+        """C9：100% 斷網（週計畫第 5 週「100% 斷網 → 單機貪婪、安全完成手上的任務」，2026-11-04）。
+        每台身邊一個任務（別台建立）、各自拿著 → 全部斷網 cut_sec 秒（> lost_timeout 1.5 s、< takeover_patrol 30 s）：
+          ① 失聯後手上的任務照樣拿著（已接受的鎖定，不釋放）
+          ② 斷網中各自回報完成 → 本機確認結束（要確認的鄰居都失聯了，不用等）
+          ③ 斷網中各台自己建一個新任務 → 只有自己知道、自己接（單機貪婪）
+        恢復後：① 的完成全隊都知道（task_closed）、③ 的任務全隊都知道、各在原本那台的路徑裡；
+        沒有重複認領（③ 從斷網到結束只有建立者拿過）、完成的沒有再派"""
+        run, ids, res = self.run, self.env.ids, self.res
+        pos = self.positions()
+        pre = {}                                  # 斷網前的任務 → 該拿著的那台
+        for i, v in enumerate(ids):
+            x, y = pos[v]
+            tid, _ = self.new_task(x + 1.5, y + 1.0, creator=ids[(i + 1) % len(ids)])
+            pre[tid] = v
+        if run.until(lambda: all(run.holders(t) == [v] for t, v in pre.items()), 10.0) is None:
+            res.add("C9", "100% 斷網：各自做完手上的、自己建的自己接；恢復後一致", "FAIL",
+                    "斷網前 10 s 內沒有各自拿到身邊的任務：" + "、".join(f"{t:08X}→{run.holders(t)}" for t in pre))
+            for t in pre:
+                self.finish(t)
+            return
+        new, notes = {}, []
+        self.tc(100)
+        try:
+            t_cut = time.time()
+            run.sleep(2.5)                        # > lost_timeout：互相判定失聯
+            kept = all(run.holders(t) == [v] for t, v in pre.items())
+            t_done = time.time()
+            for t, v in pre.items():
+                self.report(v, t, True)
+            closed_local = run.until(lambda: all(t in run.closed.get(v, {}) for t, v in pre.items()), 3.0)
+            for v in ids:
+                x, y = pos[v]
+                tid, _ = self.new_task(x - 1.5, y - 1.0, creator=v)
+                new[tid] = v
+            local = run.until(lambda: all(run.holders(t) == [v] for t, v in new.items()), 3.0)
+            run.sleep(max(0.0, cut_sec - (time.time() - t_cut)))
+        finally:
+            self.tc(None)
+        t_back = time.time()
+
+        def synced():
+            return (all(t in run.closed.get(u, {}) for t in pre for u in ids) and
+                    all(t in run.known.get(u, {}) for t in new for u in ids) and
+                    all(run.in_paths(t) == [v] for t, v in new.items()))
+        t_sync = run.until(synced, 20.0)
+        run.sleep(1.0)
+        dup = {t: run.ever_held(t, t_cut) for t, v in new.items() if run.ever_held(t, t_cut) != [v]}
+        redone = sorted({task for (tt, _, task, _) in run.history if task in pre and tt > t_done + 0.5})
+        if not kept:
+            notes.append("失聯後手上的任務被釋放：" + "、".join(f"{t:08X}→{run.ever_held(t, t_cut)}" for t in pre))
+        if closed_local is None:
+            notes.append("斷網中回報完成後，本機 3 s 內沒有確認結束")
+        if local is None:
+            notes.append("斷網中自己建的任務 3 s 內沒有自己接")
+        if t_sync is None:
+            miss_close = [f"{t:08X}@uav{u}" for t in pre for u in ids if t not in run.closed.get(u, {})]
+            miss_know = [f"{t:08X}@uav{u}" for t in new for u in ids if t not in run.known.get(u, {})]
+            where = [f"{t:08X}→{run.in_paths(t)}" for t, v in new.items() if run.in_paths(t) != [v]]
+            notes.append("恢復後 20 s 內沒有一致：" + "；".join(x for x in (
+                ("沒收到完成 " + "、".join(miss_close)) if miss_close else "",
+                ("不知道新任務 " + "、".join(miss_know)) if miss_know else "",
+                ("路徑不對 " + "、".join(where)) if where else "") if x))
+        if dup:
+            notes.append("重複認領：" + "、".join(f"{t:08X}→{h}" for t, h in dup.items()))
+        if redone:
+            notes.append("完成後又派：" + "、".join(f"{t:08X}" for t in redone))
+        ok = not notes
+        res.add("C9", "100% 斷網：各自做完手上的、自己建的自己接；恢復後一致", "PASS" if ok else "FAIL",
+                (f"斷網 {cut_sec:.0f} s：{len(pre)} 台手上的任務照樣拿著、回報完成後本機確認結束 "
+                 f"{closed_local - t_done:.2f} s、自己建的任務自己接；恢復後 {t_sync - t_back:.2f} s 全隊一致"
+                 f"（完成的全隊都知道、新任務都知道而且在原本那台），沒有重複認領、完成後沒有再派")
+                if ok else "；".join(notes), resync=(t_sync - t_back) if t_sync else None)
+        for t in new:
+            self.finish(t)
+
 
 # -----------------------------------------------------------------------------
 # 第 5 週弱網量測（loss）
 # -----------------------------------------------------------------------------
 class LossSuite(CommSuite):
-    """掉包梯度：每個掉包率試驗 trials 次，每次三台各建立一個任務（多源插單），任務放在別台身邊
-    （建立者不是最適合的那台，要靠協商）。只看話題：
-      收斂     每個任務恰好一台持有、各台持有的任務不同（current_task 只看得到路徑第一個，所以任務數 = 台數、
-               各放在不同台身邊，最佳解是一台一個）；收斂時間從建立算起
-      重複認領 同一個任務在這次試驗裡被兩台以上拿過（指派過又被換掉也算）
+    """掉包梯度：每個掉包率試驗 trials 次，每次建立 tasks 個任務（預設 9 個、3 台，2026-10-27；原本一台一個），
+    多源插單：每個任務放在某一台（理論上的執行者）身邊 2.5 m，由**別台**建立（要靠協商）。理論上每台該分到
+    「放在它身邊的那幾個」（9 個 → 每台 3 個；別台的任務遠 20 m，出價一定較低）。只看話題：
+      A 送達   每台知道幾個任務（task_announced）：理論上每台都知道全部；記全部送到的時間、截止時送到的比例
+      B 分配   每台分到幾個任務（cbba_path 的 bundle）：理論上每台 tasks／台數 個、而且是自己身邊的；
+               記每台分到的數量、和最近分配不同的任務數（不在理論執行者的路徑裡、或在兩台以上的路徑裡）。
+               「理論執行者」＝離任務最近的那台，**不是 CBBA 保證的結果**：出價看邊際成本，順路的任務幾乎不多花，
+               掉包時建立者先搶到、assign_hold 後鎖定，就會分給別台（2026-11-03 分析 20261103_163735_loss）
+      覆蓋     每個任務都有一台拿著（收斂）、全部做完（實驗規劃的「任務完成覆蓋率 100%」；週計畫、實驗規劃
+               都沒有「每台最少分到幾個」的標準，每台最少～最多只列出來）
+      收斂     每個任務恰好在一台的路徑裡（不管對不對）；收斂時間從建立算起。「正確」另外要求是理論上的那台
+      重複認領 同一個任務在這次試驗裡被兩台以上當成 current_task 拿過（真的派給兩台的 BT）
       5 s 收斂 收斂時間 ≤ 5 s 而且沒有重複認領（週計畫：30% 掉包 ≥ 95%）
-      完成     持有者回報完成 → 全部撤下的時間；之後沒有再派給別台
+      完成     持有者回報完成 → 全部撤下的時間；回報完成的任務之後沒有再出現在任何一台的 current_task
       頻寬     每個掉包率從第一次試驗到最後一次，各台 mesh 網卡收送的平均 kB/s（tc 只限制送出方向，
                所以實際的單向掉包率就是設定值）
     每次試驗從「三台都沒有任務、再等 idle_gap 秒」開始（掉包時確認完成要 1～3 s）；收尾把這次的任務全部做完
@@ -567,86 +682,184 @@ class LossSuite(CommSuite):
     只收拾看得到持有者的任務，排在後面的留下來變成執行中、沒人回報，之後每一次都被它卡住）
     """
 
-    def __init__(self, env, run, only, levels, trials, delay, jitter, idle_gap=3.0):
+    def __init__(self, env, run, only, levels, trials, delay, jitter, idle_gap=3.0, tasks=9, window=10.0, fresh=True):
         super().__init__(env, run, only)
+        self.fresh = fresh            # 每個掉包率重新啟動 cbba_node（2026-10-27）
         self.levels, self.trials, self.delay, self.jitter = levels, trials, delay, jitter
         self.idle_gap = idle_gap
+        self.n_tasks = tasks
+        self.window = window          # 每次試驗等收斂、送達的上限（s）
+
+    def params_tag(self):
+        """--node-param 的設定（寫進 trials.csv、levels.csv，plot_loss.py 依它分成不同的線；空 = 預設值）"""
+        return " ".join(f"{k}={v}" for k, v in getattr(self.env, "node_params", []))
 
     def busy(self):
-        """目前拿著任務的載具"""
+        """目前拿著任務（current_task）或路徑裡還有任務的載具"""
         none = self.cfg["fields"]["no_task_id"]
-        return sorted(u for u, (t, _, _) in self.run.assigned.items() if t not in (None, none))
+        return sorted({u for u, (t, _, _) in self.run.assigned.items() if t not in (None, none)} |
+                      {u for u, p in self.run.paths.items() if p})
 
-    def settle(self):
-        """等到三台都沒有任務，再等 idle_gap 秒（掉包時全隊確認完成要 1～3 s，路徑裡可能還留著上一次的），
-        之後還是都沒有任務才算乾淨；回傳是否乾淨"""
-        if self.run.until(lambda: not self.busy(), 10.0) is None:
+    def layout(self, k):
+        """第 k 次試驗的任務：[(理論執行者, 建立者, x, y)]。第 j 個任務放在 ids[j % n] 身邊 2.5 m（角度每次輪換），
+        建立者是別台（輪換），所以每台理論上分到 tasks／n 個（除不盡時前幾台多一個）"""
+        ids, pos = self.env.ids, self.positions()
+        n = len(ids)
+        out = []
+        for j in range(self.n_tasks):
+            oi = j % n
+            owner = ids[oi]
+            creator = ids[(oi + 1 + (k + j // n) % (n - 1)) % n] if n > 1 else owner
+            a = 2 * math.pi * (j // n) / max(1, math.ceil(self.n_tasks / n)) + 0.7 * k
+            x, y = pos[owner]
+            out.append((owner, creator, x + 2.5 * math.cos(a), y + 2.5 * math.sin(a)))
+        return out
+
+    def restart_all(self):
+        """三台 cbba_node 全部關掉再開（全新的 session、不記得之前的任務），等到都上線"""
+        run, ids = self.run, self.env.ids
+        for v in ids:
+            self.stop_node(v)
+        run.until(lambda: not any(self.env.running(self.env.uav(v), self.cfg["comm"]["stop_pattern"].format(id=v))
+                                  for v in ids), 10.0)
+        for v in ids:                         # 舊節點的狀態不算數；新節點的 transient_local 話題會重新送來
+            run.assigned.pop(v, None)
+            run.paths.pop(v, None)
+        for v in ids:
+            self.start_node(v)
+        run.until(lambda: all(v in run.assigned for v in ids), self.cfg["comm"]["warmup"] + 15)
+        run.sleep(self.cfg["comm"]["warmup"])
+
+    def all_closed(self, tasks):
+        """這些任務每一台都確認結束了（都發了 task_closed）"""
+        return all(t in self.run.closed.get(v, {}) for v in self.env.ids for t in tasks)
+
+    def settle(self, timeout=30.0):
+        """試驗隔離（2026-10-27 加強）：等到上一次的任務**全隊都確認結束**（每台的 task_closed），而且三台都沒有任務
+        （current_task、路徑都空），再等 idle_gap 秒還是如此才算乾淨；回傳是否乾淨。
+        原本只等 current_task 空 10 s：高掉包時完成確認要好幾秒，上一次的任務還開著就開始下一次，70% 時 19 次有 11 次不計"""
+        prev = getattr(self, "prev_tasks", [])
+        if self.run.until(lambda: self.all_closed(prev) and not self.busy(), timeout) is None:
             return False
         self.run.sleep(self.idle_gap)
-        return not self.busy()
+        return self.all_closed(prev) and not self.busy()
 
     def close_all(self, tasks, timeout=30.0):
-        """收尾：這次試驗的每個任務（含排在路徑後面、之後才輪到的）都等到有人拿到就回報完成，直到全部撤下。
-        回傳（第一輪全部撤下的時刻或 None, 做不完的任務數）"""
-        run = self.run
+        """收尾：這次試驗的每個任務（含排在路徑後面、之後才輪到的）都等到有人拿到（current_task）就回報完成，
+        直到每個任務都**全隊確認結束**（每台都發了 task_closed；2026-10-27 起，原本只看 current_task 撤下）。
+        記錄每個任務：done_at 回報完成、released 執行那台撤下、closed 全隊確認。回傳做不完（時限內沒有全隊確認）的任務數"""
+        run, ids = self.run, self.env.ids
         reported = {}                         # 任務 → 回報過的持有者
-        first_release = None
+        self.done_at, self.released, self.closed_at = {}, {}, {}
         deadline = time.time() + timeout
         while True:
             run.read()
-            pending = 0
             for t in tasks:
                 held = run.holders(t)
                 for h in held:
-                    if reported.get(t) != h:
-                        self.report(h, t, True)
+                    if reported.get(t) != h:      # 換了持有者（失聯接手等）也要回報
+                        ack = self.report(h, t, True)
                         reported[t] = h
-                if held or t not in reported:
-                    pending += 1
-            if pending == 0:
-                if first_release is None:
-                    first_release = time.time()
-                run.sleep(0.5)                    # 撤下之後沒有再派出去才算做完
-                if not any(run.holders(t) for t in tasks):
-                    return first_release, 0
-                continue
-            if time.time() >= deadline:
-                return first_release, pending
+                        # 回報時刻 = ros_bridge 實際發出 task_result 的時刻（ack 的 t，和事件同一個時鐘）。
+                        # 2026-10-27 用迴圈開頭的時刻：比後面任務的派出還早，「完成後又派」84 次（實際 2 次）；
+                        # 10-28 用 report() 回來的時刻：等 ack 期間 0% 時全隊已經確認完，「→全隊確認」變成 −0.02 s
+                        self.done_at.setdefault(t, ack["t"] if ack and "t" in ack else time.time())
+                if t in reported and not held:
+                    self.released.setdefault(t, time.time())
+                if t not in self.closed_at and all(t in run.closed.get(v, {}) for v in ids):
+                    self.closed_at[t] = max(run.closed[v][t] for v in ids)
+            now = time.time()
+            if len(self.closed_at) == len(tasks):
+                return 0
+            if now >= deadline:
+                return len(tasks) - len(self.closed_at)
             run.sleep(0.1)
 
     def trial(self, level, k):
         run, ids = self.run, self.env.ids
-        pos = self.positions()
         clean = self.settle()                    # 上一次的任務還沒全部結束時，這一次不算進統計
         t0 = time.time()
-        tasks = []
-        for i, creator in enumerate(ids):
-            near = ids[(i + 1 + k) % len(ids)]          # 放在別台身邊，每次輪換
-            x, y = pos[near]
-            tid, _ = self.new_task(x + 2.0, y + 2.0, creator=creator)
-            tasks.append(tid)
+        owner = {}                               # 任務 → 理論上的執行者
+        for o, creator, x, y in self.layout(k):
+            tid, _ = self.new_task(x, y, creator=creator)
+            owner[tid] = o
+        tasks = list(owner)
+        expect = {v: sum(o == v for o in owner.values()) for v in ids}
 
-        def converged():
-            held = [run.holders(t) for t in tasks]
-            return all(len(h) == 1 for h in held) and len({h[0] for h in held}) == len(tasks)
+        def n_known(v):
+            return sum(t in run.known.get(v, {}) for t in tasks)
 
-        tc = run.until(converged, 10.0)
-        conv = tc - t0 if tc is not None else None
-        if tc is not None:
-            run.sleep(1.0)                               # 收斂之後 1 s 不變才算
-        holders = {t: run.holders(t) for t in tasks}
+        def all_known():
+            return all(n_known(v) == len(tasks) for v in ids)
+
+        def partition():                         # 每個任務恰好在一台的路徑裡
+            return all(len(run.in_paths(t)) == 1 for t in tasks)
+
+        def correct():
+            return all(run.in_paths(t) == [owner[t]] for t in tasks)
+
+        # 等到「全部送到而且分配正確」或 window 秒；途中記下第一次收斂、第一次正確的時刻
+        t_conv = t_corr = None
+        deadline = t0 + self.window
+        while True:
+            run.read()
+            now = time.time()
+            if t_conv is None and partition():
+                t_conv = now
+            if t_corr is None and correct():
+                t_corr = now
+            if (t_corr is not None and all_known()) or now >= deadline:
+                break
+            run.sleep(0.05)
+        if t_conv is not None:
+            run.sleep(1.0)                               # 收斂之後 1 s 再看最後的分配
+            if not partition():                          # 又變了：不算收斂（之後還會再動）
+                t_conv = t_corr = None
+        # A 送達：每台知道幾個、全部送到的時間（ros_bridge 收到 task_announced 的時刻）
+        known = {v: n_known(v) for v in ids}
+        last_known = [run.known[v][t] for v in ids for t in tasks if t in run.known.get(v, {})]
+        known_s = max(last_known) - t0 if all_known() and last_known else None
+        # B 分配：每台路徑裡有幾個這次的任務、幾個和最近分配不同
+        got = {v: sum(t in run.paths.get(v, []) for t in tasks) for v in ids}
+        wrong = sum(run.in_paths(t) != [owner[t]] for t in tasks)
         dup = sum(len(run.ever_held(t, t0)) > 1 for t in tasks)
+        conv = t_conv - t0 if t_conv is not None else None
+        corr = t_corr - t0 if t_corr is not None else None
 
         t1 = time.time()
-        released, leftover = self.close_all(tasks)
-        reassigned = sum(bool(set(run.ever_held(t, t1)) - set(holders[t])) for t in tasks)
-        row = dict(loss=level, trial=k + 1, clean=int(clean), conv_s=round(conv, 3) if conv is not None else "",
-                   converged_5s=int(conv is not None and conv <= 5.0 and dup == 0), duplicates=dup,
-                   release_s=round(released - t1, 3) if released else "", reassigned_after_done=reassigned,
+        leftover = self.close_all(tasks, timeout=30.0 + 5.0 * len(tasks))   # 每台依序做完路徑上的幾個
+        self.prev_tasks = tasks
+        med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
+        rel = [self.released[t] - self.done_at[t] for t in tasks if t in self.released and t in self.done_at]
+        clo = [self.closed_at[t] - self.done_at[t] for t in tasks if t in self.closed_at and t in self.done_at]
+        rel_s, close_s = med(rel), med(clo)
+        batch_s = max(self.closed_at.values()) - t1 if len(self.closed_at) == len(tasks) else None
+        # 完成後又派：回報完成之後，這個任務又出現在某台的 current_task（2026-10-27 修正：原本和量測當下的路徑比，
+        # 完成後其他任務重新規劃、換台是正常的，被算成「又派」）
+        reassigned = sum(any(task == t and tt > self.done_at[t] for (tt, _, task, _) in run.history)
+                         for t in tasks if t in self.done_at)
+        fmt_counts = lambda d: "/".join(str(d[v]) for v in ids)
+        row = dict(loss=level, trial=k + 1, node_params=self.params_tag(), clean=int(clean), tasks=len(tasks),
+                   known_s=round(known_s, 3) if known_s is not None else "",
+                   known_pct=round(100.0 * sum(known.values()) / (len(tasks) * len(ids)), 1),
+                   known_per_agent=fmt_counts(known),
+                   conv_s=round(conv, 3) if conv is not None else "",
+                   correct_s=round(corr, 3) if corr is not None else "",
+                   expected_per_agent=fmt_counts(expect), got_per_agent=fmt_counts(got), wrong=wrong,
+                   converged_5s=int(conv is not None and conv <= 5.0 and dup == 0),
+                   correct_5s=int(corr is not None and corr <= 5.0 and dup == 0), duplicates=dup,
+                   release_s=round(rel_s, 3) if rel_s is not None else "",
+                   close_s=round(close_s, 3) if close_s is not None else "",
+                   close_max_s=round(max(clo), 3) if clo else "",
+                   batch_s=round(batch_s, 3) if batch_s is not None else "", reassigned_after_done=reassigned,
                    leftover=leftover)
         mark = f"{conv:.2f} s" if conv is not None else "未收斂"
-        print(f"    {level:>3}% #{k + 1:<3} 收斂 {mark}　重複 {dup}　撤下 " +
-              (f"{released - t1:.2f} s" if released else "逾時") + (f"　完成後又派 {reassigned}" if reassigned else "") +
+        print(f"    {level:>3}% #{k + 1:<3} 送達 " + (f"{known_s:.2f} s" if known_s is not None else
+                                                    f"{row['known_pct']:.0f}%（{fmt_counts(known)}）") +
+              f"　分配 {fmt_counts(got)}（理論 {fmt_counts(expect)}" + (f"，非最近 {wrong}" if wrong else "") + "）" +
+              f"　收斂 {mark}　重複 {dup}　完成→撤下 " + (f"{rel_s:.2f} s" if rel_s is not None else "—") +
+              "、→全隊確認 " + (f"{close_s:.2f} s" if close_s is not None else "—") +
+              (f"　完成後又派 {reassigned}" if reassigned else "") +
               ("" if clean else "　（開始時還有任務，不計）") + (f"　做不完 {leftover}" if leftover else ""))
         return row
 
@@ -657,7 +870,14 @@ class LossSuite(CommSuite):
             return
         run.sleep(self.cfg["comm"]["warmup"])
         rows, levels = [], []
-        for level in self.levels:
+        crashed = []
+        for li, level in enumerate(self.levels):
+            if self.fresh and li > 0:
+                # 試驗隔離（2026-10-27）：每個掉包率重新啟動三台 cbba_node，前一個掉包率的任務（已結束的會一直記著）
+                # 不帶到下一個；量測只看這個掉包率自己的任務
+                self.log_tag = f"_L{level}"
+                self.restart_all()
+            self.prev_tasks = []
             self.tc(level, self.delay, self.jitter) if level > 0 else self.tc(None)
             try:
                 run.sleep(2.0)
@@ -666,6 +886,12 @@ class LossSuite(CommSuite):
                 lv = []
                 for k in range(self.trials):
                     lv.append(self.trial(level, k))
+                    dead = [v for v in env.ids if not env.running(env.uav(v), self.cfg["comm"]["stop_pattern"].format(id=v))]
+                    if dead:                          # 節點當掉（2026-10-27 遇過 Segmentation fault）：看 node_uavN.log
+                        crashed += [(level, k + 1, v) for v in dead]
+                        print(f"    {level}% 第 {k + 1} 次之後 uav{dead} 的 cbba_node 不在了（看 node_uav*.log），停止這個掉包率")
+                        lv[-1]["leftover"] = max(lv[-1]["leftover"], 1)
+                        break
                     if lv[-1]["leftover"]:            # 收不了尾：後面的試驗會被留下的任務干擾，這個掉包率停止
                         print(f"    {level}% 第 {k + 1} 次有 {lv[-1]['leftover']} 個任務做不完，停止這個掉包率")
                         break
@@ -675,30 +901,72 @@ class LossSuite(CommSuite):
                 self.tc(None)
             rows += lv
             aborted = lv[-1]["leftover"] > 0
+            n_all = len(lv)
+            covered = sum(r["conv_s"] != "" for r in lv)          # 每個任務恰好一台拿著
+            finished = sum(r["leftover"] == 0 for r in lv)        # 這次的任務全部做完、全隊確認
             lv = [r for r in lv if r["clean"] and not r["leftover"]]   # 開始時不乾淨、收不了尾的不計
             if not lv:
                 res.add(f"L{level}", f"掉包 {level}%", "FAIL", "沒有可以統計的試驗（每次開始時都還有任務、或收不了尾）")
                 break
             kbs = [(b1[v] - b0[v]) / dt / 1024 for v in env.ids if b0[v] is not None and b1[v] is not None]
             convs = sorted(r["conv_s"] for r in lv if r["conv_s"] != "")
+            corrs = sorted(r["correct_s"] for r in lv if r["correct_s"] != "")
+            knows = sorted(r["known_s"] for r in lv if r["known_s"] != "")
             rels = sorted(r["release_s"] for r in lv if r["release_s"] != "")
+            clos = sorted(r["close_s"] for r in lv if r["close_s"] != "")
             q = lambda xs, p: xs[min(len(xs) - 1, int(p * len(xs)))] if xs else None
-            summary = dict(loss=level, trials=len(lv), rate_5s=sum(r["converged_5s"] for r in lv) / len(lv),
+            # 每台平均分到幾個（理論值每次都一樣，取第一次的）
+            got = [[int(c) for c in r["got_per_agent"].split("/")] for r in lv]
+            got_mean = "/".join(f"{sum(g[i] for g in got) / len(got):.1f}" for i in range(len(env.ids)))
+            got_min = "/".join(str(min(g[i] for g in got)) for i in range(len(env.ids)))
+            got_max = "/".join(str(max(g[i] for g in got)) for i in range(len(env.ids)))
+            uneven = sum(r["got_per_agent"] != r["expected_per_agent"] for r in lv)
+            summary = dict(loss=level, node_params=self.params_tag(), trials=len(lv), tasks=self.n_tasks,
+                           known_rate=sum(r["known_s"] != "" for r in lv) / len(lv),
+                           known_median=q(knows, 0.5), known_p90=q(knows, 0.9),
+                           known_pct_mean=round(sum(r["known_pct"] for r in lv) / len(lv), 1),
+                           expected_per_agent=lv[0]["expected_per_agent"], got_per_agent_mean=got_mean,
+                           got_per_agent_min=got_min, got_per_agent_max=got_max, uneven=uneven,
+                           coverage_rate=covered / n_all if n_all else None,
+                           finished_rate=finished / n_all if n_all else None,
+                           correct_rate=sum(r["wrong"] == 0 for r in lv) / len(lv),
+                           wrong=sum(r["wrong"] for r in lv), correct_5s=sum(r["correct_5s"] for r in lv) / len(lv),
+                           correct_median=q(corrs, 0.5),
+                           rate_5s=sum(r["converged_5s"] for r in lv) / len(lv),
                            conv_median=q(convs, 0.5), conv_p90=q(convs, 0.9), not_converged=len(lv) - len(convs),
                            duplicates=sum(r["duplicates"] for r in lv), release_median=q(rels, 0.5),
+                           close_median=q(clos, 0.5), close_p90=q(clos, 0.9),
                            reassigned=sum(r["reassigned_after_done"] for r in lv),
                            mesh_kBps=round(sum(kbs) / len(kbs), 2) if kbs else None)
             levels.append(summary)
             fmt = lambda v: f"{v:.2f} s" if v is not None else "—"
             ok = (level != 30 or summary["rate_5s"] >= 0.95) and not aborted
-            res.add(f"L{level}", f"掉包 {level}%（延遲 {self.delay}±{self.jitter} ms）",
+            name = f"掉包 {level}%（延遲 {self.delay}±{self.jitter} ms，{self.n_tasks} 個任務" + \
+                (f"，{self.params_tag()}" if self.params_tag() else "") + "）"
+            res.add(f"L{level}A", name + "：送達（每台知道幾個任務）", "INFO",
+                    f"全部送到 {summary['known_rate'] * 100:.0f}%（{len(lv)} 次）、平均送到 {summary['known_pct_mean']}%、"
+                    f"送到時間中位數 {fmt(summary['known_median'])}、P90 {fmt(summary['known_p90'])}", **summary)
+            res.add(f"L{level}B", name + "：分配（每台分到幾個任務）", "INFO",
+                    f"理論 {summary['expected_per_agent']}、平均分到 {summary['got_per_agent_mean']}、"
+                    f"每台最少 {summary['got_per_agent_min']}、最多 {summary['got_per_agent_max']}"
+                    f"（和理論不同 {uneven}／{len(lv)} 次）；任務覆蓋：每個任務都有人拿 "
+                    f"{summary['coverage_rate'] * 100:.0f}%、全部做完 {summary['finished_rate'] * 100:.0f}%（{n_all} 次）；"
+                    f"和最近分配一致 {summary['correct_rate'] * 100:.0f}%（不一致的任務共 {summary['wrong']} 個；"
+                    f"理論＝離任務最近的那台，不是 CBBA 保證的結果）、"
+                    f"5 s 內一致 {summary['correct_5s'] * 100:.0f}%、一致時間中位數 {fmt(summary['correct_median'])}")
+            res.add(f"L{level}", name + "：收斂（無衝突）",
                     ("PASS" if ok else "FAIL") if level == 30 or aborted else "INFO",
-                    f"5 s 內收斂 {summary['rate_5s'] * 100:.0f}%（{len(lv)} 次）、收斂中位數 {fmt(summary['conv_median'])}、"
+                    f"5 s 內收斂 {summary['rate_5s'] * 100:.0f}%（{len(lv)} 次；每個任務恰好一台拿著，不管分得對不對，對不對看 B）、"
+                    f"收斂中位數 {fmt(summary['conv_median'])}、"
                     f"P90 {fmt(summary['conv_p90'])}、未收斂 {summary['not_converged']}、重複認領 {summary['duplicates']}、"
-                    f"完成→撤下 {fmt(summary['release_median'])}、完成後又派 {summary['reassigned']}、"
-                    f"mesh {summary['mesh_kBps']} kB/s/台" + ("；**有任務做不完，提早停止**" if aborted else ""), **summary)
-            if aborted:
+                    f"完成→本機撤下 {fmt(summary['release_median'])}、完成→全隊確認 {fmt(summary['close_median'])}"
+                    f"（P90 {fmt(summary['close_p90'])}）、完成後又派 {summary['reassigned']}、"
+                    f"mesh {summary['mesh_kBps']} kB/s/台" + ("；**有任務做不完，提早停止**" if aborted else ""))
+            if aborted and not self.fresh:        # 沒有重新啟動時，留下的任務會干擾之後的掉包率
                 break
+        if crashed:
+            res.add("LX", "cbba_node 當掉", "FAIL", "、".join(f"{lv}% 第 {k} 次之後 uav{v}" for lv, k, v in crashed) +
+                    "（node_uavN.log；--gdb 會印 backtrace）")
         for name, data in (("trials.csv", rows), ("levels.csv", levels)):
             with open(os.path.join(run.out, name), "w", encoding="utf-8") as f:
                 f.write(",".join(data[0].keys()) + "\n")
@@ -1869,16 +2137,25 @@ class DemoSuite(UavSuite):
             # 2026-10-20 起可以多隻（dog.units，分散在場地各處，看狗之間對火警的競標）；紀錄檔 fake_dog_<ns>.log、dog_cbba_<ns>.log
             units = dog.get("units") or [dict(ns="v60", id=50, start_xy=dog["start_xy"])]
             plan["dog"] = []
+            bt = getattr(env, "dog_mode", "fake") == "bt"
             for u in units:
                 dx, dy = u["start_xy"]
-                env.exec(env.sim(), dog["sim_start"].format(repo=env.repo, world=d["world"], x=dx, y=dy, ns=u["ns"],
-                                                            id=u["id"], speed=dog["speed"]),
-                         detach=True, log=f"{run.cout}/fake_dog_{u['ns']}.log")
-                env.exec(dog["container"], dog["start"].format(ns=u["ns"], id=u["id"], speed=dog["speed"]), detach=True,
+                f = dict(repo=env.repo, world=d["world"], x=dx, y=dy, ns=u["ns"], id=u["id"], speed=dog["speed"],
+                         ptz=dog.get("ptz_sec", 5.0))
+                if bt:
+                    # --dog bt（2026-10-27）：sim 放方塊身體（假 Nav2、假雲台、TF），dog.container 跑伯宇的 task_manager；
+                    # 紀錄檔 dog_body_<ns>.log、dog_bt_<ns>.log
+                    env.exec(env.sim(), dog["bt_sim_start"].format(**f), detach=True,
+                             log=f"{run.cout}/dog_body_{u['ns']}.log")
+                    env.exec(dog["container"], dog["bt_start"].format(**f), detach=True,
+                             log=f"{run.cout}/dog_bt_{u['ns']}.log")
+                else:
+                    env.exec(env.sim(), dog["sim_start"].format(**f), detach=True, log=f"{run.cout}/fake_dog_{u['ns']}.log")
+                env.exec(dog["container"], dog["start"].format(**f), detach=True,
                          log=f"{run.cout}/dog_cbba_{u['ns']}.log")
                 plan["dog"].append(dict(ns=u["ns"], id=u["id"], x=dx, y=dy, speed=dog["speed"]))
-            print(f"  假狗 {len(units)} 隻：" + "、".join(f"{u['ns']}（{u['id']}）在 ({u['start_xy'][0]:g}, {u['start_xy'][1]:g})"
-                                                     for u in units))
+            print(f"  {'伯宇的狗 BT＋方塊身體' if bt else '假狗'} {len(units)} 隻：" +
+                  "、".join(f"{u['ns']}（{u['id']}）在 ({u['start_xy'][0]:g}, {u['start_xy'][1]:g})" for u in units))
         print("  全部起飛到巡檢高度；懸停 3 s 後同時啟動三台的 cbba_node" + ("和假狗" if plan["dog"] else ""))
         run.sleep(3.0)
         for vid in ids:
@@ -2200,6 +2477,8 @@ def main():
     ap.add_argument("--kill-existing", action="store_true")
     ap.add_argument("--levels", default="0,10,30,50,70")
     ap.add_argument("--trials", type=int, default=20)
+    ap.add_argument("--tasks", type=int, default=9,
+                    help="loss：每次試驗的任務數（平均放在各台身邊，理論上每台分到 tasks／台數 個；每台最多 max_bundle 5 個）")
     ap.add_argument("--delay", type=int, default=50)
     ap.add_argument("--jitter", type=int, default=30)
     ap.add_argument("--hold", type=float, default=10.0)
@@ -2222,9 +2501,29 @@ def main():
                          "設定在 config 的 worlds.yard）")
     ap.add_argument("--executor", choices=["bt", "task_manager"], default="task_manager",
                     help="uav、demo：無人機的 BT（task_manager = 照機器狗端骨架的 uav_task_manager_node，預設；bt = 備用 uav_bt_node）")
+    ap.add_argument("--no-restart", action="store_true",
+                    help="loss：每個掉包率不重新啟動 cbba_node（2026-10-27 起預設重新啟動；要重現長時間累積的問題時用）")
+    ap.add_argument("--gdb", action="store_true",
+                    help="comm、loss：cbba_node 在 gdb 底下跑，當掉時 backtrace 印在 node_uavN.log（2026-10-27；要 RelWithDebInfo 編譯）")
+    ap.add_argument("--node-param", action="append", default=[], metavar="KEY=VALUE",
+                    help="comm、loss：每台 cbba_node 多加的參數（可以給多次），例如 --node-param resend_gap=0.5 "
+                         "--node-param completion_retry=0.5；記在 trials.csv、levels.csv 的 node_params，"
+                         "plot_loss.py 給多個目錄時依它分成不同的線（2026-11-04）")
+    ap.add_argument("--dog", choices=["fake", "bt"], default="fake",
+                    help="demo 的狗：fake = fake_dog.py（直線、BT 邏輯是我們寫的，預設）；bt = 伯宇的狗 BT（task_manager）＋"
+                         "方塊身體 fake_nav_body.py（假 Nav2、假雲台），要先在 uav1 容器 dog_bt.sh build（2026-10-27）")
     args = ap.parse_args()
     env = Env(args.config)
     env.executor = args.executor
+    env.dog_mode = args.dog
+    env.gdb = args.gdb
+    env.node_params = []
+    for kv in args.node_param:
+        k, sep, v = kv.partition("=")
+        if not sep or not k.strip() or not v.strip():
+            print(f"--node-param 要寫成 KEY=VALUE：{kv}")
+            return 2
+        env.node_params.append((k.strip(), v.strip()))
     if args.suite == "demo":
         env.apply_world(args.world or env.cfg["demo"]["world"])
     only = {s.strip() for s in args.only.split(",") if s.strip()}
@@ -2244,12 +2543,18 @@ def main():
         for pat in (env.cfg["comm"]["stop_pattern"].format(id=vid), env.cfg["uav"]["stop_pattern"]):
             if env.running(env.uav(vid), pat):
                 busy.append((env.uav(vid), pat))
-    for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "ros_bridge.py", "fake_dog.py", "record_cameras.py"):
+    for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "ros_bridge.py", "fake_dog.py", "fake_nav_body.py",
+                "record_cameras.py"):
         if env.running(env.sim(), pat):
             busy.append((env.sim(), pat))
     dog = env.cfg.get("dog")
-    if dog and env.running(dog["container"], dog["stop_pattern"]):
-        busy.append((dog["container"], dog["stop_pattern"]))
+    for pat in ((dog["stop_pattern"], dog.get("bt_stop_pattern")) if dog else ()):
+        if pat and env.running(dog["container"], pat):
+            busy.append((dog["container"], pat))
+    if args.suite == "demo" and args.dog == "bt" and dog and dog.get("bt_check") and \
+            env.exec(dog["container"], dog["bt_check"]).returncode != 0:
+        print(f"--dog bt：{dog['container']} 還沒編譯伯宇的 task_manager，先在那個容器執行 dog_bt.sh build")
+        return 2
     if busy and not args.kill_existing:
         print("容器裡已經有在跑的節點（加 --kill-existing 會先關掉）：")
         for c, p in busy:
@@ -2265,11 +2570,12 @@ def main():
     out_dir = os.path.join(HERE, "out", time.strftime("%Y%m%d_%H%M%S") + "_" + args.suite)
     os.makedirs(out_dir, exist_ok=True)
     print(f"[itest] {args.suite}：{len(env.ids)} 台，輸出 {out_dir}" +
-          (f"，BT {args.executor}" if args.suite in ("uav", "demo") else ""))
+          (f"，BT {args.executor}" if args.suite in ("uav", "demo") else "") +
+          ("，cbba_node 參數 " + " ".join(f"{k}={v}" for k, v in env.node_params) if env.node_params else ""))
     run = Run(env, out_dir, with_px4=args.suite in ("uav", "demo"))
     if args.suite == "loss":
         suite = LossSuite(env, run, only, [int(x) for x in args.levels.split(",") if x.strip()],
-                          args.trials, args.delay, args.jitter)
+                          args.trials, args.delay, args.jitter, tasks=args.tasks, fresh=not args.no_restart)
     elif args.suite == "demo":
         seed = args.seed if args.seed is not None else int(time.time()) % 10000
         scenario = None
@@ -2297,6 +2603,9 @@ def main():
             if dog:
                 env.pkill(dog["container"], dog["stop_pattern"])
                 env.pkill(env.sim(), dog["sim_stop_pattern"])
+                if dog.get("bt_stop_pattern"):           # --dog bt（2026-10-27）
+                    env.pkill(dog["container"], dog["bt_stop_pattern"])
+                    env.pkill(env.sim(), dog["bt_sim_stop_pattern"])
             # px4_start 的 stdin（tail -f /dev/null）：不關的話每跑一次留一個（2026-10-13 前用 sleep infinity，
             # 一直累積；而且容器的主程序也是 sleep infinity，不能用它比對）
             for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "tail -f /dev/null", "record_cameras.py"):

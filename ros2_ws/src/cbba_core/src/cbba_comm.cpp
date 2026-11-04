@@ -401,6 +401,8 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     case PacketType::COMPLETION: onCompletion(bytes, now); break;
     case PacketType::COMPLETION_ACK: onCompletionAck(bytes, now); break;
     case PacketType::TASK_CLOSE: onTaskClose(bytes, now); break;
+    case PacketType::GAP_REQUEST: onGapRequest(bytes); break;
+    case PacketType::SYNC_BATCH: onSyncBatch(*h, bytes, now); break;
   }
 }
 
@@ -494,6 +496,9 @@ std::vector<Bytes> CbbaComm::poll(double now)
     sendAgentState(now);
   }
 
+  // 補發佇列：狀態送完之後，用剩下的額度
+  drainRepair(now);
+
   std::vector<Bytes> out;
   out.swap(outbox_);
   return out;
@@ -570,6 +575,8 @@ NeighborInfo & CbbaComm::neighborOf(const wire::Header & h)
     n.pending_view.clear();
     n.pending_count = 0;
     n.has_status = false;
+    n.has_digest = false;
+    n.digest.clear();
   }
   return n;
 }
@@ -659,7 +666,19 @@ wire::CbbaStateBody CbbaComm::cbbaStateBody(double now) const
 void CbbaComm::sendCbbaState(double now)
 {
   ++snapshot_id_;
-  for (const wire::CbbaStateBody & part : wire::splitCbbaState(cbbaStateBody(now), config_.max_packet)) {
+  wire::CbbaStateBody full = cbbaStateBody(now);
+  if (wantDigest(now)) {
+    full.has_digest = true;
+    for (const auto & [creator, d] : digestMap()) {
+      if (full.digest.size() == 255) {
+        break;   // 封包格式最多 255 個建立者；之後的這次不比對（實際上不會有這麼多台）
+      }
+      full.digest.push_back(d);
+    }
+    last_digest_sent_ = now;
+    last_digest_key_ = full.round_key;
+  }
+  for (const wire::CbbaStateBody & part : wire::splitCbbaState(full, config_.max_packet)) {
     send(wire::encodeCbbaState(newHeader(PacketType::CBBA_STATE), part), PacketType::CBBA_STATE);
     ++stats_.cbba_parts;
   }
@@ -684,6 +703,14 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
   n.participating = b->participating;
   n.round_key = b->round_key;
   n.stable_steps = b->stable_steps;
+  if (b->has_digest) {
+    n.has_digest = true;
+    n.digest_key = b->round_key;
+    n.digest.clear();
+    for (const wire::DigestEntry & d : b->digest) {
+      n.digest[d.creator] = d;
+    }
+  }
 
   // 收集同一次的各批；換了 snapshot 就丟掉還沒收齊的
   if (b->snapshot_id != n.pending_snapshot || b->part_count != n.pending_count) {
@@ -695,7 +722,6 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
     n.pending_parts.clear();
     n.pending_view.clear();
   }
-  bool complete = false;
   if (n.pending_parts.insert(b->part_index).second) {
     for (const wire::Record & r : b->records) {
       n.pending_view[r.task_id] = r.winner_id;
@@ -708,14 +734,11 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
       n.view.swap(n.pending_view);
       n.pending_view.clear();
       n.has_view = true;
-      complete = true;
     }
   }
 
-  // 補發要在判斷參與之前：還在地面、剛開機的鄰居最需要補
-  if (complete) {
-    resendMissing(n, now);
-  }
+  // 補發要在判斷參與之前：還在地面、剛開機的鄰居最需要補。摘要每一批都帶，不用等收齊
+  compareDigest(h.sender_id, n, now);
 
   if (!n.participating) {
     // 停止出價（降落、重開機）：它得標的任務立即重新分配
@@ -749,26 +772,296 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
   markChanged(agent_.onMessage(msg, now));
 }
 
-// 補發（anti-entropy）：摘要不同才比對，補對方缺的。
-// 不參與出價的鄰居也附紀錄（2026-10-11 起），和參與的一樣只補它缺的；還沒收齊它的任何一次時 view 是空的，
-// 下面每個任務都當成「不認得」，等於把所有任務和 TASK_CLOSE 補一次。
-void CbbaComm::resendMissing(const NeighborInfo & n, double now)
+// ===========================================================================
+// 補發（版本 3，2026-10-28，doc/protocol_v3_sync.md）：壓縮摘要 → 缺口請求 → 受限分批回覆
+// ===========================================================================
+std::map<std::uint16_t, wire::DigestEntry> CbbaComm::digestMap() const
 {
-  if (n.round_key == roundKey()) {
+  // origins_ 依 task_id 排序：同一個建立者的任務連在一起、流水號由小到大
+  std::map<std::uint16_t, wire::DigestEntry> out;
+  for (const auto & [task_id, origin] : origins_) {
+    const auto creator = static_cast<std::uint16_t>(task_id >> 16);
+    const auto seq = static_cast<std::uint16_t>(task_id & 0xFFFFu);
+    const bool closed = !isOpen(task_id);
+    wire::DigestEntry & d = out[creator];
+    if (d.known == 0) {
+      d.creator = creator;
+      d.min_seq = seq;
+      d.crc = 0xFFFFFFFFu;
+    }
+    d.max_seq = seq;
+    ++d.known;
+    d.closed = static_cast<std::uint16_t>(d.closed + (closed ? 1 : 0));
+    d.crc = crc32Update(d.crc, static_cast<std::uint8_t>(seq >> 8));
+    d.crc = crc32Update(d.crc, static_cast<std::uint8_t>(seq));
+    d.crc = crc32Update(d.crc, closed ? 1 : 0);
+  }
+  for (auto & [creator, d] : out) {
+    d.crc = ~d.crc;
+  }
+  return out;
+}
+
+wire::SeqState CbbaComm::seqState(TaskId task_id) const
+{
+  if (origins_.count(task_id) == 0) {
+    return wire::SeqState::UNKNOWN;
+  }
+  return isOpen(task_id) ? wire::SeqState::OPEN : wire::SeqState::CLOSED;
+}
+
+// 這次 CBBA_STATE 要不要帶摘要：收斂後每 digest_period 一次；自己的狀態變了、或有鄰居和我不一致時每次都帶
+bool CbbaComm::wantDigest(double now) const
+{
+  const std::uint32_t key = roundKey();
+  if (now - last_digest_sent_ >= config_.digest_period || key != last_digest_key_) {
+    return true;
+  }
+  for (AgentId a : aliveNeighbors(now)) {
+    const NeighborInfo & n = neighbors_.at(a);
+    if (n.has_snapshot && n.round_key != key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// 和鄰居的摘要逐個建立者比對：
+//   它有我可能缺的（它那筆存在、和我的不同）→ 送缺口請求（那段流水號我的狀態），它只回我缺的；
+//   我有它可能缺的（我那筆存在、和它的不同）→ 把那個建立者最近新增、結束的任務直接放進補發佇列（不等請求）。
+// 兩邊都會比，各自問自己缺的。摘要不是最新的（它的 round_key 已經變了）就不比
+void CbbaComm::compareDigest(AgentId neighbor, const NeighborInfo & n, double now)
+{
+  if (!n.has_digest || n.digest_key != n.round_key || n.round_key == roundKey()) {
     return;
   }
-  for (const auto & [task_id, origin] : origins_) {
-    const bool theirs_open = n.view.count(task_id) > 0;
-    if (isOpen(task_id)) {
-      if (!theirs_open) {
-        resendTask(task_id, now);    // 它不認得
-      }
-    } else if (theirs_open) {
-      resendClose(task_id, now);     // 它以為還在進行，其實已結束
-    } else {
-      resendTask(task_id, now);      // 已結束、它沒有列：分不出不認得或已知結束，一起補
-      resendClose(task_id, now);
+  const auto mine = digestMap();
+  std::set<std::uint16_t> creators;
+  for (const auto & [c, d] : mine) {
+    creators.insert(c);
+  }
+  for (const auto & [c, d] : n.digest) {
+    creators.insert(c);
+  }
+  for (std::uint16_t c : creators) {
+    const auto m = mine.find(c);
+    const auto t = n.digest.find(c);
+    const bool have_m = m != mine.end();
+    const bool have_t = t != n.digest.end();
+    if (have_m && have_t && m->second == t->second) {
+      continue;
     }
+    if (have_t) {
+      const std::uint16_t lo = have_m ? std::min(m->second.min_seq, t->second.min_seq) : t->second.min_seq;
+      const std::uint16_t hi = have_m ? std::max(m->second.max_seq, t->second.max_seq) : t->second.max_seq;
+      sendGapRequest(neighbor, c, lo, hi, now);
+    }
+    if (have_m) {
+      const TaskId first = static_cast<TaskId>(c) << 16;
+      for (auto it = origins_.lower_bound(first); it != origins_.end() && (it->first >> 16) == c; ++it) {
+        const TaskId id = it->first;
+        const auto added = added_at_.find(id);
+        const auto closed = closed_at_.find(id);
+        const bool new_task = added != added_at_.end() && now - added->second <= config_.push_recent_sec;
+        const bool new_close = closed != closed_at_.end() && now - closed->second <= config_.push_recent_sec &&
+          closes_.count(id) > 0;
+        if (!new_task && !new_close) {
+          continue;
+        }
+        double & last = last_resend_.try_emplace({0, id}, -1e9).first->second;   // 0：直接推送
+        if (now - last < config_.resend_gap) {
+          continue;
+        }
+        last = now;
+        queueRepair(id, new_task, new_close);
+      }
+    }
+  }
+}
+
+// 缺口請求：建立者 c、流水號 lo～hi 我的狀態。超過 kMaxGapSeqs 時分段，下次從上次問到的地方接著問
+void CbbaComm::sendGapRequest(AgentId target, std::uint16_t creator, std::uint16_t lo, std::uint16_t hi,
+  double now)
+{
+  const auto key = std::make_pair(target, creator);
+  double & last = last_gap_request_.try_emplace(key, -1e9).first->second;
+  if (now - last < config_.gap_request_gap) {
+    return;
+  }
+  last = now;
+  std::uint32_t first = lo;
+  const auto cursor = gap_cursor_.find(key);
+  if (cursor != gap_cursor_.end() && cursor->second > lo && cursor->second <= hi) {
+    first = cursor->second;
+  }
+  const std::uint32_t count = std::min<std::uint32_t>(hi - first + 1, wire::kMaxGapSeqs);
+  gap_cursor_[key] = first + count > hi ? lo : first + count;
+
+  wire::GapRequestBody b;
+  b.target_id = target;
+  b.creator = creator;
+  b.first_seq = static_cast<std::uint16_t>(first);
+  b.states.reserve(count);
+  for (std::uint32_t k = 0; k < count; ++k) {
+    b.states.push_back(seqState((static_cast<TaskId>(creator) << 16) | (first + k)));
+  }
+  send(wire::encodeGapRequest(newHeader(PacketType::GAP_REQUEST), b), PacketType::GAP_REQUEST);
+  ++stats_.gap_requests;
+}
+
+// 回答指名給我的缺口請求：只補對方缺的（我知道、它不認得 → 任務定義；我已結束、它不知道結束 → 結束紀錄）
+void CbbaComm::onGapRequest(const Bytes & bytes)
+{
+  const auto b = wire::decodeGapRequest(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (b->target_id != id()) {
+    return;
+  }
+  bool any = false;
+  for (std::size_t k = 0; k < b->states.size(); ++k) {
+    const TaskId task_id = (static_cast<TaskId>(b->creator) << 16) | (b->first_seq + k);
+    const wire::SeqState mine = seqState(task_id);
+    const wire::SeqState theirs = b->states[k];
+    if (mine == wire::SeqState::UNKNOWN) {
+      continue;
+    }
+    const bool announce = theirs == wire::SeqState::UNKNOWN;
+    const bool close = mine == wire::SeqState::CLOSED && theirs != wire::SeqState::CLOSED &&
+      closes_.count(task_id) > 0;
+    if (announce || close) {
+      queueRepair(task_id, announce, close);
+      any = true;
+    }
+  }
+  if (any) {
+    ++stats_.gap_answers;
+  }
+}
+
+void CbbaComm::queueRepair(TaskId task_id, bool announce, bool close)
+{
+  RepairNeed & need = isOpen(task_id) ? repair_open_[task_id] : repair_closed_[task_id];
+  need.announce = need.announce || announce;
+  need.close = need.close || close;
+}
+
+// 補發佇列 → SYNC_BATCH：進行中的任務先、已結束的後；每批 ≤ max_packet、≤ 255 筆；token bucket 限速
+void CbbaComm::drainRepair(double now)
+{
+  const double cap = std::max(config_.repair_burst, static_cast<double>(config_.max_packet));
+  if (repair_last_ < 0.0) {
+    repair_tokens_ = cap;
+  } else {
+    repair_tokens_ = std::min(cap, repair_tokens_ + (now - repair_last_) * config_.repair_rate);
+  }
+  repair_last_ = now;
+
+  // 每一筆只要表頭之後的內容：用不佔序號的表頭編碼（額度不夠、下次重組時不浪費序號）
+  wire::Header item_header;
+  item_header.sender_id = id();
+  item_header.session_id = session_;
+  while (!repair_open_.empty() || !repair_closed_.empty()) {
+    std::vector<wire::SyncItem> items;
+    std::vector<std::pair<std::map<TaskId, RepairNeed> *, TaskId>> taken;
+    std::size_t size = wire::kSyncBatchBaseSize;
+    bool full = false;
+    for (auto * queue : {&repair_open_, &repair_closed_}) {
+      for (const auto & [task_id, need] : *queue) {
+        std::vector<wire::SyncItem> mine;
+        if (need.announce && origins_.count(task_id) > 0) {
+          if (auto item = wire::toSyncItem(wire::encodeTaskAnnounce(item_header, announceBody(task_id))))
+          {
+            mine.push_back(std::move(*item));
+          }
+        }
+        const auto close = closes_.find(task_id);
+        if (need.close && close != closes_.end()) {
+          if (auto item = wire::toSyncItem(wire::encodeTaskClose(item_header, close->second)))
+          {
+            mine.push_back(std::move(*item));
+          }
+        }
+        std::size_t add = 0;
+        for (const wire::SyncItem & item : mine) {
+          add += wire::syncItemSize(item);
+        }
+        // 第一筆一定放得進去（單筆超過上限時照樣送，不會卡住佇列）
+        if (!items.empty() && (size + add > config_.max_packet || items.size() + mine.size() > 255)) {
+          full = true;
+          break;
+        }
+        size += add;
+        for (wire::SyncItem & item : mine) {
+          items.push_back(std::move(item));
+        }
+        taken.emplace_back(queue, task_id);
+      }
+      if (full) {
+        break;
+      }
+    }
+    if (items.empty()) {   // 佇列裡的都已經沒有東西可送（例如結束紀錄不見了）
+      for (const auto & [queue, task_id] : taken) {
+        queue->erase(task_id);
+      }
+      if (taken.empty()) {
+        repair_open_.clear();
+        repair_closed_.clear();
+      }
+      break;
+    }
+    if (repair_tokens_ < static_cast<double>(size)) {
+      ++stats_.repair_deferred;   // 額度不夠：留到下次
+      break;
+    }
+    repair_tokens_ -= static_cast<double>(size);
+    stats_.repair_items_sent += static_cast<int>(items.size());
+    send(wire::encodeSyncBatch(newHeader(PacketType::SYNC_BATCH), items), PacketType::SYNC_BATCH);
+    for (const auto & [queue, task_id] : taken) {
+      queue->erase(task_id);
+    }
+    if (!full) {
+      break;
+    }
+  }
+}
+
+// 收到補發：每一筆照 TASK_ANNOUNCE／TASK_CLOSE 處理（驗證、權限一樣），但不轉送（只在直接鄰居之間補），
+// 並登記去重複（之後同一則的轉送不再處理、不再轉送）
+void CbbaComm::onSyncBatch(const wire::Header & h, const Bytes & bytes, double now)
+{
+  const auto items = wire::decodeSyncBatch(bytes);
+  if (!items) {
+    ++stats_.malformed;
+    return;
+  }
+  for (const wire::SyncItem & item : *items) {
+    const Bytes packet = wire::syncItemPacket(item, h);
+    if (item.type == PacketType::TASK_ANNOUNCE) {
+      const auto b = wire::decodeTaskAnnounce(packet);
+      if (!b) {
+        ++stats_.malformed;
+        continue;
+      }
+      dedup_.firstSeen(PacketType::TASK_ANNOUNCE, b->relay, now);
+      applyAnnounce(*b, now);
+    } else {
+      const auto b = wire::decodeTaskClose(packet);
+      if (!b) {
+        ++stats_.malformed;
+        continue;
+      }
+      if (!closeAllowed(*b)) {
+        ++stats_.rejected_closes;
+        continue;
+      }
+      dedup_.firstSeen(PacketType::TASK_CLOSE, b->relay, now);
+      applyClose(*b, now);
+    }
+    ++stats_.repair_items_applied;
   }
 }
 
@@ -897,9 +1190,17 @@ bool CbbaComm::assign(const Task & task, double now)
     return false;
   }
   dedup_.firstSeen(PacketType::TASK_ANNOUNCE, origin, now);   // 自己發的先登記
+  send(wire::encodeTaskAnnounce(h, announceBody(t.id)), PacketType::TASK_ANNOUNCE);
+  return true;
+}
+
+// 已知任務的定義（origin 沿用建立時的）：建立、保底重播、補發共用
+wire::TaskAnnounceBody CbbaComm::announceBody(TaskId task_id) const
+{
+  const Task & t = agent_.tasks().at(task_id);
   wire::TaskAnnounceBody b;
-  b.relay = origin;
-  b.task_id = t.id;
+  b.relay = origins_.at(task_id);
+  b.task_id = task_id;
   b.task_type = static_cast<std::uint8_t>(t.type);
   b.x = static_cast<float>(t.position.x);
   b.y = static_cast<float>(t.position.y);
@@ -908,8 +1209,7 @@ bool CbbaComm::assign(const Task & task, double now)
   b.created_ms = toStampMs(t.created);
   b.deadline_ms = t.explicit_deadline ? wire::toDeadlineMs(t.created + t.deadline_sec) : 0;
   b.duration_sec = clampU16(t.duration_sec);
-  send(wire::encodeTaskAnnounce(h, b), PacketType::TASK_ANNOUNCE);
-  return true;
+  return b;
 }
 
 bool CbbaComm::addTask(const wire::RelayHeader & origin, const Task & task, double now)
@@ -922,6 +1222,7 @@ bool CbbaComm::addTask(const wire::RelayHeader & origin, const Task & task, doub
     return false;
   }
   origins_[task.id] = origin;
+  added_at_[task.id] = now;
   markChanged(agent_.onTask(task, now));
   dirty_ = true;   // 任務清單變了，鄰居要知道
 
@@ -943,19 +1244,9 @@ void CbbaComm::resendTask(TaskId task_id, double now)
     return;
   }
   last = now;
-  const Task & t = agent_.tasks().at(task_id);
-  wire::TaskAnnounceBody b;
-  b.relay = origins_.at(task_id);   // 補發沿用原始的 origin：已收過的載具會當成重複丟掉
-  b.task_id = task_id;
-  b.task_type = static_cast<std::uint8_t>(t.type);
-  b.x = static_cast<float>(t.position.x);
-  b.y = static_cast<float>(t.position.y);
-  b.z = static_cast<float>(t.position.z);
-  b.value = static_cast<float>(t.value);
-  b.created_ms = toStampMs(t.created);
-  b.deadline_ms = t.explicit_deadline ? wire::toDeadlineMs(t.created + t.deadline_sec) : 0;
-  b.duration_sec = clampU16(t.duration_sec);
-  send(wire::encodeTaskAnnounce(newHeader(PacketType::TASK_ANNOUNCE), b), PacketType::TASK_ANNOUNCE);
+  // 沿用原始的 origin：已收過的載具會當成重複丟掉
+  send(wire::encodeTaskAnnounce(newHeader(PacketType::TASK_ANNOUNCE), announceBody(task_id)),
+    PacketType::TASK_ANNOUNCE);
 }
 
 void CbbaComm::resendClose(TaskId task_id, double now)
@@ -988,18 +1279,24 @@ void CbbaComm::onTaskAnnounce(const Bytes & bytes, double now)
   if (b->relay.origin_id != id()) {
     relay(bytes);   // 第一次收到時原封不動轉送一次
   }
-    Task t;
-  t.id = b->task_id;
-  t.type = static_cast<TaskType>(b->task_type);
-  t.position = {b->x, b->y, b->z};
-  t.value = b->value;
-  t.duration_sec = b->duration_sec;
+  applyAnnounce(*b, now);
+}
+
+// 任務定義加進本機（TASK_ANNOUNCE、SYNC_BATCH 共用）
+void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
+{
+  Task t;
+  t.id = b.task_id;
+  t.type = static_cast<TaskType>(b.task_type);
+  t.position = {b.x, b.y, b.z};
+  t.value = b.value;
+  t.duration_sec = b.duration_sec;
   // 建立時刻用建立者的（各節點、每輪競標都一樣）；沒有期限時出價用預設 300 s，排隊用 max_queue_wait
-  t.created = fromStampMs(b->created_ms, now);
+  t.created = fromStampMs(b.created_ms, now);
   t.status_stamp = now;
-  t.explicit_deadline = b->deadline_ms != 0;
-  t.deadline_sec = t.explicit_deadline ? wire::fromDeadlineMs(b->deadline_ms, now) - t.created : 300.0;
-  addTask(b->relay, t, now);
+  t.explicit_deadline = b.deadline_ms != 0;
+  t.deadline_sec = t.explicit_deadline ? wire::fromDeadlineMs(b.deadline_ms, now) - t.created : 300.0;
+  addTask(b.relay, t, now);
 }
 
 // ===========================================================================
@@ -1070,6 +1367,7 @@ void CbbaComm::markClosed(TaskId task_id, std::uint8_t reason, double now)
   done.status = reason == wire::kCloseCancelled ? TaskStatus::CANCELLED : TaskStatus::DONE;
   done.status_stamp = now;
   markChanged(agent_.onTask(done, now));
+  closed_at_[task_id] = now;
   dirty_ = true;   // round_key 變了
 }
 
@@ -1190,17 +1488,23 @@ void CbbaComm::onTaskClose(const Bytes & bytes, double now)
   if (b->relay.origin_id != id()) {
     relay(bytes);
   }
-  // 執行機是自己也要套用：重開機後，開機前完成的任務靠鄰居補發的 TASK_CLOSE 才知道已結束
-  if (origins_.count(b->task_id) == 0) {
-    early_closes_[b->task_id] = *b;   // 還不認得這個任務：先存起來
+  applyClose(*b, now);
+}
+
+// 任務結束套用到本機（TASK_CLOSE、SYNC_BATCH 共用；權限已經檢查過）。
+// 執行機是自己也要套用：重開機後，開機前完成的任務靠鄰居補發的 TASK_CLOSE 才知道已結束
+void CbbaComm::applyClose(const wire::TaskCloseBody & b, double now)
+{
+  if (origins_.count(b.task_id) == 0) {
+    early_closes_[b.task_id] = b;   // 還不認得這個任務：先存起來
     return;
   }
-  if (b->reason == wire::kCloseDone) {
-    mergeAssignment(b->task_id, Assignment{b->assign_version, b->actor_id, AssignState::ACTIVE});
+  if (b.reason == wire::kCloseDone) {
+    mergeAssignment(b.task_id, Assignment{b.assign_version, b.actor_id, AssignState::ACTIVE});
   }
-  completions_.erase(b->task_id);
-  closes_.try_emplace(b->task_id, *b);
-  markClosed(b->task_id, b->reason, now);
+  completions_.erase(b.task_id);
+  closes_.try_emplace(b.task_id, b);
+  markClosed(b.task_id, b.reason, now);
 }
 
 // TASK_CLOSE 的權限：actor 是自己發的（等於 origin）；

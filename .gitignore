@@ -5,6 +5,8 @@ ros2_ws/log_*/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+# 伯宇的狗 BT 的 overlay（docker/scripts/dog_bt.sh build，原始碼在 docs/handoff_uav_*，也不進 repo）
+dog_ws/
 
 # 第三方：由 docker/scripts/setup_px4_msgs.sh 依版本下載
 ros2_ws/src/px4_msgs/

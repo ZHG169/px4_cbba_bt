@@ -19,6 +19,10 @@
 //                                                            狗端沒有這個話題）：無人機的火點去重複要知道別台已經報過的火
 //               task_orphaned (swarm_interfaces/Task)        孤兒任務（2026-10-17，我們加的）：任務還開著，但 orphan_warn_sec 內
 //                                                            一直沒有人得標、也沒有正式指派。只通知（給地面站），不處理
+//   CBBA → 測試、地面站
+//               cbba_path    (std_msgs/UInt32MultiArray)     這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次
+//                                                            （2026-10-27，我們加的）：current_task 只有路徑第一個，弱網測試要比對
+//                                                            「每台分到幾個任務」才看得到後面的；BT 不用訂
 //
 // 參與出價（spec §2.3 規則 2、4）：robot_state 在 state_timeout 內有更新，而且 mode == AUTO。
 //   MANUAL（平板接管）、ESTOP（急停）、沒有 robot_state 時對所有任務出價 0，手上的任務立刻釋放。
@@ -39,6 +43,7 @@
 //
 // 程序鎖：啟動時對 <lock_dir>/agentN.lock 加 flock（不等待），拿不到就拒絕啟動，從啟動持有到程序結束。
 // lock_dir 要在同一台機器的所有容器共用（docker 掛 /run/cbba，CBBA_LOCK_DIR），否則兩個容器各跑一個同機號的節點時鎖不到。
+#include <execinfo.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
@@ -47,6 +52,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -59,6 +65,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/u_int32_multi_array.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
@@ -240,6 +247,16 @@ public:
     comm.takeover_patrol = declare_parameter<double>("takeover_patrol", comm.takeover_patrol);
     comm.max_packet = static_cast<std::size_t>(
       declare_parameter<int>("max_packet", static_cast<int>(comm.max_packet)));
+    // 補發（協定版本 3，cbba_core/doc/protocol_v3_sync.md）：摘要比對 → 缺口請求 → 限速的分批回覆
+    comm.repair_rate = declare_parameter<double>("repair_rate", comm.repair_rate);
+    comm.push_recent_sec = declare_parameter<double>("push_recent_sec", comm.push_recent_sec);
+    comm.gap_request_gap = declare_parameter<double>("gap_request_gap", comm.gap_request_gap);
+    comm.digest_period = declare_parameter<double>("digest_period", comm.digest_period);
+    comm.resend_gap = declare_parameter<double>("resend_gap", comm.resend_gap);
+    // 完成確認：沒收齊確認時的重送間隔、次數（2026-11-04 開成參數，第 5 週量弱網的完成確認時間用；全隊應該一樣）
+    comm.completion_retry = declare_parameter<double>("completion_retry", comm.completion_retry);
+    comm.completion_max = declare_parameter<int>("completion_max", comm.completion_max);
+    stats_log_sec_ = declare_parameter<double>("stats_log_sec", stats_log_sec_);
     // 除了建立者，可以取消任務的機號（授權的管理端）。全隊要一樣，收到 TASK_CLOSE 時也用它檢查
     for (const auto id : declare_parameter<std::vector<std::int64_t>>(
         "cancel_authorities", std::vector<std::int64_t>{}))
@@ -289,6 +306,10 @@ public:
           rclcpp::QoS(256).reliable().transient_local());
     }
     orphan_pub_ = create_publisher<TaskMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
+    // 路徑（2026-10-27）：只要最新的一份，晚訂閱的也拿得到
+    path_pub_ = create_publisher<std_msgs::msg::UInt32MultiArray>(topic("cbba_path"),
+        rclcpp::QoS(1).reliable().transient_local());
+    path_pub_->publish(std_msgs::msg::UInt32MultiArray());
     if (participate_ == "state") {
       // best effort 的訂閱可以接 reliable 和 best effort 的發布（BT 用 reliable）
       state_sub_ = create_subscription<RobotStateMsg>(
@@ -544,6 +565,47 @@ private:
     assignments_->takeRequests();              // 不握手：沒有要送給 BT 的請求
     publishOutputs(now);
     report(now);
+    logStats(now);
+  }
+
+  // 封包統計（2026-10-28，協定版本 3）：每 stats_log_sec 印一次這段時間送出的流量與各種封包的則數、位元組，
+  // 弱網測試比對補發的流量用（版本 2 的補發和已結束的任務數成正比）。0 = 不印
+  void logStats(double now)
+  {
+    if (stats_log_sec_ <= 0.0) {
+      return;
+    }
+    if (stats_last_ < 0.0) {
+      stats_last_ = now;
+      stats_prev_ = comm_->stats();
+      return;
+    }
+    const double dt = now - stats_last_;
+    if (dt < stats_log_sec_) {
+      return;
+    }
+    const CommStats & st = comm_->stats();
+    std::string detail;
+    std::size_t bytes = 0;
+    for (const auto & [type, count] : st.sent) {
+      const auto prev = stats_prev_.sent.find(type);
+      const auto prev_bytes = stats_prev_.sent_bytes.find(type);
+      const int n = count - (prev != stats_prev_.sent.end() ? prev->second : 0);
+      const std::size_t b = st.sent_bytes.at(type) -
+        (prev_bytes != stats_prev_.sent_bytes.end() ? prev_bytes->second : 0);
+      bytes += b;
+      if (n > 0) {
+        detail += std::string(detail.empty() ? "" : "、") + wire::toString(type) + " " + std::to_string(n) +
+          " 則 " + std::to_string(b) + " B";
+      }
+    }
+    RCLCPP_INFO(get_logger(),
+      "封包統計 %.0f s：送出 %.2f kB/s（%s）；任務 %zu 個、補發佇列 %zu、缺口請求 %d、補發 %d 筆、收到補發 %d 筆、"
+      "額度不足 %d 次", dt, bytes / dt / 1024.0, detail.c_str(), comm_->taskCount(), comm_->repairQueued(),
+      st.gap_requests - stats_prev_.gap_requests, st.repair_items_sent - stats_prev_.repair_items_sent,
+      st.repair_items_applied - stats_prev_.repair_items_applied, st.repair_deferred - stats_prev_.repair_deferred);
+    stats_prev_ = st;
+    stats_last_ = now;
   }
 
   void publishOutputs(double now)
@@ -606,6 +668,9 @@ private:
       }
       RCLCPP_INFO(get_logger(), "路徑：%s", s.empty() ? "（無）" : s.c_str());
       last_path_ = path;
+      std_msgs::msg::UInt32MultiArray msg;
+      msg.data.assign(path.begin(), path.end());
+      path_pub_->publish(msg);
     }
     // 新知道的任務（自己建立、或收到別台的 TASK_ANNOUNCE）轉給 BT 一次
     if (announced_pub_) {
@@ -707,6 +772,9 @@ private:
   std::uint8_t mode_{RobotStateMsg::AUTO};
 
   std::vector<TaskId> last_path_;
+  double stats_log_sec_{10.0};   // 封包統計的間隔（0 = 不印）
+  double stats_last_{-1.0};
+  CommStats stats_prev_;
   std::map<TaskId, std::pair<AgentId, std::string>> bid_logged_;   // 出價表：上次印的（得標者, why）
   bool last_converged_{false};
   std::map<TaskId, double> reported_at_;   // 自己回報完成的時刻
@@ -725,6 +793,7 @@ private:
   rclcpp::Publisher<TaskMsg>::SharedPtr closed_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 只有無人機
   rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt32MultiArray>::SharedPtr path_pub_;
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;
@@ -734,8 +803,52 @@ private:
 
 }  // namespace cbba_core
 
+namespace
+{
+
+// 當機時印呼叫堆疊（2026-10-28）：70% 掉包的弱網測試遇過一次 Segmentation fault，之後在 gdb 底下沒有重現
+// （gdb 會改變時序）。改成節點自己處理：平常不做任何事、不影響時序；收到 SIGSEGV 等訊號時把堆疊寫到 stderr，
+// 再照預設的方式結束（ros2 run 照樣印 Segmentation fault）。位址換成行號：
+//   addr2line -f -C -e $(ros2 pkg prefix swarm_cbba)/lib/swarm_cbba/cbba_node <括號裡的 +0x 位移>
+// （RelWithDebInfo 編譯才有行號；cbba_core 的函式在 libcbba_core_core 的那幾行，用那個 .so 換）
+// 訊號處理裡只用 async-signal-safe 的函式：write、backtrace_symbols_fd（backtrace 在安裝時先呼叫一次，載入 libgcc）
+void onCrash(int sig)
+{
+  static const char kHead[] = "\n===== cbba_node 當掉：收到訊號，呼叫堆疊如下 =====\n";
+  if (write(STDERR_FILENO, kHead, sizeof(kHead) - 1) < 0) {}
+  void * frames[64];
+  const int n = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, n, STDERR_FILENO);
+  static const char kTail[] = "===== 呼叫堆疊結束 =====\n";
+  if (write(STDERR_FILENO, kTail, sizeof(kTail) - 1) < 0) {}
+  std::signal(sig, SIG_DFL);
+  std::raise(sig);
+}
+
+void installCrashHandler()
+{
+  void * warm[1];
+  backtrace(warm, 1);
+  // 堆疊溢位時原本的堆疊不能用：處理函式在另外一塊堆疊上跑
+  static char alt_stack[64 * 1024];
+  stack_t ss{};
+  ss.ss_sp = alt_stack;
+  ss.ss_size = sizeof(alt_stack);
+  sigaltstack(&ss, nullptr);
+  struct sigaction sa{};
+  sa.sa_handler = onCrash;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_ONSTACK | SA_RESETHAND;
+  for (int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT}) {
+    sigaction(sig, &sa, nullptr);
+  }
+}
+
+}  // namespace
+
 int main(int argc, char ** argv)
 {
+  installCrashHandler();
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<cbba_core::CbbaNode>());
   rclcpp::shutdown();

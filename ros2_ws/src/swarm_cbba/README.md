@@ -26,6 +26,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `task_closed` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 100 | 任務結束（`status` DONE／CANCELLED），每個任務一次。2026-10-13 我們加的，狗端不用訂；無人機發布火警後懸停監控，等地面處置完成才走 |
 | `task_announced` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 256 | 全隊已知的任務（自己建立或收到別台的 TASK_ANNOUNCE），每個任務一次。2026-10-14 我們加的，**只有 `agent_type: UAV` 才發**（狗的 cbba_node 沒有這個話題）；無人機的火點去重複要算進別台報過的火 |
 | `task_orphaned` | CBBA → 地面站等 | `swarm_interfaces/Task` | reliable、depth 20 | 孤兒任務（2026-10-17 我們加的，狗、無人機都發）：任務還開著，但 `orphan_warn_sec`（30 s）內一直沒有人得標、也沒有正式指派。每個孤兒任務發一次，log 也有警告；之後有人得標時印「有人得標了」。只通知、不處理（換點、取消、叫人由操作員決定）；BT 不用訂 |
+| `cbba_path` | CBBA → 測試、地面站 | `std_msgs/UInt32MultiArray` | reliable、transient_local、depth 1 | 這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次（2026-10-27 我們加的，狗、無人機都發）：`current_task` 只有第一個，弱網測試（`itest.py loss`）要比對每台分到幾個任務；BT 不用訂 |
 | `robot_state` | BT → CBBA | `swarm_interfaces/RobotState` | BT 發 reliable；CBBA 收 best_effort | 約 2 Hz：位置（map ENU）、電量、`mode` |
 | `task_result` | BT → CBBA | `swarm_interfaces/TaskResult` | reliable | 任務結束時一次：`success`、`detail`（給人看）、`reason` |
 | `new_task` | BT → CBBA | `swarm_interfaces/Task` | reliable | 本機發現的任務（無人機：火點）；`task_id` = 機號 × 65536 + 流水號 |
@@ -63,6 +64,9 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `preempt_exclude_sec` | = `failure_exclude_sec` | PREEMPTED 後多久不出價；`cbba_v60.yaml`、`cbba_uav.yaml` 設 5 s（只擋 mode = MANUAL 晚到的空檔，接管期間靠 MANUAL） |
 | `max_failures` | 0 | 同一任務 TRANSIENT 失敗幾次後永久不出價；0 = 不啟用（只打折） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
+| `repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period`、`resend_gap` | 8000 B/s、10 s、0.5 s、1 s、1 s | 補發（機間協定版本 3，2026-10-28，`cbba_core/doc/protocol_v3_sync.md`）：壓縮摘要 → 缺口請求 → 限速的分批回覆。全隊要一起升到版本 3（和版本 2 互相拒收）；BT、話題不受影響 |
+| `completion_retry`、`completion_max` | 1 s、10 次 | 完成確認沒收齊時的重送間隔、次數（2026-11-04 開成參數；全隊應該一樣） |
+| `stats_log_sec` | 10 s | 每隔多久印一次「封包統計」：送出的 kB/s、各種封包的則數與位元組、缺口請求、補發筆數（0 = 不印） |
 | `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他，全隊要一樣） |
 | `recon_altitude` | 5.0 m | AIR_RECON 的巡檢高度 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | UAV：5、0.5、0.2、20；UGV：1、0.1、0.05、20 | 能量模型（狗的是佔位值，見 `cbba_core/doc/ugv_tuning.md`） |

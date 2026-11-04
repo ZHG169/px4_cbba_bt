@@ -1,4 +1,7 @@
-// 機間通訊封包的表頭（不依賴 ROS）：協定版本 2（2026-10-09）
+// 機間通訊封包的表頭（不依賴 ROS）：協定版本 3（2026-10-28；版本 2 是 2026-10-09）
+//
+// 版本 3 只改補發（anti-entropy）：CBBA_STATE 帶壓縮的任務摘要、新增 GAP_REQUEST（缺口請求）和 SYNC_BATCH
+// （受限分批回覆），拿掉「摘要不同就把所有已結束的任務各補一次」。其他格式和版本 2 相同。見 doc/protocol_v3_sync.md。
 //
 // 版本 2 不再照「機間通訊封包規格」2026-10-06 的格式。原因：規格用 AGENT_STATE 裡 z、y 陣列的位置
 // （uint8 任務編號 0～254）當全隊共用的任務識別，所有節點必須先對「第 i 格是哪個任務」有共識：
@@ -12,7 +15,7 @@
 //   magic 2 | version 1 | type 1 | sender_id 2 | session_id 8 | sequence 4 | payload_length 2
 //
 //   magic           0x4342（"CB"），不是這個值就不是本協定的封包
-//   version         2
+//   version         3（版本 2、3 互相拒收）
 //   type            封包種類（PacketType）
 //   sender_id       直接發送者機號（轉送時為轉送者）。0 保留為「無人」，拒收
 //   session_id      每次節點啟動隨機產生；(sender_id, session_id) 不同就是重開機過
@@ -54,10 +57,12 @@ enum class PacketType : std::uint8_t
   COMPLETION = 4,      // 完成宣告，轉送
   COMPLETION_ACK = 5,  // 完成確認，轉送（只在需要時）
   TASK_CLOSE = 6,      // 任務結束（完成證明或取消），轉送
+  GAP_REQUEST = 7,     // 缺口請求（版本 3）：「這個建立者的這段流水號，我的狀態是這張點陣圖」，不轉送
+  SYNC_BATCH = 8,      // 分批回覆（版本 3）：多筆任務定義、結束紀錄，限速，不轉送
 };
 
 constexpr std::uint16_t kMagic = 0x4342;
-constexpr std::uint8_t kVersion = 2;
+constexpr std::uint8_t kVersion = 3;
 constexpr std::size_t kHeaderSize = 20;
 constexpr std::size_t kRelaySize = 14;
 constexpr std::uint16_t kMaxAgentId = 0xFFFE;   // 0xFFFF 保留

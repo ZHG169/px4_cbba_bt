@@ -1,6 +1,6 @@
 # 機器狗（V60）端使用說明
 
-給伯宇（狗端）。2026-10-12 · 勝翔
+給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-04 更新：機間協定版本 3）
 
 **一句話**：main 上的 CBBA 節點已經照你 handoff（2026-10-11）的格式做好了。你的 `task_manager`、`mission.xml`、
 launch 指令、yaml 都不用改，只要**換掉三個套件、重新編譯**。
@@ -12,10 +12,13 @@ launch 指令、yaml 都不用改，只要**換掉三個套件、重新編譯**�
 你的 handoff 是對照 GitHub `dog-integration` 上 10/07 的程式（`uav_cbba`，機間協定版本 1）。之後 main 上已經改成：
 
 - `uav_cbba` 改名 `cbba_core`，節點是統一版（無人機和狗同一支），放在 `swarm_cbba`。
-- 機間協定改成**版本 2**（每筆任務帶 task_id、session 取代 seq_file、機號不限 1～8）。**版本 1 和 2 互相拒收**，全隊要一起換。
+- 機間協定改成**版本 2**（每筆任務帶 task_id、session 取代 seq_file、機號不限 1～8），2026-10-28 再升到**版本 3**
+  （只改補發：壓縮摘要 → 缺口請求 → 限速分批，弱網時流量不再隨已結束的任務數增加，`cbba_core/doc/protocol_v3_sync.md`）。
+  **版本 1、2、3 互相拒收**，全隊（無人機、狗）要用同一版的 `cbba_core`、`swarm_cbba` 編譯。
+  你的 BT 和 cbba_node 之間的話題、訊息、QoS 都沒有變，BT 不用改。
 - 你 handoff 的 patch 套不上 main（`uav_cbba` 已經不存在），**不用套**。
 
-格式（套件名、launch、yaml、話題、訊息、QoS）完全照你的；底下換成協定版本 2 的核心，分配行為有幾點不同（第 6 節）。
+格式（套件名、launch、yaml、話題、訊息、QoS）完全照你的；底下換成協定版本 3 的核心，分配行為有幾點不同（第 6 節）。
 
 ## 1. 取得程式
 
@@ -24,7 +27,7 @@ launch 指令、yaml 都不用改，只要**換掉三個套件、重新編譯**�
 | 套件 | 是什麼 |
 |---|---|
 | `ros2_ws/src/swarm_interfaces` | 訊息 v1.6＝你的 v1.2（RobotState 的 `mode`、TaskResult 的 `reason`）＋ `ManualOverride.srv`＋`FireDetection`（無人機用，你用不到） |
-| `ros2_ws/src/cbba_core` | CBBA 核心、機間協定版本 2、指派流程（不依賴 ROS） |
+| `ros2_ws/src/cbba_core` | CBBA 核心、機間協定版本 3、指派流程（不依賴 ROS） |
 | `ros2_ws/src/swarm_cbba` | 統一版 `cbba_node`、`launch/cbba.launch.py`、`config/cbba_v60.yaml`、`config/cbba_uav.yaml` |
 
 ```bash
@@ -149,7 +152,7 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 |---|---|
 | BT 收不到 `current_task`、或 CBBA 收不到 `robot_state` | `swarm_interfaces` 兩邊沒用同一版編譯（重編 task_manager）；`ROS_DOMAIN_ID` 不同；namespace 不同 |
 | 狗一直不出價 | `robot_state` 有沒有 2 Hz 在送、`agent_id` 是不是 50（不是會印「agent_id 是 …：略過」）、`mode` 是不是 0（AUTO） |
-| 看不到無人機（`收斂：…，0 個鄰居`） | 對方也要是 main 的 `swarm_cbba`（版本 1 會被拒收）；`mesh_ip`／`MESH_IP` 網卡對不對；multicast 能不能過 |
+| 看不到無人機（`收斂：…，0 個鄰居`） | 對方也要是 main 的 `swarm_cbba`（協定版本不同會被拒收，全隊要同一版）；`mesh_ip`／`MESH_IP` 網卡對不對；multicast 能不能過 |
 | 回報被拒（`回報拒絕：不是目前 current_task 上的任務`） | task_id 要是 `current_task` 最新那一則 |
 | 節點拒絕啟動（`already has a running cbba_node`） | 同機號的舊節點還在跑：`pkill -f cbba_node`，或換 `agent_id` |
 | 地面任務一直沒人接 | 狗的 `mode` 不是 AUTO、或這個任務在 60 s 排除期間（之前失敗過） |

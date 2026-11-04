@@ -24,7 +24,6 @@ ros2_ws/src/
 ├── uav_px4_bt/             無人機的 BT（正式 uav_task_manager_node＝伯宇骨架、備用 uav_bt_node）、避碰（avoidance：路權＋VO＋二階 CBF）、
 │                           flight_beacon 位置廣播
 ├── apriltag_fire_detector/ 下視相機 AprilTag 火情偵測 → /uavN/fire_detection（FireDetection）
-├── swarm_zenoh/            GCS ↔ 載具的白名單話題（zenoh-bridge-ros2dds，2026-10-21；獨立套件，見「GCS ↔ 載具：Zenoh」）
 └── px4_msgs/               由 docker/scripts/setup_px4_msgs.sh 下載（PX4 v1.17.0）
 ```
 
@@ -69,7 +68,13 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 | 封包格式 | `wire_io`、`wire_header`、`wire_agent_state`、`wire_cbba_state`、`wire_task_announce`、`wire_completion` | 只管位元組格式 |
 | CBBA 核心 | `cbba_agent`、`scoring`、`energy_model`、`types` | 17 條消解規則、bundle、出價 |
 
-## 機間通訊：協定版本 2（2026-10-09，使用者要求「每筆任務資料帶 task_id」）
+## 機間通訊：協定版本 3（2026-10-28；版本 2 是 2026-10-09，使用者要求「每筆任務資料帶 task_id」）
+
+**版本 3 只改補發**（使用者 2026-10-28 決定，設計在 `cbba_core/doc/protocol_v3_sync.md`）：版本 2 的補發是「round_key 不同就把所有
+已結束的任務各補一次」，流量和已結束的任務數成正比（弱網測試 70%：重開節點 13 kB/s、累積 1350 個任務 78 kB/s）。版本 3：
+CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的建立者送 GAP_REQUEST（流水號點陣圖）→ 對方只補缺的；同時直接推送最近
+`push_recent_sec` 內新增、結束的任務 → 用 SYNC_BATCH 分批、token bucket 限速（`repair_rate` 8 kB/s）。版本 2、3 互相拒收，
+全隊（含狗的 cbba_node）要一起重新編譯；cbba_node 的 ROS 話題、BT 都不受影響。下表其他項目照舊。
 
 整體說明在 `cbba_core/doc/protocol.md`，逐位元組格式在各 `wire_*.hpp` 開頭。**不相容於規格書**
 （`cbba_core/doc/spec/機間通訊封包規格_20261006.pdf`）：規格用 AGENT_STATE 的 z、y 陣列位置（uint8 任務編號）當全隊共用的
@@ -78,7 +83,7 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 
 | 封包 | 內容 |
 |---|---|
-| 表頭 20 B | magic 0x4342、version 2、type、sender_id u16、session_id u64、sequence u32、payload_length u16；**大端序**、逐欄位寫 |
+| 表頭 20 B | magic 0x4342、version 3（2026-10-28 前是 2）、type、sender_id u16、session_id u64、sequence u32、payload_length u16；**大端序**、逐欄位寫 |
 | AGENT_STATE（1） | 參與、遙測、飛行狀態有效、**真實的 armed／offboard／landed**、位置、電量、BT 的執行狀態（狀態、可否中斷、預估剩餘時間）、執行中／保留的任務與版本（有無用旗標）、路徑、鄰居清單；74 + 4L + 2K B；每 0.5 s |
 | CBBA_STATE（2） | round_key、exchange_step、stable_steps、snapshot_id／part_index／part_count、s（機號＋時間）、紀錄（task_id 4、winner_id 2、bid 4、assign_version 8、assignee_id 2、assign_state 1 共 **21 B**）；每 200 ms＋變動時；每批 ≤ 1200 B |
 | TASK_ANNOUNCE（3） | 任務定義（61 B），轉送 |
@@ -97,13 +102,13 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
 | 去重複的鍵 | （種類, origin_id, origin_session, origin_seq） | 轉送事件只處理一次 |
 | 重送 | **一律換新序號**；確認者「原樣回送」指決定不變 | 沿用舊序號時，多跳下第一次轉送掉了就會被轉送者當重複擋掉，永遠補不回來 |
 | 分批 | CBBA_STATE 每批帶完整的 s，**每批直接交給規則**；收斂判定、補發只用收齊的那一次；缺批等下一次 | 規則逐任務判斷；缺少的紀錄不能當成任務被刪 |
-| 沒有任務定義的紀錄 | 不暫存，靠對方補發（它看得到我的 round_key 和紀錄） | 200 ms 後下一次會再帶 |
+| 沒有任務定義的紀錄 | 不暫存，靠補發（摘要比對出缺口） | 200 ms 後下一次會再帶 |
 | 已停止參與的載具 | 收到的紀錄裡得標者是「已知停止參與」的鄰居時略過 | 晚到的訊息會把它寫回得標者，等 1.5 s 失聯才釋放（測試發現，版本 1 也有） |
 | 截止時刻 | 絕對時刻（ms，約 49.7 天循環） | 轉送／補發原封不動，期限不會被往後推 |
-| round_key | 已知任務（task_id）與是否結束的 CRC-32 摘要 | 不同就比對紀錄補發 |
+| round_key | 已知任務（task_id）與是否結束的 CRC-32 摘要 | 相同就不用比對摘要；開機同步也用它 |
 | exchange_step | 本機分配表變動次數 | 我們是非同步 CBBA，沒有「步」 |
 | s | 機號 + 系統時鐘 ms 低 32 位元 | 需要各機對時（chrony） |
-| 補發 | 摘要不同時補缺的 TASK_ANNOUNCE／TASK_CLOSE；每 5 s 保底重播一個任務。**不參與出價的節點照樣送紀錄（不送 s）**，收的那端只合併正式指派、不交給規則（2026-10-11 起，原本不送紀錄） | 晚起飛、重開機、飛出範圍再回來；停止參與時自己撤銷的指派要傳得出去（SITL 測試發現：飛行中關掉 PX4，任務卡住沒人接） |
+| 補發 | **版本 3（2026-10-28）**：壓縮摘要 → 缺口請求 → 限速的分批回覆（上面一段）；每 5 s 保底重播一個任務。**不參與出價的節點照樣送紀錄（不送 s）**，收的那端只合併正式指派、不交給規則（2026-10-11 起，原本不送紀錄） | 晚起飛、重開機、飛出範圍再回來；停止參與時自己撤銷的指派要傳得出去（SITL 測試發現：飛行中關掉 PX4，任務卡住沒人接） |
 | 開機同步 | 摘要和任一鄰居相同才送出自己建立的任務；1.5 s 沒鄰居＝單獨；5 s 對不上就開始 | 查出 BT 重開機後重用 task_id（不送出、記 `rejected_local_tasks`） |
 | 先到的 TASK_CLOSE | 任務還不認得時先暫存；執行機是自己也套用 | 補發時可能比任務先到；重開機後要知道自己完成過的任務 |
 | 已結束的任務 | 一直記著，不回收 | 忘記的話，斷線的那台補發時會把它加回來 |
@@ -240,27 +245,12 @@ DDS 不走 mesh（`.env` 的 `DDS_OVER_MESH=0`）：ROS 話題（robot_state、c
   mesh 的程式，協定版本 2 與 14601 的格式不變。代價：多一次機內 ROS（幾 ms）、要定 neighbors 話題、位置與速度的來源
   （PX4 或 px4_state_bridge）。
 
-## GCS ↔ 載具：Zenoh（2026-10-21，`swarm_zenoh`）
+## GCS ↔ 載具：Zenoh（2026-11-04 拔掉）
 
-來源：實驗規劃 PDF（`docs/reports/…_7.實驗規劃.pdf`）第一節「ROS 2 中間件避開 multicast」（Zenoh 或 FastDDS Discovery Server 二選一）
-與第三節 GCS 的後端橋接。PDF 假設 CBBA、黑板走 DDS 上 mesh；**我們的 DDS 風暴已經用「CBBA 走自訂 UDP、DDS 只在機內」解決**，
-所以 Zenoh 只用在 **GCS ↔ 載具**（GCS 不在任何載具的 DDS 裡，要靠它看狀態、下指令）；載具之間照舊是上一節的兩條 UDP，不經過 Zenoh。
-Discovery Server 用不到。說明在 `swarm_zenoh/README.md`。
-
-| 項目 | 做法 |
-|---|---|
-| 程式 | Eclipse 的 `zenoh-bridge-ros2dds` 1.10.1（`robot.Dockerfile` 已裝；ROS 官方只有 rmw_zenoh，會換掉整個中間件、PX4 的 XRCE-DDS 不能用）；`swarm_zenoh` 的 `zenoh_bridge` 依角色從白名單產生 bridge 設定 |
-| 連法 | GCS = router（聽 mesh 網卡，7447）；每台載具 = client、只連 GCS；關掉 Zenoh 的 multicast scouting；預設 tcp |
-| 白名單 `config/whitelist.yaml` | 載具 → GCS：`robot_state`（限 2 Hz）、`current_task`、`task_closed`、`task_orphaned`；GCS → 載具：`emergency_stop`、`manual_override`（service）。不放 CBBA、位置廣播、`fmu/*`、影像 |
-| `--dds-ip` | bridge 的 DDS 綁**機內網卡**，不能是 mesh（否則 DDS 又漏到 mesh，白名單再嚴也沒用） |
-| 測試 | `ros2 run swarm_zenoh selftest`（同一台用 domain 90、91 假裝兩台：白名單內送得到、白名單外和別的 namespace 送不到）；模擬：`itest.py demo --interactive --no-patrol` 之後 `docker/scripts/zenoh_sim.sh start／status／logs／stop`（假狗的 bridge 放 uav1 容器） |
-
-使用者 2026-10-23 的理解：Zenoh 就是 GCS 與載具之間的連線，主要調白名單。白名單調不到、要另外處理的：
-- GCS 插任務：`new_task` 的 task_id 建立者要是自己，不能只把 `new_task` 加進白名單 → 要先決定 GCS 是否跑 cbba_node（「待決定」）。
-- PDF 的 CBBA 監控面板（得標者、出價、收斂）：沒有對應的 ROS 話題（出價表只在 log）。可以讓 cbba_node 發摘要話題再加進白名單，
-  或 GCS 直接聽 UDP 14600（GCS 在 mesh 上，不多流量）。
-- 全體急停：狗是全域 `/emergency_stop`、無人機是 `/<ns>/emergency_stop`，要和伯宇統一；單機返航沒有話題；人工指派延遲只在 BT 的 log。
-- 實機要量：tcp 在高掉包時一個封包卡住會拖住後面的；GCS 是唯一 router，DTC 斷線後能否自動重連；CBBA 本身用 multicast，DTC 多跳怎麼處理 multicast 要確認。
+2026-10-21 依實驗規劃 PDF 做過 `swarm_zenoh`（`zenoh-bridge-ros2dds` 1.10.1 的白名單、GCS = router 的星狀、selftest、
+`docker/scripts/zenoh_sim.sh`、`robot.Dockerfile` 裝 bridge），10/26 selftest PASS。**使用者 2026-11-04：用不到，全部拔掉**
+（套件、腳本、Dockerfile 那段、README 說明）。要再用時從 git `ec23b01` 拿回（`git checkout ec23b01 -- ros2_ws/src/swarm_zenoh
+docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插任務、CBBA 監控、全體急停仍見「待決定」。
 
 ## 無人機 BT：改用伯宇的骨架（2026-10-13，完成；SITL itest uav 6／6、demo 6／6）
 
@@ -318,7 +308,7 @@ Discovery Server 用不到。說明在 `swarm_zenoh/README.md`。
 | 模擬環境 | docker（sim、uavN、gcs），DDS 只在機內；`fire_site`、`patrol_site`、`demo_site`（±22 m 展示用）、**`yard`**（伯宇的變電所 100 × 80 m，10/24；出生在起降板 (−40, −30) 起每 5 m、巡檢高度 8 m）；Gazebo 視窗設定 `docker/gz/gui/cbba_gui.config`（網格、關陰影、俯瞰鏡頭）；錄影用場景的俯瞰攝影機；假狗 `docker/scripts/fake_dog.py`（sim，Gazebo 橘色方塊替身）；火點 `models/fire_block`＋tag 101（`patrol_scenario.sh fire-at`） |
 | 自動測試 | `docker/itest`：comm（C0～C8）、uav（U1～U6）、loss（掉包梯度＋`plot_loss.py`）、demo（週計畫流程＋假狗，D1～D6；Gazebo 錄影＋俯視動畫 `animate_demo.py` → MP4，要主機 ffmpeg；`--executor` 預設 task_manager）；`swarm_cbba/test/g2_e2e.sh`（伯宇的 T1～T10＋E1～E4＋DEMO3，58 項） |
 | 模擬端情境 | **主要展示：`itest.py demo --world yard --scenario assign_random --seed 7`**（10/24 定稿，3 m/s）：G1～G3 固定任務、M1 人工指派（路上或旁邊起火）、T1 放在 M1 懸停那台的後方（航線經過它 → 避碰，報告 X1）、T2 隨機（同一點起火）。舊的 `manual_fire`（demo_site，10/21 SITL 跑通）照樣可以跑；3 隻假狗；出價表 `bids.*`；2D 動畫的圖示照地圖比例、人工指派標 M1、M2…、狗標 dog1～dog3 |
-| GCS ↔ 載具 | **10/26 定案用 Zenoh、星狀**：GCS 是 router，每台 agent（無人機、狗）都直接當 client 連 GCS，不經過別台轉（使用者確認）。比較過共用內網（DDS 直接跨機器：路由、multicast、多網卡宣告會造成「A 看到 B、B 看不到 A」，頻寬最差）、Fast DDS Discovery Server（只解決探索，資料還是整包跨 mesh、路由不對稱照樣單向、只能 Fast DDS），Zenoh 頻寬最省、可選話題、一條 TCP 雙向。`swarm_zenoh`（白名單，10/21）；selftest、`zenoh_sim.sh` 已有；10/25 加的 `--relay`（中繼＝router）留著但不用，selftest 預設只測直接連（`--all` 才測中繼）。**10/26 使用者在 uav 容器跑 selftest：PASS**（直接連 GCS）。10/25 在乾淨容器（LOCAL_IPS=127.0.0.1）跑時 bridge 找不到 Fast DDS 節點，是那個容器的網路設定和實際環境不同，不是程式的問題（試過的 SYSTEM_DEFAULT 已還原，不要再加）。下一步：`zenoh_sim.sh start` 接整套，在 gcs 容器看各台的話題、下急停與人工指派。GCS 的介面（插任務、CBBA 監控、全體急停）還沒做 |
+| GCS ↔ 載具 | 10/21 做過 Zenoh 星狀（10/26 selftest PASS），**11/04 使用者決定拔掉**（見「GCS ↔ 載具：Zenoh」）；GCS 的介面（插任務、CBBA 監控、全體急停）還沒做 |
 | 機器狗端 | 假狗（真 UDP；demo 有 cbba_node＋`fake_dog.py` 執行者）正確；**還沒在真的狗上測**，伯宇還在用協定版本 1（互相拒收），要等他換成 main |
 
 最近的結果：2026-10-24 23:59 itest demo `--world yard --scenario assign_random --seed 7`（`docker/itest/out/20261024_235929_demo`，3 m/s、二階 CBF）
@@ -371,7 +361,7 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
 | BT 的 UDP | 2026-10-13 決定先維持在 BT（`flight_beacon`） |
 | 平板／GCS 的角色 | 要不要跑 cbba_node、能否建任務；部分保留可用容量 Q（討論過、沒實作）。Zenoh 白名單（10/21）只解決連線，GCS 插任務仍要先定這項 |
 | 急停話題 | 狗 `/emergency_stop`（全域）、無人機 `/<ns>/emergency_stop`；PDF 要「全體急停」＋單機返航，要和伯宇統一 |
-| GCS 的 CBBA 監控 | cbba_node 發摘要話題（經 Zenoh）或 GCS 直接聽 UDP 14600 |
+| GCS 的 CBBA 監控 | cbba_node 發摘要話題或 GCS 直接聽 UDP 14600（Zenoh 11/04 拔掉） |
 | 取消的授權管理端 | `cancel_authorities` 目前是空的 |
 | 電池權重測試的設定 | 續航、插入時段、耗電誤差要多緊（`docs/sim_scenario_plan.md` 第七節） |
 | 失聯的那台「不接新的」 | 各機分不出自己是不是失聯的那台，沒有另外實作 |
@@ -466,6 +456,13 @@ uav 6／6；loss 30% 時 5 s 內收斂 95%（中位數 0.65 s）、50% P90 2.9 s
   `cbf_speed_args`（3 m/s：miss 2.1、exit 2.6）；`--speed` 預設 3 m/s。2D 動畫：圖示照地圖比例（`ICON_M` 1.6 m）、地圖加大、
   箭頭間隔跟著放大、狗叫 dog1～dog3（依機號排序）。使用者 10/24：避碰過程不在動畫上標註。
   CBBA 看距離，兩台在飛行中交叉的分配幾乎不會出現（交叉時對調一定更近）→ 用「航線經過不會讓開的懸停無人機」製造交會。
+- 2026-11-03～04：協定版本 3 的弱網量測（`docker/itest/out/20261103_163735_loss`，3 台、每次 9 個任務、每個掉包率 20 次）：
+  0～70% 每次都收斂（5 s 內 100%）、重複 0、任務覆蓋 100%；每台平均 3 個，掉包越高越不平均（70% 時 1～5 個，13／20 次不是 3/3/3）——
+  建立者先搶＋出價看邊際成本（順路的任務幾乎不多花）＋ assign_hold 0.4 s 後鎖定，**不是 bug**；報告的「完全正確」改稱「和最近分配一致」。
+  完成 → 全隊確認 70% 時 11 s ≈ `completion_retry` × `completion_max`。mesh 13.7 → 4.3 kB/s（0 → 70%）。
+  週計畫、實驗規劃都沒有「每台最少分到幾個」的標準（實驗規劃的是任務完成覆蓋率 100%）；實驗規劃的階段 1 不是使用者負責。
+  加：`plot_tasks.py`（每台分到幾個的長條圖）、`plot_loss.py` 第四張圖（完成 → 全隊確認）與依 `node_params` 分線、
+  itest `--node-param`、comm 的 **C9 100% 斷網**、cbba_node 參數 `completion_retry`、`completion_max`。
 
 ## 新的模擬端測試：指派＋火警＋插入（2026-10-20；10/21 SITL 跑通，狀態監控還沒做）
 

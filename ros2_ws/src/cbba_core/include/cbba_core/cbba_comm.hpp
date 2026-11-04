@@ -1,4 +1,4 @@
-// CBBA 的機間協定層（不依賴 ROS，也不碰 socket）：協定版本 2（2026-10-09）
+// CBBA 的機間協定層（不依賴 ROS，也不碰 socket）：協定版本 3（2026-10-28；版本 2 是 2026-10-09）
 //
 // 把 CbbaAgent 接上機間封包（格式見 wire_*.hpp，整體說明見 doc/protocol.md）。
 // 呼叫端只負責：收到的封包交給 receive()，poll() 回傳的封包廣播出去。
@@ -16,14 +16,18 @@
 //   AGENT_STATE   每 status_period（0.5 s）：位置、電量、真實的 armed／offboard／landed、鄰居、路徑
 //   CBBA_STATE    每 200 ms；表有變動時立即；和鄰居的得標者不一致時每 50 ms（同一步最多 60 次）。
 //                 任務多時分批，每批不超過 max_packet（1200 B）
-//   TASK_ANNOUNCE 建立時一次。補發：鄰居的 round_key 和我不同時，比對它上一次收齊的 CBBA_STATE，
-//                 補它缺的任務定義或 TASK_CLOSE（每個每秒最多一次）；不參與出價的鄰居（還在地面、
-//                 剛開機）也附紀錄、只補它缺的（2026-10-11 起；它還什麼都不知道時就是全部補一次）。保底：每 5 s 輪流重播一個已知任務
+//   TASK_ANNOUNCE 建立時一次。保底：每 5 s 輪流重播一個已知任務
+//   補發（版本 3，2026-10-28，見 doc/protocol_v3_sync.md）：
+//                 CBBA_STATE 帶壓縮摘要（每個建立者一筆），收到的一方逐筆比對，某個建立者不同就送
+//                 GAP_REQUEST（那段流水號的點陣圖）給那個鄰居，鄰居只把我缺的放進補發佇列；同時把自己那個建立者
+//                 最近 push_recent_sec 內新增、結束的任務直接放進佇列（不等請求）。佇列用 SYNC_BATCH 分批送出，
+//                 token bucket 限速（repair_rate）。版本 2 是「round_key 不同就把所有已結束的任務各補一次」，
+//                 流量和已結束的任務數成正比（弱網測試 13 → 78 kB/s）
 //   完成          COMPLETION → COMPLETION_ACK → TASK_CLOSE（見 wire_completion.hpp）
 //
 // 收到 CBBA_STATE
 //   每一批都直接交給 CBBA 規則（規則逐任務判斷；每批都帶完整的 s）。還不認得的任務略過，不暫存：
-//   200 ms 後的下一次會再帶，任務定義由對方補發（它看到我的 round_key 不同、紀錄裡沒有這個任務）。
+//   200 ms 後的下一次會再帶，任務定義靠補發（摘要比對出缺口）。
 //   收斂判定、補發只用收齊的那一次。缺批時等下一次，不會把缺少的紀錄當成任務被刪掉。
 //
 // 正式指派與回報（2026-10-09）
@@ -72,6 +76,7 @@
 #include "cbba_core/wire_cbba_state.hpp"
 #include "cbba_core/wire_completion.hpp"
 #include "cbba_core/wire_header.hpp"
+#include "cbba_core/wire_sync.hpp"
 #include "cbba_core/wire_task_announce.hpp"
 
 namespace cbba_core
@@ -92,7 +97,13 @@ struct CommConfig
   double takeover_patrol{30.0};   // 失聯接手：其他任務（巡檢）
   double completion_retry{1.0};   // 完成宣告的重送間隔
   int completion_max{10};         // 完成宣告最多重送幾次
-  double resend_gap{1.0};         // 補發同一個 TASK_ANNOUNCE／TASK_CLOSE 的最短間隔
+  double resend_gap{1.0};         // 同一個任務重送（保底重播、直接推送）的最短間隔
+  // 補發（版本 3，doc/protocol_v3_sync.md）
+  double digest_period{1.0};      // 收斂後多久在 CBBA_STATE 帶一次摘要（不一致時每次都帶）
+  double gap_request_gap{0.5};    // 同一個（鄰居, 建立者）的缺口請求最短間隔
+  double push_recent_sec{10.0};   // 摘要不同時，直接推送這麼久之內新增、結束的任務
+  double repair_rate{8000.0};     // 補發（SYNC_BATCH）的平均上限（B/s）
+  double repair_burst{2400.0};    // token bucket 的容量（B）；至少一個 max_packet
   double replay_period{5.0};      // 保底重播的間隔
   double reevaluate_period{1.0};  // 依目前位置、電量重新評估手上的任務
   int stable_steps{3};            // 收斂判定：連續幾個週期分配不變
@@ -173,6 +184,10 @@ struct NeighborInfo
   int stable_steps{0};
   bool has_view{false};
   std::map<TaskId, AgentId> view;   // 上一次收齊的：它認得、進行中的任務 → 得標者
+  // 摘要（版本 3）：digest_key 是帶摘要那一則的 round_key；它最新的 round_key 等於 digest_key 時摘要才是最新的
+  bool has_digest{false};
+  std::uint32_t digest_key{0};
+  std::map<std::uint16_t, wire::DigestEntry> digest;   // 建立者 → 摘要
   std::uint16_t pending_snapshot{0};
   std::uint8_t pending_count{0};
   std::set<std::uint8_t> pending_parts;
@@ -212,6 +227,12 @@ struct CommStats
   int aborted_completions{0};   // 因為指派過期而作廢的完成宣告
   int rejected_closes{0};       // 不合權限的 TASK_CLOSE（舊版本的完成、沒有授權的取消）
   int takeovers{0};             // 失聯接手：撤銷失聯持有者的鎖定
+  // 補發（版本 3）
+  int gap_requests{0};          // 送出的缺口請求
+  int gap_answers{0};           // 回答了的缺口請求（有東西可補）
+  int repair_items_sent{0};     // SYNC_BATCH 送出的筆數（任務定義＋結束紀錄）
+  int repair_items_applied{0};  // 收到的 SYNC_BATCH 筆數
+  int repair_deferred{0};       // 補發額度不夠、留到下次的次數
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -294,7 +315,10 @@ public:
   const std::map<AgentId, NeighborInfo> & neighbors() const {return neighbors_;}
   const CommStats & stats() const {return stats_;}
   wire::AgentStateBody agentStateBody(double now) const;
-  wire::CbbaStateBody cbbaStateBody(double now) const;   // 分批之前的完整內容
+  wire::CbbaStateBody cbbaStateBody(double now) const;   // 分批之前的完整內容（不含摘要）
+  // 壓縮摘要（版本 3）：建立者 → 最小、最大流水號、知道幾個、已結束幾個、CRC
+  std::map<std::uint16_t, wire::DigestEntry> digestMap() const;
+  std::size_t repairQueued() const {return repair_open_.size() + repair_closed_.size();}
 
 private:
   struct PendingTask
@@ -327,9 +351,26 @@ private:
   void onCompletionAck(const Bytes & bytes, double now);
   void onTaskClose(const Bytes & bytes, double now);
   void relay(const Bytes & bytes);
-  void resendMissing(const NeighborInfo & n, double now);
+  void applyAnnounce(const wire::TaskAnnounceBody & b, double now);
+  void applyClose(const wire::TaskCloseBody & b, double now);
+
+  // 補發（版本 3）
+  bool wantDigest(double now) const;
+  void compareDigest(AgentId neighbor, const NeighborInfo & n, double now);
+  void sendGapRequest(AgentId target, std::uint16_t creator, std::uint16_t lo, std::uint16_t hi, double now);
+  void onGapRequest(const Bytes & bytes);
+  void onSyncBatch(const wire::Header & h, const Bytes & bytes, double now);
+  struct RepairNeed
+  {
+    bool announce{false};
+    bool close{false};
+  };
+  void queueRepair(TaskId id, bool announce, bool close);
+  void drainRepair(double now);
+  wire::SeqState seqState(TaskId id) const;
 
   // 任務
+  wire::TaskAnnounceBody announceBody(TaskId id) const;
   bool assign(const Task & task, double now);
   bool addTask(const wire::RelayHeader & origin, const Task & task, double now);
   void resendTask(TaskId id, double now);
@@ -371,6 +412,17 @@ private:
   // 比任務定義先到的 TASK_CLOSE（補發時兩者延遲不同），等任務到了再套用
   std::map<TaskId, wire::TaskCloseBody> early_closes_;
   std::map<std::pair<int, TaskId>, double> last_resend_;
+  // 補發（版本 3）
+  std::map<TaskId, double> added_at_;    // 本機知道這個任務的時刻（直接推送用）
+  std::map<TaskId, double> closed_at_;   // 本機知道這個任務結束的時刻
+  std::map<std::pair<AgentId, std::uint16_t>, double> last_gap_request_;   // (鄰居, 建立者) → 上次請求
+  std::map<std::pair<AgentId, std::uint16_t>, std::uint32_t> gap_cursor_;  // 範圍太大時下次從哪個流水號問
+  std::map<TaskId, RepairNeed> repair_open_;     // 補發佇列：進行中的任務（先送）
+  std::map<TaskId, RepairNeed> repair_closed_;   // 已結束的
+  double repair_tokens_{0.0};
+  double repair_last_{-1.0};
+  double last_digest_sent_{-1e9};
+  std::uint32_t last_digest_key_{0};
   std::map<AgentId, NeighborInfo> neighbors_;
   std::map<AgentId, std::uint32_t> core_seq_;   // 交給核心的訊息序號（封包層已過濾舊封包）
 

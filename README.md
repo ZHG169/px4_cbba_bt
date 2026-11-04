@@ -22,13 +22,10 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 
 - 控制路徑（節點 → XRCE Agent → PX4）走每台自己的線，**不經過 mesh**；**DDS 只在機內**。
 - 機間只有兩條 UDP multicast：
-  - **CBBA 協定版本 2**（`cbba_node`，port 14600）：每筆任務資料帶 task_id，不相容於「機間通訊封包規格」2026-10-06，
-    見 `ros2_ws/src/cbba_core/doc/protocol.md`。
+  - **CBBA 協定版本 3**（`cbba_node`，port 14600）：每筆任務資料帶 task_id，不相容於「機間通訊封包規格」2026-10-06，
+    見 `ros2_ws/src/cbba_core/doc/protocol.md`；版本 3（2026-10-28）只改補發，見 `cbba_core/doc/protocol_v3_sync.md`。
   - **飛行層位置廣播**（無人機 BT 的 `flight_beacon`，port 14601，10 Hz）：給 CBF 避碰用的鄰機位置與速度。
 - 用 `docker/scripts/mesh_tc.sh` 模擬丟包與延遲。
-- **GCS ↔ 載具**（2026-10-21）：Zenoh 星狀（`zenoh-bridge-ros2dds`，`swarm_zenoh`）。GCS 是 router，每台無人機、狗直接當 client
-  連 GCS，只轉白名單裡的話題（robot_state 限 2 Hz、current_task、task_closed、task_orphaned、emergency_stop、manual_override）；
-  載具之間不經過 Zenoh。模擬裡用 `docker/scripts/zenoh_sim.sh start` 一次開好，見 `ros2_ws/src/swarm_zenoh/README.md`。
 
 每台載具（無人機、機器狗）跑**同一個 `swarm_cbba/cbba_node`**（`agent_type: UAV／UGV`），它不依賴 PX4、BT、Nav2，
 只透過固定格式的話題（`swarm_interfaces`）和機上的 BT 溝通：
@@ -36,7 +33,7 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 ```
             ┌──────────────── 每台載具的機上電腦 ────────────────┐
  其他載具 ◄═UDP═► cbba_node ◄─ robot_state ── 狀態轉接（無人機：px4_state_bridge）
- （協定版本 2）       │  ▲
+ （協定版本 3）       │  ▲
    current_task       │  │ task_result、new_task（例如火警）
    task_closed        ▼  │
    task_announced*     BT（無人機：uav_px4_bt；狗：伯宇的 task_manager）→ PX4／Nav2
@@ -82,8 +79,7 @@ docker/                       模擬環境（Dockerfile、啟動腳本、Fast DD
 │                             （yard＝伯宇的變電所 100 × 80 m，障礙物在 yard_env.sdf.inc）
 ├── itest/                    自動整合測試（comm、uav、loss、demo）、情境檔（scenarios/）、手動插入（insert.py）
 │                             、出價表（bid_table.py）→ docker/itest/README.md
-└── scripts/                  cbba_uav.sh、px4_sitl.sh、gz_bridge.sh、cbba_task.sh、patrol_scenario.sh、fake_dog.py、mesh_tc.sh、
-                              zenoh_sim.sh…
+└── scripts/                  cbba_uav.sh、px4_sitl.sh、gz_bridge.sh、cbba_task.sh、patrol_scenario.sh、fake_dog.py、mesh_tc.sh…
 ros2_ws/src/
 ├── swarm_interfaces/         ROS 訊息（Task、RobotState、TaskResult…）→ swarm_interfaces/README.md
 ├── cbba_core/                CBBA 核心、機間封包、協定層、指派流程、離線模擬、單元測試（不依賴 ROS）→ cbba_core/README.md
@@ -92,8 +88,7 @@ ros2_ws/src/
 ├── px4_waypoint_node/        takeoff_hover、task_executor（簡易執行者）、px4_state_bridge（PX4 → RobotState）
 ├── uav_px4_bt/               無人機的 BT（正式、備用）、避碰（路權＋VO＋二階 CBF）、運動平滑層、位置廣播
 │                             → uav_px4_bt/doc/parameters.md；tools/avoidance_compare（新舊避碰的離線對照）
-├── apriltag_fire_detector/   下視相機的 AprilTag 偵測 → /uavN/fire_detection
-└── swarm_zenoh/              GCS ↔ 載具的 Zenoh 白名單、bridge 啟動、selftest → swarm_zenoh/README.md
+└── apriltag_fire_detector/   下視相機的 AprilTag 偵測 → /uavN/fire_detection
 ```
 
 `px4_msgs` 不在 repo 裡，由 `docker/scripts/setup_px4_msgs.sh` 依 PX4 版本（v1.17.0）下載。
@@ -116,7 +111,7 @@ cd docker
 setup_px4_msgs.sh                     # 第一次：下載 px4_msgs
 cd ~/CBBA_BT/ros2_ws
 colcon build --symlink-install --packages-select \
-  swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector swarm_zenoh
+  swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector
 source install/setup.bash
 ```
 
@@ -133,6 +128,7 @@ python3 docker/itest/itest.py demo --scenario cbba_overrun # CBBA 正常分配�
 # T1 放在 M1 懸停那台的後方（看避碰，報告 X1）、T2 隨機插入（同一點起火）
 python3 docker/itest/itest.py demo --world yard --scenario assign_random --seed 7
 python3 docker/itest/itest.py demo --scenario manual_fire --seed 7   # 人工指派＋火警＋插入（demo_site）
+python3 docker/itest/itest.py demo --dog bt                          # 狗換成伯宇的 BT（task_manager）＋假 Nav2（先在 uav1 跑 dog_bt.sh build）
 ```
 
 demo 的輸出在 `docker/itest/out/<時間>_demo/`：報告、Gazebo 俯視錄影、2D 動畫、下視相機錄影（`demo_cameras.mp4`）、
@@ -145,6 +141,17 @@ demo 的輸出在 `docker/itest/out/<時間>_demo/`：報告、Gazebo 俯視錄�
 python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8
 # terminal 2：輸入 t（範圍內隨機任務點）、t x y、tf（任務點＋起火）、f（只起火）、l、q
 python3 docker/itest/insert.py
+```
+
+**弱網量測（第 5 週，不開 PX4、BT）**：
+
+```bash
+python3 docker/itest/itest.py loss                          # 掉包 0／10／30／50／70%、延遲 50±30 ms，每個掉包率 20 次、每次 9 個任務
+python3 docker/itest/itest.py loss --levels 30,50,70 --node-param completion_retry=0.5   # 換 cbba_node 參數比較
+python3 docker/itest/itest.py comm --only C9                # 100% 斷網：各自做完手上的、恢復後一致
+# 畫圖（sim 容器有 matplotlib）：多個目錄一起給時，參數不同的各畫一條線
+docker exec -w /home/ncrl/CBBA_BT/docker/itest cbba_sim python3 plot_loss.py  /home/ncrl/CBBA_BT/docker/itest/out/<目錄>…  # loss_sweep.png（＋loss_params.png）
+docker exec -w /home/ncrl/CBBA_BT/docker/itest cbba_sim python3 plot_tasks.py /home/ncrl/CBBA_BT/docker/itest/out/<目錄>…  # loss_tasks.png（每台分到幾個）
 ```
 
 **4. 手動開 PX4 SITL**
@@ -170,23 +177,26 @@ ros2 run cbba_core cbba_sim run $SCN/fire_3uav.csv --loss 0 --out /tmp/fire_3uav
 ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points.csv --out /tmp/insert
 ```
 
-## 目前進度（2026-10-27）
+## 目前進度（2026-11-04）
 
 | 項目 | 狀態 |
 |---|---|
 | PX4 SITL＋XRCE-DDS 模擬環境（多台）、mesh＋tc 弱網 | ✅ |
 | CBBA 核心（17 條消解規則、連鎖退標、電池計分）＋單元測試 | ✅ |
-| 機間通訊協定版本 2、協定層、UDP（擴散、完成確認、失敗交回、失聯接手、重開機、鎖定、指派版本） | ✅ itest comm；30% 掉包 5 s 內收斂 95% |
+| 機間通訊協定版本 2、協定層、UDP（擴散、完成確認、失敗交回、失聯接手、重開機、鎖定、指派版本） | ✅ itest comm |
+| **協定版本 3**（10/28）：補發改成壓縮摘要 → 缺口請求 → 限速分批，弱網流量不再隨已結束的任務數增加 | ✅ 單元測試、itest loss；**和版本 2 互相拒收，全隊（含狗）要一起重新編譯** |
+| **第 5 週弱網量測**（11/03～04，3 台、每次 9 個任務、每個掉包率 20 次） | ✅ 30% 掉包 5 s 內收斂 100%（目標 ≥ 95%）；0～70% 任務都有人接、全部做完，重複認領只有 70% 一次（40 ms 內自己讓掉）；每台平均 3 個，掉包越高越不平均（70% 時 1～5 個）；完成 → 全隊確認 30% 1.3 s、70% 11 s（約 `completion_retry` × 10 次，改 0.5 s 時減半）；mesh 4～14 kB/s／台。70% 沒有通過標準，是壓力測試 |
+| **100% 斷網**（itest comm C9） | ✅ 斷網中手上的任務照樣拿著、做完本機確認、自己建的自己接；恢復後 0.1 s 全隊一致、沒有重複 |
 | 統一版 cbba_node（無人機、機器狗共用，照機器狗端介面） | ✅ `g2_e2e.sh`；全隊火點去重複（`task_announced`，只有無人機發） |
 | 無人機 BT（照機器狗端骨架）：起飛、巡檢、火警懸停監控、路過發現轉向、回起飛點、低電量返航 | ✅ itest uav 6／6、demo 全過 |
 | 避碰：CPF → CBF（10/14）→ **預測衝突＋路權＋VO＋二階 CBF**（10/24 定案） | ✅ SITL yard 3 m/s：航線經過懸停的無人機時 VO 繞過、最近 2.25 m、不停頓；`test_avoidance` 15 項 |
 | AprilTag 火情偵測、Gazebo 場景（fire_site、patrol_site、demo_site、yard）、俯視錄影、下視相機錄影 | ✅ |
 | 人工指派（模擬平板 `manual_override`）、`manual_fire`／`assign_random` 情境、出價表 | ✅ itest demo 全過（10/21、10/24） |
-| GCS ↔ 載具：Zenoh 星狀＋白名單（`swarm_zenoh`） | ✅ selftest（10/26）；接整套模擬、GCS 插任務／CBBA 監控／全體急停 ⏳ |
 | 動態重新分配（執行超時交還、PX4 斷線接手） | ✅ itest U6、`--scenario cbba_overrun` |
 | 展示與測試工具：情境檔、兩個 terminal 手動／隨機插入、俯視動畫（電量長條）、D7 CBF 距離 | ✅ |
 | 無人機被人工接管（切出 offboard）時停止出價、交還任務 | ✅ 單元測試、SITL（10/17：分得出人接管和 PX4 失效保護，切回後重新得標完成） |
-| 機器狗 | 假狗（`fake_dog.py`）✅；真的 V60 ⏳ 等伯宇換成協定版本 2 |
+| 機器狗 | 假狗（`fake_dog.py`）✅；伯宇的 BT 在模擬裡跑過（`--dog bt`，10/27，協定版本 2）；真的 V60 ⏳ 等伯宇換成 main（協定版本 3），說明在 `swarm_cbba/README_v60.md` |
+| GCS ↔ 載具 | 10/21 做過 Zenoh 白名單，11/04 拔掉（用不到；要再用從 commit `ec23b01` 拿回）；GCS 的插任務、監控、全體急停 ⏳ |
 | Nav2 接入模擬（伯宇的 task_manager＋Nav2 取代假狗） | ⏳ 規劃見 `docs/nav2_integration_plan.md` |
 | 能量模型校正（實機 ulog）、Jetson、實機 mesh | ⏳ |
 
