@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""畫 itest loss（第 5 週弱網量測）的結果：掉包率對 5 s 收斂率、收斂時間、完成 → 全隊確認、mesh 頻寬
-（四張圖、各自一個 y 軸）。
+"""畫 itest loss（第 5 週弱網量測）的結果（2026-11-09 照週計畫重畫）：
+  loss_sweep.png（主圖，簡報第 7 頁）：5 s 內收斂率｜收斂時間 Median／P90（5 s 門檻虛線）｜每台 TX、重傳 TX（kB/s）
+  loss_backup.png（備用）：完成 → 全隊確認、網卡收＋送
+收斂時間 = 每個任務只剩一位持有者的時刻 − 任務建立的時刻；每台 TX = Σ 各台 cbba_node 送出位元組 ／（台數 × 10 s），
+只算 CBBA（UDP 14600），注入任務後固定 10 s，送進 UDP 之前（tc 丟掉的也算）。重傳 = CBBA_STATE 的快速重送、
+任務定義與結束的重送、完成宣告第 2 次以後、缺口請求、補發批次（cbba_comm.hpp 的 TxKind）。
+原本的「網卡收＋送」會隨掉包下降（RX 少了、tc 丟掉的 TX 也不算），不好解釋，移到備用圖。
 
   python3 docker/itest/plot_loss.py docker/itest/out/<時間>_loss     → 同目錄的 loss_sweep.png
-  python3 docker/itest/plot_loss.py <目錄 A> <目錄 B> <目錄 C>         → 第一個目錄的 loss_sweep.png、loss_params.png
+  python3 docker/itest/plot_loss.py <目錄 A> <目錄 B> <目錄 C>         → 第一個目錄的 loss_sweep.png、loss_backup.png、
+                                                                      loss_params.png
 
 多個目錄時：cbba_node 參數（itest 的 --node-param，csv 的 node_params）一樣的合併，不一樣的各畫一條線
 （例如比較 resend_gap、completion_retry；最多 4 組），另外畫 loss_params.png（各組都有的掉包率上，
@@ -106,6 +112,34 @@ def stats(levels, key):
     return out
 
 
+CENSOR = 10.0     # 每次試驗等收斂的上限（itest 的 window）：沒收斂的當成 > 10 s
+
+
+def conv_stats(levels):
+    """收斂時間的 (中位數, P90)，**全部試驗**都算（2026-11-09：原本只算有收斂的，70% 時左圖 90% 但 P90 只有 2.8 s，
+    兩張圖對不上）：10 s 內沒收斂（逾時）的記成 CENSOR = 10 s，排序時放在同樣 10 s 的已收斂試驗之後。
+    回傳的每個值是 (秒, 是不是取到逾時的試驗)；取到逾時的畫空心點、標「timeout」"""
+    out = {}
+    for l, rows in levels.items():
+        xs = sorted((float(r["conv_s"]), 0) if r.get("conv_s") else (CENSOR, 1) for r in rows)
+        pick = lambda p: xs[min(len(xs) - 1, int(p * len(xs)))] if xs else None
+        out[l] = tuple((v[0], bool(v[1])) if v else None for v in (pick(0.5), pick(0.9)))
+    return out
+
+
+def conv_line(ax, pts, color, label):
+    """收斂時間的線：取到逾時試驗的點（記成 10 s）畫空心、標「timeout」"""
+    pts = [(x, v) for x, v in pts if v is not None]
+    if not pts:
+        return
+    ax.plot([x for x, _ in pts], [v[0] for _, v in pts], color=color, linewidth=2, label=label)
+    for x, (y, timeout) in pts:
+        ax.plot([x], [y], marker="o", markersize=8, color=color, markerfacecolor=SURFACE if timeout else color)
+        if timeout:
+            ax.annotate("timeout", (x, y), textcoords="offset points", xytext=(0, 8), ha="center", color=color,
+                        fontsize=8)
+
+
 def line(ax, pts, color, label=None, style_="-"):
     pts = [(x, y) for x, y in pts if y is not None]
     if pts:
@@ -146,6 +180,17 @@ def bars(groups, bw, L, name, out):
     print(out)
 
 
+# 主圖的標籤（2026-11-09，週計畫第 5 週的兩張核心圖＋5 s 收斂率；照簡報用英文）
+MAIN = dict(loss="Packet Loss (%)", rate_t="Converged within 5 s (no duplicate claims)", rate_y="Success rate (%)",
+            target="target 95% (at 30% loss)", conv_t="CBBA convergence time under packet loss",
+            conv_y="Convergence Time (s)", gate="5 s acceptance threshold",
+            tx_t="CBBA transmission overhead under packet loss", tx_y="Per-vehicle TX bandwidth (kB/s)",
+            total="Total TX (median)", retry="Retry TX (median)", no_tx="no TX data in trials.csv\n(rerun loss after 2026-11-09)",
+            scope="CBBA only (UDP 14600), 10 s window, {n}",
+            all_trials="{n}; timeout trials recorded as 10 s",
+            retry_in_total="Retry TX is included in Total TX.")
+
+
 def main():
     dirs = sys.argv[1:]
     if not dirs:
@@ -155,52 +200,88 @@ def main():
         sys.exit(f"參數組合太多（{len(groups)} 組，最多 {len(SERIES)} 組）：分開畫")
     bw = bandwidth(dirs)
     L = LABELS[pick_font()]
+    M = MAIN
     single = len(groups) == 1
     name = lambda g: g or L["default"]
     loss = sorted({l for lv in groups.values() for l in lv})
     n = [len(rows) for lv in groups.values() for rows in lv.values()]
+    n_txt = f"n = {min(n)}" if min(n) == max(n) else f"n = {min(n)}-{max(n)}"
 
-    fig, axes = plt.subplots(1, 4, figsize=(17, 4.2), facecolor=SURFACE)
-    style(axes[0], L["rate"] + "\n" + L["n"].format(k=min(n) if min(n) == max(n) else f"{min(n)}-{max(n)}"),
-          "%", L["loss"])
-    style(axes[1], L["conv"], L["sec"], L["loss"])
-    style(axes[2], L["close1"] if single else L["close"], L["sec"], L["loss"])
-    style(axes[3], L["bw"], "kB/s", L["loss"])
+    # ---- 主圖 loss_sweep.png：5 s 收斂率｜收斂時間 Median／P90｜每台 TX、重傳 TX ----
+    # 收斂時間 = 每個任務只剩一位持有者的時刻 − 任務建立的時刻（trials.csv 的 conv_s）；
+    # 每台 TX = Σ 各台送出位元組 ／（台數 × 10 s），注入任務後固定 10 s（tx_kBps、retry_kBps，2026-11-09 起才有）
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.6), facecolor=SURFACE)
+    style(axes[0], M["rate_t"] + "\n" + n_txt, M["rate_y"], M["loss"])
+    style(axes[1], M["conv_t"] + "\n" + M["all_trials"].format(n=n_txt), M["conv_y"], M["loss"])
+    style(axes[2], M["tx_t"] + "\n" + M["scope"].format(n=n_txt), M["tx_y"], M["loss"])
+    axes[2].text(0.0, -0.2, M["retry_in_total"], transform=axes[2].transAxes, ha="left", va="top", color=MUTED,
+                 fontsize=9)
     axes[0].axhline(95, color=MUTED, linewidth=1, linestyle="--")
-    axes[0].text(loss[0], 94, L["target"], color=MUTED, fontsize=9, va="top", ha="left")
+    axes[0].text(loss[0], 94, M["target"], color=MUTED, fontsize=9, va="top", ha="left")
     axes[1].axhline(5, color=MUTED, linewidth=1, linestyle="--")
+    axes[1].text(loss[0], 5.08, M["gate"], color=MUTED, fontsize=9, va="bottom", ha="left")
 
-    table = []
+    table, has_tx = [], False
     for gi, (g, lv) in enumerate(groups.items()):
         color = SERIES[gi]
         label = None if single else name(g)
         rate = {l: 100.0 * sum(int(r["converged_5s"]) for r in rows) / len(rows) for l, rows in lv.items()}
-        conv, close = stats(lv, "conv_s"), stats(lv, "close_s")
+        conv, close = conv_stats(lv), stats(lv, "close_s")
+        tx, rt = stats(lv, "tx_kBps"), stats(lv, "retry_kBps")
+        has_tx = has_tx or any(v[0] is not None for v in tx.values())
         line(axes[0], [(l, rate[l]) for l in lv], color, label)
-        for ax, st in ((axes[1], conv), (axes[2], close)):
-            if single:
-                line(ax, [(l, st[l][0]) for l in lv], SERIES[0], L["median"])
-                line(ax, [(l, st[l][1]) for l in lv], SERIES[1], "P90")
-            else:
-                line(ax, [(l, st[l][0]) for l in lv], color, label)
-        b = bw.get(g, {})
-        line(axes[3], [(l, b.get(l)) for l in lv], color, label)
         if single:
-            for x, y in b.items():
-                axes[3].annotate(f"{y:.1f}", (x, y), textcoords="offset points", xytext=(0, 8), ha="center",
-                                 color=INK, fontsize=8)
+            conv_line(axes[1], [(l, conv[l][0]) for l in lv], SERIES[0], "Median")
+            conv_line(axes[1], [(l, conv[l][1]) for l in lv], SERIES[1], "P90")
+            line(axes[2], [(l, tx[l][0]) for l in lv], SERIES[0], M["total"])
+            line(axes[2], [(l, rt[l][0]) for l in lv], SERIES[1], M["retry"])
+            for l in lv:
+                for st, dy in ((tx, 8), (rt, 8)):
+                    if st[l][0] is not None:
+                        axes[2].annotate(f"{st[l][0]:.2f}", (l, st[l][0]), textcoords="offset points",
+                                         xytext=(0, dy), ha="center", color=INK, fontsize=8)
+        else:
+            conv_line(axes[1], [(l, conv[l][0]) for l in lv], color, label)
+            line(axes[2], [(l, tx[l][0]) for l in lv], color, label)
+            line(axes[2], [(l, rt[l][0]) for l in lv], color, None, "--")
         for l, rows in lv.items():
-            table.append((name(g), l, len(rows), rate[l], conv[l], close[l], b.get(l)))
+            table.append((name(g), l, len(rows), rate[l], conv[l], tx[l], rt[l], close[l], bw.get(g, {}).get(l)))
+    if not has_tx:
+        axes[2].text(0.5, 0.5, M["no_tx"], transform=axes[2].transAxes, ha="center", va="center", color=MUTED)
 
     axes[0].set_ylim(0, 108)
     for ax in axes[1:]:
         ax.set_ylim(bottom=0)
-    for ax in axes:
+    for i, ax in enumerate(axes):
         ax.set_xticks(loss)
         if ax.get_legend_handles_labels()[0]:
-            ax.legend(frameon=False, labelcolor=INK, loc="best", fontsize=9)
+            # 中圖的圖例放右下角（左上有 5 s 門檻的字）
+            ax.legend(frameon=False, labelcolor=INK, loc="lower right" if i == 1 else "upper left", fontsize=9)
     fig.tight_layout()
     out = os.path.join(dirs[0], "loss_sweep.png")
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    print(out)
+
+    # ---- 備用圖 loss_backup.png：完成 → 全隊確認、網卡收＋送（不是週計畫要求的主要指標）----
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), facecolor=SURFACE)
+    style(axes[0], L["close1"] if single else L["close"], L["sec"], L["loss"])
+    style(axes[1], L["bw"], "kB/s", L["loss"])
+    for gi, (g, lv) in enumerate(groups.items()):
+        close = stats(lv, "close_s")
+        if single:
+            line(axes[0], [(l, close[l][0]) for l in lv], SERIES[0], L["median"])
+            line(axes[0], [(l, close[l][1]) for l in lv], SERIES[1], "P90")
+        else:
+            line(axes[0], [(l, close[l][0]) for l in lv], SERIES[gi], name(g))
+        b = bw.get(g, {})
+        line(axes[1], [(l, b.get(l)) for l in lv], SERIES[gi], None if single else name(g))
+    for ax in axes:
+        ax.set_ylim(bottom=0)
+        ax.set_xticks(loss)
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(frameon=False, labelcolor=INK, loc="upper left", fontsize=9)
+    fig.tight_layout()
+    out = os.path.join(dirs[0], "loss_backup.png")
     fig.savefig(out, dpi=150, facecolor=SURFACE)
     print(out)
 
@@ -208,12 +289,15 @@ def main():
         bars(groups, bw, L, name, os.path.join(dirs[0], "loss_params.png"))
 
     # 表格版（同一份數字，給報告用）
-    fmt = lambda v: f"{v:.2f} s" if v is not None else "—"
-    print("| 參數 | 掉包率 | 次數 | 5 s 收斂率 | 收斂中位數／P90 | 完成→全隊確認 中位數／P90 | mesh kB/s |")
-    print("|---|---|---|---|---|---|---|")
-    for g, l, k, r, c, cl, b in table:
-        print(f"| {g} | {l}% | {k} | {r:.0f}% | {fmt(c[0])}／{fmt(c[1])} | {fmt(cl[0])}／{fmt(cl[1])} | "
-              + (f"{b:.1f}" if b is not None else "—") + " |")
+    fmt = lambda v, u="s": ("> 10 s" if v == float("inf") else f"{v:.2f} {u}") if v is not None else "—"
+    print("| 參數 | 掉包率 | 次數 | 5 s 收斂率 | 收斂 Median／P90 | 每台 TX Median／P90 | 重傳 TX Median／P90 | "
+          "完成→全隊確認 Median／P90 | 網卡收＋送 |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    cfmt = lambda v: "—" if v is None else (f"{v[0]:.2f} s（逾時）" if v[1] else f"{v[0]:.2f} s")
+    for g, l, k, r, c, tx, rt, cl, b in table:
+        print(f"| {g} | {l}% | {k} | {r:.0f}% | {cfmt(c[0])}／{cfmt(c[1])} | {fmt(tx[0], 'kB/s')}／{fmt(tx[1], 'kB/s')} | "
+              f"{fmt(rt[0], 'kB/s')}／{fmt(rt[1], 'kB/s')} | {fmt(cl[0])}／{fmt(cl[1])} | "
+              + (f"{b:.1f} kB/s" if b is not None else "—") + " |")
 
 
 if __name__ == "__main__":

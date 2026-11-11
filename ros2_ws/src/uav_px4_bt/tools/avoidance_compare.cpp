@@ -95,8 +95,8 @@ Metrics run(const Scenario & sc, bool legacy, const std::string & csv)
   m.min_speed.assign(n, 1e9);
   m.arrive.assign(n, -1.0);
   std::vector<double> still(n, 0.0);
-  auto hover = [](const Agent & x, const Vec3 & p) {
-      return x.busy && std::hypot(x.goal.x - p.x, x.goal.y - p.y) < 0.5;
+  auto hover = [](const Agent & x, const Vec3 & p) {   // 停住＝已到目標（2026-11-07，不看 busy）
+      return std::hypot(x.goal.x - p.x, x.goal.y - p.y) < 0.5;
     };
   FILE * f = std::fopen(csv.c_str(), "w");
   std::fprintf(f, "t,agent,x,y,vx,vy,speed,cmd_speed\n");
@@ -124,7 +124,7 @@ Metrics run(const Scenario & sc, bool legacy, const std::string & csv)
         u = out.velocity;
         avoiding = out.active_neighbors > 0;
       } else {
-        const AvoidSelf self{a[i].p, a[i].goal, {hover(a[i], a[i].p), a[i].busy, static_cast<std::uint16_t>(i + 1)},
+        const AvoidSelf self{a[i].p, a[i].goal, {hover(a[i], a[i].p), static_cast<std::uint16_t>(i + 1)},
           v[i], shaper[i].referenceVelocity(t, v[i]), shaper[i].sinceLast(t, kDt)};
         const AvoidOutput out = av[i].step(self, nb, params);
         u = out.velocity;

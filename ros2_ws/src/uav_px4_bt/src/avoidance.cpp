@@ -49,15 +49,28 @@ Cpa predictCpa(double rx, double ry, double vx, double vy, double horizon)
   return c;
 }
 
+Cpa predictCpaStop(double rx, double ry, double ux, double uy, double nvx, double nvy, double t_stop, double horizon)
+{
+  const double vx = ux - nvx, vy = uy - nvy;
+  if (t_stop >= horizon) {
+    return predictCpa(rx, ry, vx, vy, horizon);
+  }
+  const double ts = std::max(t_stop, 0.0);
+  const Cpa c1 = predictCpa(rx, ry, vx, vy, ts);
+  Cpa c2 = predictCpa(rx + vx * ts, ry + vy * ts, -nvx, -nvy, horizon - ts);   // 停住之後：只剩鄰機在動
+  c2.t += ts;
+  if (c1.approaching && c2.approaching) {
+    return c2.d < c1.d ? c2 : c1;
+  }
+  return c2.approaching ? c2 : c1;
+}
+
 bool hasRightOfWay(const RightOfWayKey & self, const RightOfWayKey & other)
 {
-  if (self.task_hover != other.task_hover) {
-    return self.task_hover;
+  if (self.stopped != other.stopped) {      // 停住的優先：移動中的繞開（2026-11-07）
+    return self.stopped;
   }
-  if (self.busy != other.busy) {
-    return self.busy;
-  }
-  return self.id < other.id;
+  return self.id < other.id;                // 兩台都在動：機號大的讓
 }
 
 AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Neighbor> & neighbors,
@@ -69,7 +82,10 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
   const bool still = sp <= kStillSpeed;
   const double goal_dist = std::hypot(self.goal.x - self.position.x, self.goal.y - self.position.y);
   const double t_goal = still ? p.ttc_horizon : goal_dist / sp;
-  const double horizon = std::min(p.ttc_horizon, t_goal);
+  const double horizon = p.ttc_horizon;   // 一律看滿 ttc_horizon（到目標之後自己停住，用 predictCpaStop）
+  auto cpa = [&](const Other & o, double vx, double vy) {
+      return predictCpaStop(o.rx, o.ry, vx, vy, o.n->velocity.x, o.n->velocity.y, t_goal, horizon);
+    };
 
   // ---------- 鄰機（外推）與要求的最近距離 ----------
   std::vector<Other> others;
@@ -93,7 +109,8 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
   }
   // 要求的最近距離（讓的對象；其他鄰機只要 safe_radius）：
   //   - miss_clearance；自己沒在動時 ≤ safe_radius + 0.5 m（鄰機的航線幾乎穿過自己才讓）
-  //   - 最近點就是自己到目標的那一刻（目標就在鄰機旁，例如起飛點只隔 2 m）：只要 safe_radius——做不到的距離不要求
+  //   - 最近點就是自己到目標的那一刻（目標就在鄰機旁，例如起飛點只隔 2 m）：只要 safe_radius——做不到的距離不要求；
+  //     最近點在自己停住之後（鄰機飛過來）照常要 miss_clearance（2026-11-06）
   //     （2026-10-24：3 m/s 時 miss_clearance 比起飛點間隔大，回起飛點的那台一直繞，兩台在起降板附近相撞）。
   //     最近點在到目標之前（對方從路上經過）照常要 miss_clearance
   //   - 現在已經比要求的近：不要再更近就好（往外、維持距離的方向都可以）
@@ -102,7 +119,7 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
       double r = p.safe_radius;
       if (yield_target) {
         r = still ? std::min(p.miss_clearance, p.safe_radius + kStillMargin) :
-          (goal_in_window && c.t >= t_goal - 1e-6 ? p.safe_radius : p.miss_clearance);
+          (goal_in_window && std::abs(c.t - t_goal) < 1e-6 ? p.safe_radius : p.miss_clearance);
       }
       return std::min(r, o.dist);
     };
@@ -110,9 +127,12 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
   // ---------- ConflictPredictor＋RightOfWayPolicy＋EncounterState ----------
   for (Other & o : others) {
     const Neighbor & n = *o.n;
-    const Cpa c = predictCpa(o.rx, o.ry, u_nom.x - n.velocity.x, u_nom.y - n.velocity.y, horizon);
+    const Cpa c = cpa(o, u_nom.x, u_nom.y);
     // 衝突：正在靠近，而且預測最近距離比要求的近（現在已經更近時，還在靠近就算）
-    const bool conflict = c.approaching && c.d < required(c, o, true) + 1e-9 && c.d < p.miss_clearance;
+    // 兩台都停住：不建立讓路關係（不繞行），只由 CBF 維持距離（2026-11-07）
+    const bool both_stopped = self.key.stopped && n.task_hover;
+    const bool conflict = !both_stopped && c.approaching && c.d < required(c, o, true) + 1e-9 &&
+      c.d < p.miss_clearance;
     auto it = encounters_.find(n.id);
     if (it != encounters_.end()) {
       Encounter & e = it->second;
@@ -131,7 +151,7 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
       }
     } else if (conflict) {
       Encounter e;
-      e.self_yields = !hasRightOfWay(self.key, {n.task_hover, n.busy, n.id});
+      e.self_yields = !hasRightOfWay(self.key, {n.task_hover, n.id});
       e.last_distance = o.dist;
       e.t_cpa = c.t;
       e.d_cpa = c.d;
@@ -157,7 +177,7 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
   auto margin = [&](double cx, double cy) {
       double m = std::numeric_limits<double>::infinity();
       for (const Other & o : others) {
-        const Cpa c = predictCpa(o.rx, o.ry, cx - o.n->velocity.x, cy - o.n->velocity.y, horizon);
+        const Cpa c = cpa(o, cx, cy);
         m = std::min(m, c.d - required(c, o, o.yields));
       }
       return m;
@@ -321,7 +341,7 @@ AvoidOutput CollisionAvoider::step(const AvoidSelf & self, const std::vector<Nei
     const double rho = (o.yields || (p.second_order && toward_me < kStillNeighbor)) ? 1.0 : 0.5;
     bool active = o.dist < p.guard_radius;
     if (o.yields) {
-      const Cpa c = predictCpa(o.rx, o.ry, ux - n.velocity.x, uy - n.velocity.y, horizon);
+      const Cpa c = cpa(o, ux, uy);
       active = active || !vo_ok || c.d < required(c, o, true) - kResidualSlack;
     }
     if (p.second_order) {

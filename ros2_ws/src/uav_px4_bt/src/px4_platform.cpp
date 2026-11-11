@@ -338,7 +338,8 @@ void Px4Platform::sendBeacon()
   b.airborne = v.armed && !v.landed;
   b.position_valid = v.valid;
   b.busy = exec_.mode == ExecMode::NAVIGATING || exec_.mode == ExecMode::EXECUTING;
-  b.task_hover = b.busy && task_hover_;
+  // bit 3＝停住（2026-11-07）：BT 說已到目標，或 BT 沒在控制（offboard 掉了：失效保護、被接管，PX4 自己停著）
+  b.task_hover = task_hover_ || !v.offboard;
   b.position = v.position;
   b.velocity = v.velocity;
   link_->send(encodeBeacon(b));

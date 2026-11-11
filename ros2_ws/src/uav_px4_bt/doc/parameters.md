@@ -78,22 +78,30 @@ u_nom 大小 = min(cruise_speed, k_att × 距離, √(2 × brake_accel × 距離
 **1. 預測會不會碰（ConflictPredictor）**：自己用名目速度 u_nom（意圖，不是量到的速度——剛起步時量到的是 0）、鄰機用廣播的速度：
 ```
 r = p − p_j          v_r = u_nom − v_j
-T  = min(ttc_horizon, 自己到目標的水平距離 / |u_nom|)     自己幾乎不動（|u_nom| < 0.05 m/s）時 T = ttc_horizon
-t* = clamp(−r·v_r / |v_r|², 0, T)       d* = |r + v_r t*|
+T  = ttc_horizon；t_goal = 自己到目標的水平距離 / |u_nom|（自己幾乎不動、|u_nom| < 0.05 m/s 時 = T）
+[0, t_goal]：v_r = u_nom − v_j；[t_goal, T]：自己停在目標、只剩鄰機在動（v_r = −v_j）；兩段的最近點取近的（predictCpaStop）
+t* = clamp(−r·v_r / |v_r|², 0, 段長)    d* = |r + v_r t*|
 衝突 = 正在靠近（−r·v_r > 0、|v_r| ≥ 1 cm/s）而且 d* < 要求的距離
 要求的距離 = miss_clearance；自己沒在動時 ≤ safe_radius + 0.5 m；
-             最近點就是自己到目標的那一刻（目標就在鄰機旁）時只要 safe_radius；
+             最近點就是自己到目標的那一刻（目標就在鄰機旁）時只要 safe_radius（停住之後鄰機飛過來的照常 miss_clearance）；
              現在已經比要求的近時，不要再更近就好（往外、維持距離都可以）
 ```
 沒有衝突：不比路權、不繞、不加 CBF 約束（距離 < `guard_radius` 時例外），照原路飛。
+2026-11-06 前 T = min(ttc_horizon, t_goal)：停在目標附近、還在修正幾公分的無人機 t_goal 約 1 s，只看得到 1 s 內的鄰機
+（11/05 yard SITL D7：待命停在起飛點上空的 uav3 剩 3.8 m 才看到 3 m/s 飛來的 uav2，最近 0.41 m）。路權不變。
 「到目標那一刻只要 safe_radius」是因為目標本來就在鄰機旁時（起飛點只隔 2 m）做不到 miss_clearance，原本會一直繞（10/24 SITL 相撞）；
 最近點在到目標之前（對方從路上經過）照常要 miss_clearance——否則待命的讓開後，名目速度又把它拉回對方的航線上。
 
-**2. 誰讓（RightOfWayPolicy）**：路權鍵 K = (任務中懸停, 執行中, −機號)，大的直行、小的讓。
-- 任務中懸停：BT 正在任務點停留、辨識 AprilTag、監控火點（`UavContext::moveTo`：執行中而且已經到 goal，水平 < max(2 × `reach_tolerance`, 0.5 m)），
-  用位置廣播 flags 的 bit 3 送出去；**不是看速度猜**（剛起步、減速、短暫停頓都會是 0）。
-- 執行中：ExecMode 是 NAVIGATING／EXECUTING（位置廣播的 busy）。
-- 兩台用同一份位置廣播算，結果一定唯一（不會兩台都不讓）。
+**2. 誰讓（RightOfWayPolicy，2026-11-07 使用者定的規格）**：只看移動意圖與機號，**不看 busy、任務類型**。
+- 一台移動、一台停住 → 移動中的讓（VO 側向繞行，不是停下來等）。
+- 兩台都在動 → 機號大的讓。
+- 兩台都停住 → 不建立讓路關係、不繞行，只由 CBF 維持安全距離。
+- 停住＝沒有移動意圖：已經到自己的目標（水平 < max(2 × `reach_tolerance`, 0.5 m)，還在修正幾公分也算），或 BT 沒在控制
+  （offboard 掉了：失效保護、被接管）。**不看瞬間速度**：剛起步、減速、讓路時速度很低也還是在動。
+  停住由位置廣播 flags bit 3 送出去（欄位名稱 `task_hover` 沿用），兩台用同一份資料算，結果一定唯一。
+- 演進：10/24～11/05「任務中懸停 ＞ 執行中 ＞ 機號」（待命停在起飛點上空的不算，11/05 D7 最近 0.41 m）；11/06 試過看速度
+  < 0.3 m/s（0.5 m/s 巡航、VO 降到 25 % 的那台會被當成停著，`DepartureTowardPassingNeighbor` 沒到目標）。
+- 預測固定看滿 `ttc_horizon` 5 s（`predictCpaStop`：自己到目標後停住、鄰機照樣飛，11/06 修的 bug）。
 
 **3. 鎖定角色（EncounterState）**：衝突開始時記下誰讓、往哪邊繞；交會途中任務完成、busy 改變、速度變 0 都不換。
 解除：已經通過（不再靠近）而且距離連續 3 個週期變大；或預測不衝突而且距離 > `yield_exit`；或沒有位置廣播。

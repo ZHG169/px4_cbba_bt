@@ -5,7 +5,8 @@
 #  用法：
 #    dog_bt.sh build                       編譯伯宇的 task_manager、task_manager_interfaces（handoff 原檔，不改）
 #                                          到 <repo>/dog_ws（overlay 在 ros2_ws/install 上；不碰共用的 ros2_ws/build、install）
-#    dog_bt.sh start <ns> <機號>            啟動一隻狗的 task_manager（前景；itest 用 docker exec -d 開）
+#    dog_bt.sh start <ns> <機號> [任務檔]     啟動一隻狗的 task_manager（前景；itest 用 docker exec -d 開）；
+#                                          任務檔預設 docker/dog/idle_mission.yaml（不巡邏）；itest 給巡邏檔時照伯宇的巡檢線走（2026-11-05）
 #    dog_bt.sh stop                        關掉全部的 task_manager
 #
 #  一隻狗要三樣（itest.py demo --dog bt 會一起開）：
@@ -49,6 +50,7 @@ case "${1:-}" in
     start)
         NS="${2:?用法：dog_bt.sh start <ns> <機號>}"
         ID="${3:?用法：dog_bt.sh start <ns> <機號>}"
+        MISSION="${4:-${REPO}/docker/dog/idle_mission.yaml}"
         if [ ! -f "${DOG_WS}/install/setup.bash" ]; then
             echo "還沒編譯：先 dog_bt.sh build"; exit 1
         fi
@@ -56,7 +58,7 @@ case "${1:-}" in
         SHARE="$(ros2 pkg prefix task_manager)/share/task_manager"
         # 直接 ros2 run（不用他的 launch）：節點名稱 <ns>_task_manager，stop 時用名稱比對節點本身
         exec ros2 run task_manager task_manager_node --ros-args -r __ns:="/${NS}" -r __node:="${NS}_task_manager" \
-            -p mission_file:="${REPO}/docker/dog/idle_mission.yaml" -p bt_file:="${SHARE}/bt/mission.xml" \
+            -p mission_file:="${MISSION}" -p bt_file:="${SHARE}/bt/mission.xml" \
             -p autostart:=true -p agent_id:="${ID}" \
             -p nav_action:="/${NS}/navigate_to_pose" -p ptz_action:="/${NS}/ptz_inspect" \
             -p base_frame:="${NS}/base_link" -p battery_topic:="/${NS}/battery"

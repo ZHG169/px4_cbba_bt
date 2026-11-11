@@ -1,0 +1,11 @@
+{
+  "_說明": "100% 斷網的任務退化（週計畫第 5 週「100% 斷網 → 兩機退化成本機單機貪婪、安全完成手頭任務」，2026-11-09）。使用者：只驗證任務退化，避碰是 BT 端的事（斷網時位置廣播也斷，無人機看不到彼此）。1. G1～G3 固定任務；T2 隨機插入、旁邊起火（fire: true）→ 無人機或巡邏的狗看到 → 地面任務 → 狗得標；T3 再插一個空中任務。2. blackout：等到「有一隻狗在做 CBBA 的地面任務、而且有無人機在做任務」時（after dog_busy；開始後 max_wait 秒還沒有就照樣斷），所有無人機、狗的容器 mesh_tc.sh set 100，sec 秒後恢復。3. 報告 B1 手上的任務由原本那台做完、B2 沒有重複認領（火警的持有者失聯 10 s 後別台接手是設計，列在說明裡、不算 FAIL）、B3 恢復後全隊一致、B4 斷網中發現的火恢復後由狗接走。狗要在自己的容器（docker/.env 的 DOG_COUNT），不然 uav1 ↔ 狗不經過 tc、斷不乾淨。用法：python3 docker/itest/itest.py demo --world yard --scenario blackout --seed 7 --dog bt",
+  "tasks": [
+    {"name": "G1", "point": "G1", "duration": 4},
+    {"name": "G2", "point": "G2", "duration": 4},
+    {"name": "G3", "point": "G3", "duration": 4},
+    {"name": "T2", "random": true, "at_range": [15, 40], "duration": 4, "fire": true},
+    {"name": "T3", "random": true, "at_range": [40, 90], "duration": 4}
+  ],
+  "blackout": {"after": "dog_busy", "max_wait": 240, "sec": 20}
+}

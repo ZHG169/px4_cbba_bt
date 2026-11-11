@@ -35,6 +35,9 @@ struct Constraint
 
 constexpr int kMaxIterations = 100;
 constexpr double kTolerance = 1e-9;
+// 投影後約束還差這麼多以內算有解（一階 m/s、二階 m/s²）。2026-11-06 從 1e-3 放寬：二階 3 m/s 回起飛點時差 0.0018 m/s²
+// （最大加速度的 0.1%）就被判無解、切到緊急退讓（最大加速度往外推，影片裡抖一下）；0.02 約是 accel_max 1.5 的 1.3%
+constexpr double kFeasibleSlack = 0.02;
 
 // Dykstra 交替投影：u0 投影到所有半平面的交集（最近點）。交集是空的（鄰機從兩側擠進 safe_radius）時不收斂，
 // 迭代上限後回傳最後一次的結果（盡量往各約束靠）
@@ -115,7 +118,7 @@ CbfFilterResult cbfFilter(const Vec3 & position, const Vec3 & u_ref, const std::
     const double gap = (c.b - (c.ax * out.velocity.x + c.ay * out.velocity.y)) / std::hypot(c.ax, c.ay);
     out.worst = std::max(out.worst, gap);
   }
-  out.feasible = out.worst <= 1e-3;
+  out.feasible = out.worst <= kFeasibleSlack;
   return out;
 }
 
@@ -218,7 +221,7 @@ Cbf2Result cbf2Filter(const Vec3 & position, const Vec3 & velocity, const Vec3 &
   for (const Row & r : rows) {
     out.worst = std::max(out.worst, r.b - (r.nx * ax + r.ny * ay));
   }
-  out.feasible = !inside && out.worst <= 1e-3;
+  out.feasible = !inside && out.worst <= kFeasibleSlack;
   return out;
 }
 

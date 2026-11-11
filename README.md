@@ -131,7 +131,8 @@ python3 docker/itest/itest.py demo --scenario manual_fire --seed 7   # 人工指
 python3 docker/itest/itest.py demo --dog bt                          # 狗換成伯宇的 BT（task_manager）＋假 Nav2（先在 uav1 跑 dog_bt.sh build）
 ```
 
-demo 的輸出在 `docker/itest/out/<時間>_demo/`：報告、Gazebo 俯視錄影、2D 動畫、下視相機錄影（`demo_cameras.mp4`）、
+demo 的輸出在 `docker/itest/out/<時間>_demo/`：報告、Gazebo 俯視錄影（`gazebo.mp4`；加標籤的 `gazebo_labeled.mp4`：載具、
+G／M／T／F 任務、誰在做哪個任務、事件字幕）、2D 動畫、下視相機錄影（`demo_cameras.mp4`）、
 出價表（`bids.md`、`bids.svg`、`bids.csv`）。
 
 **手動插入任務點**（兩個 terminal，說明見 `docs/task_insertion_guide.md`）：

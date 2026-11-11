@@ -45,12 +45,13 @@ class Bridge(Node):
         topics = cfg["topics"]
         # announced（task_announced：這台知道的任務）、path（cbba_path：這台的 bundle）給弱網測試算「每台該收到幾個任務」
         # （2026-10-27）；設定裡沒有就不訂（換成別人的 CBBA Node 時）
-        watch = ["assigned", "result", "new_task"] + [k for k in ("closed", "announced", "path") if k in topics] + \
+        watch = ["assigned", "result", "new_task"] + [k for k in ("closed", "announced", "path", "tx") if k in topics] + \
             (["px4_position", "px4_status"] if with_px4 else []) + \
             (["px4_battery"] if with_px4 and "px4_battery" in topics else [])
         self.subs = []
         for vid in ids:
-            ns = cfg["vehicles"]["ns"].format(id=vid)
+            # ns_map（2026-11-09）：comm、loss 的 --dogs 時 itest 寫的，狗的 namespace 是 v60、v60_1…
+            ns = cfg["vehicles"].get("ns_map", {}).get(str(vid)) or cfg["vehicles"]["ns"].format(id=vid)
             for kind in watch:
                 spec = topics[kind]
                 name = spec["name"].format(ns=ns, id=vid)
@@ -58,7 +59,7 @@ class Bridge(Node):
                 self.subs.append(self.create_subscription(
                     msg_type, name, lambda m, k=kind, v=vid: self.on_msg(k, v, m), qos_of(spec)))
         # 機器狗（2026-10-13，demo 的假狗；2026-10-20 起可以多隻，dog.units）：
-        #   robot_state  → {"kind": "dog", "dog": 機號, "x", "y"}，每隻最多 5 Hz
+        #   robot_state  → {"kind": "dog", "dog": 機號, "x", "y", "mode"}，每隻最多 5 Hz
         #   current_task → {"kind": "dog_assigned", "dog": 機號, "msg": …}（誰拿到哪個地面任務）
         dog = cfg.get("dog", {})
         units = dog.get("units") or ([{"ns": "v60", "id": 50}] if dog.get("state_topic") else [])
@@ -72,8 +73,20 @@ class Bridge(Node):
                     get_message(topics["assigned"]["type"]), dog["current_topic"].format(ns=u["ns"], id=u["id"]),
                     lambda m, d=u["id"]: self.emit({"kind": "dog_assigned", "dog": d, "msg": message_to_ordereddict(m)}),
                     qos_of(topics["assigned"])))
+        # 模擬時鐘（2026-11-05，uav、demo）：{"kind": "clock", "sim": 秒}，每 0.5 s 一筆。gazebo.mp4 用模擬時間錄，
+        # 模擬比實際慢、而且快慢會變，label_gazebo.py 用這個把事件的牆上時間換成影片時間（/clock 由 gz_bridge.sh 送進 ROS）
+        self.last_clock = 0.0
+        if with_px4:
+            self.subs.append(self.create_subscription(get_message("rosgraph_msgs/msg/Clock"), "/clock", self.on_clock,
+                                                      QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)))
         self.create_timer(0.02, self.poll)
         self.emit({"kind": "ready", "vehicles": ids, "px4": with_px4})
+
+    def on_clock(self, msg):
+        now = time.time()
+        if now - self.last_clock >= 0.5:
+            self.last_clock = now
+            self.emit({"kind": "clock", "sim": msg.clock.sec + msg.clock.nanosec * 1e-9})
 
     def emit(self, ev):
         ev["t"] = time.time()
@@ -104,6 +117,10 @@ class Bridge(Node):
         if kind == "px4_status":
             self.emit({"kind": "status", "uav": vid, "armed": msg.arming_state == 2, "nav": msg.nav_state})
             return
+        if kind == "tx":
+            # cbba_node 送出位元組的累計 [全部, 重傳, 轉送]（2026-11-09，第 5 週頻寬圖），每 0.2 s 一筆，只記數字
+            self.emit({"kind": "tx", "uav": vid, "d": [int(x) for x in msg.data]})
+            return
         self.emit({"kind": kind, "uav": vid, "msg": message_to_ordereddict(msg)})
 
     def on_dog(self, dog_id, msg):
@@ -111,7 +128,8 @@ class Bridge(Node):
         if now - self.last_pos.get(("dog", dog_id), 0.0) < 0.2:
             return
         self.last_pos[("dog", dog_id)] = now
-        self.emit({"kind": "dog", "dog": dog_id, "x": msg.position.x, "y": msg.position.y})
+        # mode（2026-11-07）：平板指派給狗的 M 做完 = MANUAL 回到 AUTO（假狗、伯宇的 BT 都這樣發），itest 用來刪標記
+        self.emit({"kind": "dog", "dog": dog_id, "x": msg.position.x, "y": msg.position.y, "mode": int(msg.mode)})
 
     def publisher(self, topic, type_name, spec):
         key = (topic, type_name)

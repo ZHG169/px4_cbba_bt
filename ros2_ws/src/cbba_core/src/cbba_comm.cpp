@@ -361,10 +361,16 @@ wire::Header CbbaComm::newHeader(PacketType type)
   return h;
 }
 
-void CbbaComm::send(Bytes bytes, PacketType type)
+void CbbaComm::send(Bytes bytes, PacketType type, TxKind kind)
 {
   ++stats_.sent[type];
   stats_.sent_bytes[type] += bytes.size();
+  stats_.tx_bytes += bytes.size();
+  if (kind == TxKind::RETRY) {
+    stats_.tx_retry_bytes += bytes.size();
+  } else if (kind == TxKind::RELAY) {
+    stats_.tx_relay_bytes += bytes.size();
+  }
   outbox_.push_back(std::move(bytes));
 }
 
@@ -373,7 +379,7 @@ void CbbaComm::relay(const Bytes & bytes)
   if (auto fwd = wire::makeRelay(bytes, id(), session_, seq_)) {
     const auto type = wire::parseHeader(*fwd)->type;
     ++stats_.relayed;
-    send(std::move(*fwd), type);
+    send(std::move(*fwd), type, TxKind::RELAY);
   }
 }
 
@@ -486,7 +492,8 @@ std::vector<Bytes> CbbaComm::poll(double now)
     if (fast) {
       ++fast_count_;
     }
-    sendCbbaState(now);
+    // 只因為和鄰居不一致才送的（不是週期、也不是自己變動）算重傳
+    sendCbbaState(now, fast && !periodic && !immediate);
     dirty_ = false;
   }
 
@@ -663,7 +670,7 @@ wire::CbbaStateBody CbbaComm::cbbaStateBody(double now) const
   return b;
 }
 
-void CbbaComm::sendCbbaState(double now)
+void CbbaComm::sendCbbaState(double now, bool retry)
 {
   ++snapshot_id_;
   wire::CbbaStateBody full = cbbaStateBody(now);
@@ -679,7 +686,8 @@ void CbbaComm::sendCbbaState(double now)
     last_digest_key_ = full.round_key;
   }
   for (const wire::CbbaStateBody & part : wire::splitCbbaState(full, config_.max_packet)) {
-    send(wire::encodeCbbaState(newHeader(PacketType::CBBA_STATE), part), PacketType::CBBA_STATE);
+    send(wire::encodeCbbaState(newHeader(PacketType::CBBA_STATE), part), PacketType::CBBA_STATE,
+      retry ? TxKind::RETRY : TxKind::BASE);
     ++stats_.cbba_parts;
   }
   last_state_sent_ = now;
@@ -905,7 +913,8 @@ void CbbaComm::sendGapRequest(AgentId target, std::uint16_t creator, std::uint16
   for (std::uint32_t k = 0; k < count; ++k) {
     b.states.push_back(seqState((static_cast<TaskId>(creator) << 16) | (first + k)));
   }
-  send(wire::encodeGapRequest(newHeader(PacketType::GAP_REQUEST), b), PacketType::GAP_REQUEST);
+  send(wire::encodeGapRequest(newHeader(PacketType::GAP_REQUEST), b), PacketType::GAP_REQUEST,
+    TxKind::RETRY);
   ++stats_.gap_requests;
 }
 
@@ -1019,7 +1028,8 @@ void CbbaComm::drainRepair(double now)
     }
     repair_tokens_ -= static_cast<double>(size);
     stats_.repair_items_sent += static_cast<int>(items.size());
-    send(wire::encodeSyncBatch(newHeader(PacketType::SYNC_BATCH), items), PacketType::SYNC_BATCH);
+    send(wire::encodeSyncBatch(newHeader(PacketType::SYNC_BATCH), items), PacketType::SYNC_BATCH,
+      TxKind::RETRY);
     for (const auto & [queue, task_id] : taken) {
       queue->erase(task_id);
     }
@@ -1246,7 +1256,7 @@ void CbbaComm::resendTask(TaskId task_id, double now)
   last = now;
   // 沿用原始的 origin：已收過的載具會當成重複丟掉
   send(wire::encodeTaskAnnounce(newHeader(PacketType::TASK_ANNOUNCE), announceBody(task_id)),
-    PacketType::TASK_ANNOUNCE);
+    PacketType::TASK_ANNOUNCE, TxKind::RETRY);
 }
 
 void CbbaComm::resendClose(TaskId task_id, double now)
@@ -1262,7 +1272,7 @@ void CbbaComm::resendClose(TaskId task_id, double now)
   }
   last = now;
   send(wire::encodeTaskClose(newHeader(PacketType::TASK_CLOSE), close->second),
-    PacketType::TASK_CLOSE);
+    PacketType::TASK_CLOSE, TxKind::RETRY);
 }
 
 void CbbaComm::onTaskAnnounce(const Bytes & bytes, double now)
@@ -1314,7 +1324,8 @@ void CbbaComm::sendAnnounce(TaskId task_id, double now)
   b.assign_version = pc.version;
   b.view.assign(pc.view.begin(), pc.view.end());
   dedup_.firstSeen(PacketType::COMPLETION, b.relay, now);
-  send(wire::encodeCompletion(h, b), PacketType::COMPLETION);
+  send(wire::encodeCompletion(h, b), PacketType::COMPLETION,
+    pc.tries > 0 ? TxKind::RETRY : TxKind::BASE);
   pc.last_sent = now;
   ++pc.tries;
 }

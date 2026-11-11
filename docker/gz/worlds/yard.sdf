@@ -345,6 +345,8 @@
       原檔 dart 2 ms 是狗的 WBC 要 500 Hz，我們只有假狗）
     - 拿掉固定的火情 tag 101（30, −10）：火改成 itest 起火時才生成（yard_points.csv 的 R1 就在那裡）
     - 拿掉閥門 tag 102（直立在棚內，給狗的相機；下視相機看不到）
+    - TC6_fire 原檔是紅色（README_WORLD.md：「起火的那塊」），2026-11-05 改成和其他變壓器一樣的灰藍色：火改成隨機的，
+      平常不該有紅色設備；火出現在設備頂上時，itest 才在那個設備蓋上紅色外殼（patrol_scenario.sh fire-on，顏色照原檔的紅色）
   他更新場景時：把原檔 fence_n 到 tank_2 的 model 換進來。
 -->
     <model name="fence_n"><static>true</static><pose>0 40 1.0 0 0 0.0</pose><link name="link">
@@ -455,7 +457,7 @@
     <model name="TC6_fire"><static>true</static><pose>30 -15 1.5 0 0 0.0</pose><link name="link">
       <collision name="c"><geometry><box><size>4 3 3</size></box></geometry></collision>
       <visual name="v"><geometry><box><size>4 3 3</size></box></geometry>
-        <material><ambient>0.78 0.35 0.27 1</ambient><diffuse>0.78 0.35 0.27 1</diffuse></material></visual>
+        <material><ambient>0.47 0.51 0.63 1</ambient><diffuse>0.47 0.51 0.63 1</diffuse></material></visual>
     </link></model>
     <model name="pipe_rack"><static>true</static><pose>0 -28 2.0 0 0 0.0</pose><link name="link">
       <collision name="c"><geometry><box><size>60 1.5 4.0</size></box></geometry></collision>
@@ -519,106 +521,48 @@
     </link></model>
     <model name="pad_G1">
       <static>true</static>
-      <pose>-25 -7.5 0.025 0 0 0</pose>
+      <pose>-25 -7.5 0.015 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
-          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+          <geometry><cylinder><radius>1.5</radius><length>0.03</length></cylinder></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><emissive>0.030 0.210 0.060 1</emissive></material>
         </visual>
       </link>
     </model>
     <include>
       <uri>model://tag36h11_0</uri>
       <name>tag_G1</name>
-      <pose>-25 -7.5 0.052 0 0 0</pose>
+      <pose>-25 -7.5 0.032 0 0 0</pose>
     </include>
     <model name="pad_G2">
       <static>true</static>
-      <pose>5 -22 0.025 0 0 0</pose>
+      <pose>5 -22 0.015 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
-          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+          <geometry><cylinder><radius>1.5</radius><length>0.03</length></cylinder></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><emissive>0.030 0.210 0.060 1</emissive></material>
         </visual>
       </link>
     </model>
     <include>
       <uri>model://tag36h11_1</uri>
       <name>tag_G2</name>
-      <pose>5 -22 0.052 0 0 0</pose>
+      <pose>5 -22 0.032 0 0 0</pose>
     </include>
     <model name="pad_G3">
       <static>true</static>
-      <pose>-5 25 0.025 0 0 0</pose>
+      <pose>-5 25 0.015 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>1.5 1.5 0.05</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box><size>1.5 1.5 0.05</size></box></geometry>
-          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+          <geometry><cylinder><radius>1.5</radius><length>0.03</length></cylinder></geometry>
+          <material><ambient>0.1 0.7 0.2 1</ambient><diffuse>0.1 0.7 0.2 1</diffuse><emissive>0.030 0.210 0.060 1</emissive></material>
         </visual>
       </link>
     </model>
     <include>
       <uri>model://tag36h11_2</uri>
       <name>tag_G3</name>
-      <pose>-5 25 0.052 0 0 0</pose>
+      <pose>-5 25 0.032 0 0 0</pose>
     </include>
-    <model name="box_R1">
-      <static>true</static>
-      <pose>30 -10 0.150 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
-        <visual name="visual">
-          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
-          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
-        </visual>
-      </link>
-    </model>
-    <model name="box_R2">
-      <static>true</static>
-      <pose>-15 7.5 0.150 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
-        <visual name="visual">
-          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
-          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
-        </visual>
-      </link>
-    </model>
-    <model name="box_R3">
-      <static>true</static>
-      <pose>20 -22 0.150 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
-        <visual name="visual">
-          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
-          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
-        </visual>
-      </link>
-    </model>
-    <model name="box_R4">
-      <static>true</static>
-      <pose>-25 -11 0.150 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
-        <visual name="visual">
-          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
-          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
-        </visual>
-      </link>
-    </model>
-    <model name="box_R5">
-      <static>true</static>
-      <pose>-15 -21.5 0.150 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>1.4 1.4 0.3</size></box></geometry></collision>
-        <visual name="visual">
-          <geometry><box><size>1.4 1.4 0.3</size></box></geometry>
-          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
-        </visual>
-      </link>
-    </model>
   </world>
 </sdf>

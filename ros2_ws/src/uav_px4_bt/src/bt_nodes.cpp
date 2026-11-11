@@ -52,13 +52,13 @@ double UavContext::moveTo(const Vec3 & goal, bool yield_to_busy)
 {
   (void)yield_to_busy;   // 2026-10-24 起由路權決定（見 bt_nodes.hpp）
   const VehicleState v = platform.vehicle();
-  // 路權：執行中（和位置廣播的 busy 同一個來源）、任務中懸停（執行中而且已經到 goal：BT 正在任務點停留、辨識、監控）
-  const bool busy = exec_mode_ == ExecMode::NAVIGATING || exec_mode_ == ExecMode::EXECUTING;
+  // 路權（2026-11-07）：只看移動意圖——已經到目標（還在修正幾公分也算）＝停住，否則在動（不看瞬間速度、busy）。
+  // 停住放進位置廣播 flags bit 3（Px4Platform 另外把 BT 沒在控制的時候也當停住）
   const double hover_radius = std::max(2.0 * config.reach_tolerance, 0.5);
-  const bool task_hover = busy && std::hypot(goal.x - v.position.x, goal.y - v.position.y) < hover_radius;
-  platform.setTaskHover(task_hover);
+  const bool stopped = std::hypot(goal.x - v.position.x, goal.y - v.position.y) < hover_radius;
+  platform.setTaskHover(stopped);
   const double now = platform.timeNow();
-  const AvoidOutput out = avoider_.step({v.position, goal, {task_hover, busy, platform.agentId()}, v.velocity,
+  const AvoidOutput out = avoider_.step({v.position, goal, {stopped, platform.agentId()}, v.velocity,
       motion_.referenceVelocity(now, v.velocity), motion_.sinceLast(now, 0.05)}, platform.neighbors(), config.cbf);
   logAvoidEvents(out.events);
   const Setpoint sp = motion_.step(platform.timeNow(), v.position, v.velocity, out.velocity, goal,

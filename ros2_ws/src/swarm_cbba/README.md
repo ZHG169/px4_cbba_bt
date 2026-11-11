@@ -64,6 +64,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `preempt_exclude_sec` | = `failure_exclude_sec` | PREEMPTED 後多久不出價；`cbba_v60.yaml`、`cbba_uav.yaml` 設 5 s（只擋 mode = MANUAL 晚到的空檔，接管期間靠 MANUAL） |
 | `max_failures` | 0 | 同一任務 TRANSIENT 失敗幾次後永久不出價；0 = 不啟用（只打折） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
+| `publish_announced` | UAV：true；UGV：false | 要不要發 `task_announced`（2026-11-09）。預設只有無人機發（火點去重複），狗照舊沒有這個話題；整合測試 `itest comm／loss --dogs` 給狗 true，才量得到狗的送達。真的狗不用設 |
 | `repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period`、`resend_gap` | 8000 B/s、10 s、0.5 s、1 s、1 s | 補發（機間協定版本 3，2026-10-28，`cbba_core/doc/protocol_v3_sync.md`）：壓縮摘要 → 缺口請求 → 限速的分批回覆。全隊要一起升到版本 3（和版本 2 互相拒收）；BT、話題不受影響 |
 | `completion_retry`、`completion_max` | 1 s、10 次 | 完成確認沒收齊時的重送間隔、次數（2026-11-04 開成參數；全隊應該一樣） |
 | `stats_log_sec` | 10 s | 每隔多久印一次「封包統計」：送出的 kB/s、各種封包的則數與位元組、缺口請求、補發筆數（0 = 不印） |

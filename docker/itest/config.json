@@ -35,9 +35,16 @@
           [-33.5, 13.5, 12.0, 18.0], [-33.5, 13.5, -3.0, 3.0], [-33.5, 13.5, -18.0, -12.0],
           [26.5, 33.5, -18.0, -12.0], [-31.5, 31.5, -30.5, -25.5], [13.0, 37.0, 5.0, 19.0],
           [-45.5, -30.5, 22.5, 33.5], [34.5, 46.0, 19.5, 38.5]
-        ]
+        ],
+        "equipment": {"file": "docker/gz/worlds/yard_env.sdf.inc", "skip": ["fence_", "uav_pad", "shed_col_", "valve_skid"], "cover": ["shed_roof"]},
+        "placement": {"default": {"beside": 0.4, "top": 0.3, "open": 0.3}, "beside_gap": [0.5, 2.0], "open_clear": 2.0},
+        "_placement說明": "2026-11-05（使用者：隨機挑點要考慮設備才符合實際）：equipment 從場景檔讀設備（skip 開頭的不算：圍牆、起降板、棚柱、棚下的閥組；cover 是遮蔽物：鋼構棚頂底下下視相機看不到，不放點）。隨機的任務點（M、T）、火點都照 placement.default 的比例（2026-11-05 使用者：所有任務種類一樣；要分開時加 fire、task 兩個鍵）落在 beside 設備旁（外緣往外 beside_gap m）、top 設備頂上（標記、火點生成在設備頂面）、open 空地（離設備 ≥ open_clear m）；都不放在設備本體裡、棚頂底下。有 equipment 時 keep_out 不用（留著給舊版對照）。M 路上、M 旁的火照舊照幾何位置放，只排除設備本體"
       },
       "dog_start": {"v60": [-35.0, 7.5], "v60_1": [-35.0, -7.5], "v60_2": [-15.0, 25.0]},
+      "dog_patrol": {
+        "v60": [[-10.0, 7.5], [10.0, 7.5], [-25.0, 7.5]], "v60_1": [[-10.0, -7.5], [10.0, -7.5], [-25.0, -7.5]], "v60_2": [[0.0, 25.0], [25.0, 14.0], [5.0, 25.0]],
+        "_說明": "2026-11-05：狗的巡檢線（伯宇 ros2_ws/src/world/README_WORLD.md 的 robot1～3）。--dog bt 時 itest 產生巡邏任務檔（policy.loop: true）給伯宇的 task_manager：平常照這些點巡邏、邊走邊看火（demo.dog_detect），CBBA 派地面任務時插隊、做完接回巡邏。--dog fake 不巡邏"
+      },
       "_說明": "伯宇的變電所場景（docker/gz/worlds/yard.sdf，2026-10-24；python3 docker/itest/itest.py demo --world yard）：起降板在 (−40, −30)，(0, 0) 是變壓器，所以出生原點 spawn_origin 改到起降板（itest 給 sim 的 px4_sitl.sh 和每台的 cbba_uav.sh 同一個 UAV_SPAWN_ORIGIN）；出生間隔 spawn_spacing 5 m（2026-10-24：原本 2 m，3 m/s 回起飛點時剎停要約 3.9 m，停機點太擠、互相讓不開；也給 UAV_SPAWN_SPACING）；巡檢高度 8 m（鋼構棚頂 5.15 m、儲槽 6 m、管架與控制室 4 m），全隊同一個高度。demo 的欄位蓋掉上面 demo 的同名欄位：side_points R5（起降板 → G2 航線旁）；area 圍牆內；keep_out 是障礙物的範圍 [x0, x1, y0, y1]（加 1.5 m 邊），隨機的任務點、火點不放在裡面（變壓器三排、紅色變壓器 TC6_fire、管架、鋼構棚、控制室、儲槽）。dog_start：假狗的出生點，照伯宇 README_WORLD.md 的三隻狗。場地大（起降板到 R1 約 72 m，0.5 m/s 單趟約 2.5 分鐘），所以 timeout 900 s、情境檔的時限至少 timeout_min 900 s、return_wait 240 s，模擬電池續航 bat_drain 1800 s（預設 900 s 時約 12 分鐘就降到 20% 返航；給 px4_sitl.sh 和 cbba_uav.sh 的 SIM_BAT_DRAIN）"
     }
   },
@@ -50,6 +57,7 @@
     "closed":      {"name": "/{ns}/task_closed",   "type": "swarm_interfaces/msg/Task",       "reliable": true,  "transient_local": true},
     "announced":   {"name": "/{ns}/task_announced", "type": "swarm_interfaces/msg/Task",      "reliable": true,  "transient_local": true, "depth": 256},
     "path":        {"name": "/{ns}/cbba_path",     "type": "std_msgs/msg/UInt32MultiArray",   "reliable": true,  "transient_local": true},
+    "tx":          {"name": "/{ns}/cbba_tx",       "type": "std_msgs/msg/UInt64MultiArray",   "reliable": true,  "transient_local": false},
     "px4_position": {"name": "/{ns}/fmu/out/vehicle_local_position_v1", "type": "px4_msgs/msg/VehicleLocalPosition", "reliable": false, "transient_local": false},
     "px4_status":   {"name": "/{ns}/fmu/out/vehicle_status_v1",         "type": "px4_msgs/msg/VehicleStatus",        "reliable": false, "transient_local": false},
     "px4_battery":  {"name": "/{ns}/fmu/out/battery_status_v1",         "type": "px4_msgs/msg/BatteryStatus",        "reliable": false, "transient_local": false}
@@ -77,10 +85,21 @@
     "stop_pattern": "__node:=uav{id}_cbba_node( |$)",
     "positions": {"1": [0.0, 0.0], "2": [0.0, 20.0], "3": [20.0, 0.0]},
     "warmup": 6.0,
-    "_說明": "通訊測試：每台在自己的容器啟動 CBBA Node（不開 PX4、BT），位置由測試發假的 robot_state"
+    "_說明": "通訊測試：每台在自己的容器啟動 CBBA Node（不開 PX4、BT），位置由測試發假的 robot_state",
+    "dog_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:={ns}_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_v60.yaml -p agent_id:={id} -p publish_announced:=true",
+    "dog_stop_pattern": "__node:={ns}_cbba_node( |$)",
+    "dogs": [
+      {"id": 50, "ns": "v60", "container": "cbba_dog1", "pos": [20.0, 20.0]},
+      {"id": 51, "ns": "v60_1", "container": "cbba_dog2", "pos": [-20.0, 0.0]},
+      {"id": 52, "ns": "v60_2", "container": "cbba_dog3", "pos": [0.0, -20.0]}
+    ],
+    "_說明_dogs": "2026-11-09：comm、loss 加 --dogs N 時用前 N 隻。每隻在自己的容器（docker/.env 的 DOG_COUNT，gen_compose.py 產生 cbba_dogK），cbba_node 用 cbba_v60.yaml（agent_type UGV）；位置和無人機（0,0）、（0,20）、（20,0）互相離 20 m 以上，任務放在某台旁邊 2.5 m 時，能做的最近那台是唯一的"
   },
   "demo": {
     "world": "demo_site",
+    "dog_detect": {"radius": 10.0, "dwell": 1.0, "value": 100.0, "duration": 20.0, "deadline": 120.0, "_說明": "2026-11-05 使用者：先模擬狗也看得到火（雲台相機），和無人機一起「誰先看到誰報」。狗離還沒有人回報的火 ≤ radius m、持續 dwell 秒 → itest 用狗的身分發布地面任務（value、duration、deadline 同無人機的 fire_task），之後照常由 CBBA 在狗之間競標。只看距離、不算遮蔽；radius 0 = 關掉（只有無人機會發現）"},
+    "fire_in_coverage": true,
+    "_fire_in_coverage說明": "2026-11-05 使用者：火要靠移動中的無人機、狗看到才會被發現。隨機的火只放在有人會經過的範圍：狗的巡檢線 dog_detect.radius 內（--dog bt 巡邏時），或無人機現在航線（目前位置 → 手上的任務）的下視相機範圍內；false = 範圍內任何地方（可能沒人經過、沒人發現）。M 的火照原本放在 M 的路上或旁邊",
     "fire_mode": "point",
     "patrol": ["G1", "G2", "G3"],
     "fire_points": ["R1", "R2", "R3", "R4", "R5"],
@@ -108,7 +127,7 @@
     "stop_pattern": "__node:=v60[a-z0-9_]*_cbba_node( |$)",
     "sim_start": "exec python3 {repo}/docker/scripts/fake_dog.py --world {world} --ns {ns} --id {id} --model {ns}_standin --start {x} {y} --speed {speed}",
     "sim_stop_pattern": "fake_dog.py",
-    "bt_start": "exec dog_bt.sh start {ns} {id}",
+    "bt_start": "exec dog_bt.sh start {ns} {id} {mission}",
     "bt_stop_pattern": "lib/task_manager/task_manager_node",
     "bt_check": "test -f /home/ncrl/CBBA_BT/dog_ws/install/setup.bash",
     "bt_sim_start": "source {repo}/dog_ws/install/setup.bash && exec python3 {repo}/docker/scripts/fake_nav_body.py --world {world} --ns {ns} --model {ns}_standin --start {x} {y} --speed {speed} --ptz-sec {ptz}",
@@ -117,12 +136,12 @@
     "state_topic": "/{ns}/robot_state",
     "current_topic": "/{ns}/current_task",
     "units": [
-      {"ns": "v60", "id": 50, "start_xy": [-4.0, 0.0]},
-      {"ns": "v60_1", "id": 51, "start_xy": [10.0, 6.0]},
-      {"ns": "v60_2", "id": 52, "start_xy": [-18.0, -8.0]}
+      {"ns": "v60", "container": "cbba_dog1", "id": 50, "start_xy": [-4.0, 0.0]},
+      {"ns": "v60_1", "container": "cbba_dog2", "id": 51, "start_xy": [10.0, 6.0]},
+      {"ns": "v60_2", "container": "cbba_dog3", "id": 52, "start_xy": [-18.0, -8.0]}
     ],
     "speed": 1.5,
-    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗。名稱 2026-10-24 起照伯宇的狗（v60、v60_1、v60_2；原本 v60b、v60c）；start_xy 是 demo_site 的位置，其他場景看 worlds.<場景>.dog_start。--dog bt（2026-10-27）：執行者換成伯宇的狗 BT（bt_start，dog.container 裡的 task_manager，要先 dog_bt.sh build），sim 只放方塊身體（bt_sim_start，fake_nav_body.py：假 Nav2、假雲台 ptz_sec 秒、TF）；cbba_node 不變"
+    "_說明": "demo 的假 V60（2026-10-13；2026-10-20 起 3 隻，分散在場地三側，看狗之間對火警的競標）：每隻的 cbba_node（UGV、/{ns}、機號 {id}）要在 mesh 上，借 uav1 容器跑；執行者 fake_dog.py 在 sim（收 /{ns}/current_task、走過去、停留、回報，Gazebo 放橘色方塊替身 {ns}_standin）。speed 同時給兩邊（出價估的時間才準）。units 只留一隻就是原本的單隻狗。名稱 2026-10-24 起照伯宇的狗（v60、v60_1、v60_2；原本 v60b、v60c）；start_xy 是 demo_site 的位置，其他場景看 worlds.<場景>.dog_start。--dog bt（2026-10-27）：執行者換成伯宇的狗 BT（bt_start，dog.container 裡的 task_manager，要先 dog_bt.sh build），sim 只放方塊身體（bt_sim_start，fake_nav_body.py：假 Nav2、假雲台 ptz_sec 秒、TF）；cbba_node 不變。2026-11-09：每隻狗的 cbba_node、BT 跑在 units 的 container（cbba_dogK，docker/.env 的 DOG_COUNT；自己的 mesh 網卡，斷網、掉包時 uav1 ↔ 狗也經過 tc）；沒寫 container 時照舊用 dog.container（借 uav1）"
   },
   "uav": {
     "start": "export EXECUTOR=${{EXECUTOR:-bt}}; exec cbba_uav.sh",

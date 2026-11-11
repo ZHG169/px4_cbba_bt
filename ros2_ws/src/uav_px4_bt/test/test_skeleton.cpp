@@ -679,6 +679,7 @@ TEST_F(FlightTest, HomingTurnsAroundHoveringBusyNeighborWithoutStopping)
   n.id = 2;
   n.position = {0.0, -6.0, 5.0};
   n.busy = true;
+  n.task_hover = true;   // 懸停在任務點＝停住（位置廣播 bit 3）：2026-11-07 起路權看這個，移動中的自己繞開
   platform.nbrs = {n};
   double min_d = 1e9, stopped = 0.0, longest_stop = 0.0;
   for (double s = 0.0; s < 25.0; s += 0.05) {

@@ -6,6 +6,8 @@
       原檔 dart 2 ms 是狗的 WBC 要 500 Hz，我們只有假狗）
     - 拿掉固定的火情 tag 101（30, −10）：火改成 itest 起火時才生成（yard_points.csv 的 R1 就在那裡）
     - 拿掉閥門 tag 102（直立在棚內，給狗的相機；下視相機看不到）
+    - TC6_fire 原檔是紅色（README_WORLD.md：「起火的那塊」），2026-11-05 改成和其他變壓器一樣的灰藍色：火改成隨機的，
+      平常不該有紅色設備；火出現在設備頂上時，itest 才在那個設備蓋上紅色外殼（patrol_scenario.sh fire-on，顏色照原檔的紅色）
   他更新場景時：把原檔 fence_n 到 tank_2 的 model 換進來。
 -->
     <model name="fence_n"><static>true</static><pose>0 40 1.0 0 0 0.0</pose><link name="link">
@@ -116,7 +118,7 @@
     <model name="TC6_fire"><static>true</static><pose>30 -15 1.5 0 0 0.0</pose><link name="link">
       <collision name="c"><geometry><box><size>4 3 3</size></box></geometry></collision>
       <visual name="v"><geometry><box><size>4 3 3</size></box></geometry>
-        <material><ambient>0.78 0.35 0.27 1</ambient><diffuse>0.78 0.35 0.27 1</diffuse></material></visual>
+        <material><ambient>0.47 0.51 0.63 1</ambient><diffuse>0.47 0.51 0.63 1</diffuse></material></visual>
     </link></model>
     <model name="pipe_rack"><static>true</static><pose>0 -28 2.0 0 0 0.0</pose><link name="link">
       <collision name="c"><geometry><box><size>60 1.5 4.0</size></box></geometry></collision>

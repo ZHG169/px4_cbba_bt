@@ -1,13 +1,22 @@
 // 無人機之間的避碰（2026-10-24 定案）：每台鄰機先預測會不會碰，會碰才決定誰讓、讓的那台用 VO 繞，最後 CBF 保底。
-// 和 CBBA、機器狗無關（只用位置廣播的資料：機號、位置、速度、busy、task_hover）。
+// 和 CBBA、機器狗無關（只用位置廣播的資料：機號、位置、速度、busy）。
 //
 //   ConflictPredictor  有限時間的最近點（CPA）：自己用名目速度 u_nom（意圖）、鄰機用廣播的速度
 //                        r = p − p_j，v_r = u − v_j，t* = clamp(−r·v_r / |v_r|², 0, T)，d* = |r + v_r t*|
-//                        T = min(ttc_horizon, 自己到目標的時間)（自己沒在動時 T = ttc_horizon）
+//                        T = ttc_horizon；自己照 u_nom 飛到目標（t_goal）後停住、鄰機照樣飛，兩段一起算（predictCpaStop）。
+//                        2026-11-06 前 T = min(ttc_horizon, t_goal)：停在目標附近、還在修正幾公分的無人機 t_goal 約 1 s，
+//                        只看得到 1 s 內的鄰機（11/05 yard SITL D7：待命停在起飛點上空的 uav3 剩 3.8 m 才看到 3 m/s 飛來的
+//                        uav2、來不及讓，最近 0.41 m）
 //                      正在靠近而且 d* < 要求的距離才算衝突。要求的距離 = miss_clearance；最近點就是自己到目標的
 //                      那一刻（目標就在鄰機旁）只要 safe_radius（不要求做不到的距離）；自己沒在動時 ≤ safe_radius + 0.5 m；
 //                      現在已經比要求的近時，不要再更近就好（VO 才找得到往外的方向）
-//   RightOfWayPolicy   路權鍵 K = (task_hover, busy, −機號)，大的直行、小的讓；兩台用同一份位置廣播算，結果一定唯一
+//   RightOfWayPolicy   （2026-11-07 使用者定的規格）只看移動意圖與機號，不看 busy、任務類型：
+//                        一台移動、一台停住 → 移動中的讓（VO 側向繞行）；兩台都在動 → 機號大的讓；
+//                        兩台都停住 → 不建立讓路關係（不繞行），只由 CBF 維持安全距離。
+//                      停住＝沒有移動意圖：已經到自己的目標（水平 < max(2 × reach_tolerance, 0.5 m)），或 BT 沒在控制
+//                      （offboard 掉了：失效保護、被接管）。不看瞬間速度：剛起步、減速、讓路時速度很低也還是「在動」
+//                      （11/06 用速度 < 0.3 m/s 判斷時，0.5 m/s 巡航、VO 降到 25 % 的那台被當成停著）。
+//                      停住由位置廣播 flags bit 3 送出去，兩台用同一份資料算，結果一定唯一
 //   EncounterState     每台鄰機一筆：誰讓、往哪邊繞。開始後不換角色（交會途中任務完成、busy 改變、速度變 0 都不換），
 //                      解除：已經通過而且距離連續變大，或預測不衝突而且距離 > yield_exit，或沒有位置廣播
 //   AvoidancePlanner   讓的那台：VO（Velocity Obstacle）找離 u_nom 最近的安全速度——先保持速度只轉方向，左右都行時選
@@ -26,6 +35,7 @@
 // 和 cbfVelocity（cbf.hpp）不同：那個對每台鄰機一直加約束、約束違反後才往右繞（看起來是停下來等人過）。
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <vector>
@@ -50,17 +60,20 @@ struct Cpa
 // r：自己 − 鄰機（水平）；v_rel：自己的速度 − 鄰機的速度；horizon：T
 Cpa predictCpa(double rx, double ry, double vx, double vy, double horizon);
 
+// 自己照 (ux, uy) 飛 t_stop 秒後停住、鄰機一直照 (nvx, nvy) 飛：[0, horizon] 內的最近點（兩段取最近的、正在靠近的那段）。
+// 最近點在停住之後（鄰機飛過來）時 t > t_stop
+Cpa predictCpaStop(double rx, double ry, double ux, double uy, double nvx, double nvy, double t_stop, double horizon);
+
 // ===========================================================================
 // RightOfWayPolicy
 // ===========================================================================
 struct RightOfWayKey
 {
-  bool task_hover{false};
-  bool busy{false};
+  bool stopped{false};      // 停住：沒有移動意圖（已到目標，或 BT 沒在控制）；鄰機的來自位置廣播 bit 3
   std::uint16_t id{0};
 };
 
-// 自己有路權（直行）：K = (task_hover, busy, −機號) 比較大
+// 自己有路權（直行）：停住的優先；兩台一樣時機號小的優先
 bool hasRightOfWay(const RightOfWayKey & self, const RightOfWayKey & other);
 
 // ===========================================================================

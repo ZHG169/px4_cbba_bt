@@ -4,7 +4,7 @@
 綠色平台（G）一開始就貼著 tag；灰色方塊（R，2026-10-12 前是紅色）先不貼，插入時由 patrol_scenario.sh 用 Gazebo 的
 /world/patrol_site/create 生成 tag（Gazebo 執行中不容易切換模型的顯示，生成、刪除比較簡單）。
 tag 的高度要和 patrol_scenario.sh 的 TAG_Z_RED 一致。
-火警是另外生成的紅色方塊（models/fire_block）＋tag 101，起火時才出現（patrol_scenario.sh fire-at），場景裡沒有紅色。
+火警是另外生成的火點（models/task_marker_f 紅色圓盤，2026-11-05 前是 fire_block 紅色方塊）＋tag 101，起火時才出現（patrol_scenario.sh fire-at），場景裡沒有紅色。
 
 用法：python3 docker/gz/gen_patrol_site.py              patrol_site（預設）
       python3 docker/gz/gen_patrol_site.py demo_site    worlds/demo_site_points.csv → worlds/demo_site.sdf
@@ -22,7 +22,27 @@ HERE = Path(__file__).resolve().parent
 GREEN = "0.1 0.7 0.2 1"
 GRAY = "0.55 0.55 0.55 1"
 PAD_H = 0.05      # 綠色平台高度
+# 2026-11-05（使用者：平台、灰色方塊看起來像場景裡多出來的設備）：這些場景的 G 改成貼地的綠色圓盤（和 models/task_marker_g
+# 一樣：直徑 3 m、厚 3 cm、沒有碰撞），R 的灰色方塊不放（起火時才由 patrol_scenario.sh 生成火點）。其他場景照舊
+MARKER_WORLDS = {"yard"}
+MARKER_R, MARKER_H = 1.5, 0.03
 BOX_H = 0.3       # 灰色方塊高度（tag 貼在頂面上方 2 mm，避免 z-fighting）
+
+
+def disc(name, x, y, radius, height, color):
+    """貼地的圓盤：只有外觀、沒有碰撞（地面標記）"""
+    emissive = " ".join(f"{float(c) * 0.3:.3f}" for c in color.split()[:3])
+    return f"""    <model name="{name}">
+      <static>true</static>
+      <pose>{x} {y} {height / 2:.3f} 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><cylinder><radius>{radius}</radius><length>{height}</length></cylinder></geometry>
+          <material><ambient>{color}</ambient><diffuse>{color}</diffuse><emissive>{emissive} 1</emissive></material>
+        </visual>
+      </link>
+    </model>
+"""
 
 
 def read_points(path):
@@ -144,9 +164,14 @@ def main():
     body = [env_inc.read_text(encoding="utf-8")] if env_inc.exists() else []
     for p in points:
         name, x, y, tag_id = p["point"], p["x"], p["y"], p["tag"]
-        if name.startswith("G"):
+        if name.startswith("G") and world in MARKER_WORLDS:
+            body.append(disc(f"pad_{name}", x, y, MARKER_R, MARKER_H, GREEN))
+            body.append(tag(f"tag_{name}", tag_id, x, y, MARKER_H + 0.002))
+        elif name.startswith("G"):
             body.append(block(f"pad_{name}", x, y, 1.5, PAD_H, GREEN))
             body.append(tag(f"tag_{name}", tag_id, x, y, PAD_H + 0.002))
+        elif world in MARKER_WORLDS:
+            continue
         else:
             body.append(block(f"box_{name}", x, y, 1.4, BOX_H, GRAY))
     listing = "\n".join(f"    {p['point']}  ({p['x']}, {p['y']})  tag {p['tag']}" for p in points)

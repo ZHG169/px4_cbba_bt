@@ -24,6 +24,9 @@ python3 docker/itest/itest.py demo     # 展示（週計畫）：開 Gazebo 畫�
 python3 docker/itest/itest.py loss     # 第 5 週弱網量測：掉包 0／10／30／50／70% 各 20 次，約 15～25 分鐘
 python3 docker/itest/itest.py loss --levels 30 --trials 50     # 只量 30%、50 次
 python3 docker/itest/itest.py loss --tasks 3                   # 每次 3 個任務（每台 1 個，等於 10/27 以前的量法）
+python3 docker/itest/itest.py loss --dogs 3                    # 空地（2026-11-09）：3 架無人機＋3 隻狗，每次 12 個任務（空中 6、火警＋巡檢 6）
+python3 docker/itest/itest.py comm --dogs 3 --only C9          # 100% 斷網，空地各自退化成單機
+python3 docker/itest/itest.py demo --world yard --scenario blackout --seed 7 --dog bt   # 100% 斷網的任務退化（真的 BT，報告 B1～B4）
 ```
 
 容器裡已經有在跑的節點、PX4、Gazebo 時會停下來，避免打斷你正在做的事；加 `--kill-existing` 先關掉再跑。
@@ -95,6 +98,10 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
   假雲台（`/<ns>/ptz_inspect`，等 `dog.ptz_sec` 5 s 回 OK）、TF `map → <ns>/base_link`。驗證他的 BT 本身（哨兵中斷、
   `★ halt → cancel Nav2 goal` 的中斷延遲、回報恰好一次、平板接管、急停）；Nav2 的規劃、繞障礙不在範圍內。
   和假狗不同：停在目標前 1.5 m（standoff）、處置時間是雲台的 5 s（不看 `duration_sec`）、robot_state 2 Hz。
+  **巡邏**（2026-11-05）：場景有 `worlds.<場景>.dog_patrol`（yard：伯宇 README_WORLD.md 的三條巡檢線）時，itest 產生
+  `dog_mission_<ns>.yaml`（他的任務檔格式、`policy.loop: true`）給 `dog_bt.sh start <ns> <機號> <任務檔>`：狗一直巡邏、
+  邊走邊看火（`demo.dog_detect`），CBBA 派地面任務時插隊、做完接回巡邏。隨機的火只放在狗巡檢線或無人機航線看得到的範圍
+  （`demo.fire_in_coverage`）。
   第一次要先在 uav1 容器 `dog_bt.sh build`（編到 `dog_ws/`，不碰共用的 `ros2_ws/build`、`install`）；映像要重建
   （`robot.Dockerfile`、`sim.Dockerfile` 加了 `ros-jazzy-nav2-msgs`）。紀錄在 `dog_body_<ns>.log`、`dog_bt_<ns>.log`、`dog_cbba_<ns>.log`。
   報告 D3 會寫每個火點由哪隻狗處理；`units` 只留一隻就是原本的單隻狗。
@@ -114,7 +121,7 @@ python3 docker/itest/itest.py demo --interactive --area -15 15 -12 8   # 手動�
 | D3 | 假狗處理完（地面任務的 `task_closed` status DONE），而且沒有無人機被指派地面任務；列出由哪隻狗處理 |
 | D4 | 發現的那台在地面任務結束之後才回報 R 點完成，監控期間離火點 < 2 m。先發現的是別台時（例如待命、回程途中看到，2026-10-19）：發現的那台監控到地面任務結束（離火點 < 2 m），R 點有完成即可（被派去的那台照規則不重複監控） |
 | D5 | 全部做完後每台離起飛點 < 1 m、高度在巡檢高度 ±0.8 m |
-| D6 | `demo.mp4`（俯視動畫）、`gazebo.mp4`（Gazebo 俯瞰攝影機）、`demo_final.png`（最後一格）、`demo_cameras.mp4`（左：gazebo.mp4 縮成 1024 × 576；右：三台的下視相機各 256 × 192，掃 AprilTag 的那台；總寬 1280，2026-10-20） |
+| D6 | `demo.mp4`（俯視動畫）、`gazebo.mp4`（Gazebo 俯瞰攝影機）、`gazebo_labeled.mp4`（2026-11-05，`label_gazebo.py`：gazebo.mp4 加上 uav1～N、dog1～N、任務 G 綠／M 藍／T 黃／F 紅（做完變灰打勾）、載具到任務的連線、模擬時間、事件字幕、圖例；照 ros_bridge 的 clock 事件對齊模擬時間；舊的輸出可以 `python3 docker/itest/label_gazebo.py <目錄> --t0 … --t1 …` 手動補）、`demo_final.png`（最後一格）、`demo_cameras.mp4`（左：gazebo.mp4 縮成 1024 × 576；右：三台的下視相機各 256 × 192，掃 AprilTag 的那台；總寬 1280，2026-10-20） |
 | D7 | CBF：任務開始到回起飛點，空中兩台的最近水平距離 ≥ 0.9 × `cbf.safe_radius`（從 `exec_args` 或 `uav_bt.yaml` 讀）；列出 BT 記到的每次接近（「避碰：這次最接近鄰機」） |
 
 俯視動畫：一開始就畫出固定任務點（綠色）；起火時火點才出現（紅色方塊＋光圈）；各台的航跡（每 4 m 一個方向箭頭）、
@@ -139,6 +146,8 @@ python3 /home/ncrl/CBBA_BT/docker/itest/animate_demo.py /home/ncrl/CBBA_BT/docke
 `python3 docker/itest/bid_table.py docker/itest/out/<時間>_demo`（主機，只用標準庫）。
 
 **loss：第 5 週弱網量測**（不開 PX4、BT；2026-10-12；2026-10-27 改成多任務、比對理論值）
+
+**`--dogs N`（comm、loss，2026-11-09）**：加 N 隻狗（機號 50～，`/v60`…），每隻在自己的容器 `cbba_dogK`（`docker/.env` 的 `DOG_COUNT`，`gen_compose.py` 產生；同一個 robot 映像、沒有 PX4，只跑 `cbba_v60.yaml` 的 cbba_node），有自己的 mesh 網卡，`mesh_tc.sh` 也套在狗的容器上，空地之間每條連線都經過 tc。位置在 `config.json` 的 `comm.dogs`。loss 的任務改成混合：無人機身邊空中任務（1）、狗身邊輪流火警（2，建立者是無人機）和巡檢點（3）；理論執行者＝能力相符的最近那台；多記「跨能力」（空中任務出現在狗、地面任務出現在無人機的路徑或 current_task，應該永遠 0，30% 時不是 0 算 FAIL）。comm 的 C1～C8 照舊只測無人機（狗是旁觀的鄰居），C9 的 100% 斷網包含狗（狗身邊是火警、斷網中自己建巡檢）。`trials.csv` 多 `agents`、`cross_type`、`ground_tasks` 欄，`plot_tasks.py` 照 `agents` 標名稱。
 
 每個掉包率（`--levels`，預設 0,10,30,50,70；延遲 `--delay` 50 ± `--jitter` 30 ms，每台 uav 的 mesh 送出方向）
 試驗 `--trials` 次（預設 20）。每次建立 `--tasks` 個任務（預設 9 個）：第 j 個放在第 j % 3 台身邊 2.5 m（角度每次輪換），

@@ -208,10 +208,20 @@ struct NeighborInfo
   std::set<AgentId> neighbors;      // 它直接聽得到的
 };
 
+// 送出封包的分類（2026-11-09，第 5 週頻寬圖：丟包率提高後重傳增加多少）：
+//   BASE   週期的 AGENT_STATE／CBBA_STATE、變動時立即送的 CBBA_STATE、第一次的任務公告／完成宣告／結束、確認
+//   RETRY  為了補掉包而多送的：CBBA_STATE 的快速重送（和鄰居不一致）、任務定義與結束的重送（resendTask／resendClose）、
+//          完成宣告的第 2 次以後、缺口請求、補發批次
+//   RELAY  替別台轉送（多跳）
+enum class TxKind : std::uint8_t { BASE, RETRY, RELAY };
+
 struct CommStats
 {
   std::map<wire::PacketType, int> sent;
   std::map<wire::PacketType, std::size_t> sent_bytes;
+  std::size_t tx_bytes{0};        // 送出的位元組（全部，送進 UDP 之前；tc 丟掉的也算）
+  std::size_t tx_retry_bytes{0};  // 其中 RETRY
+  std::size_t tx_relay_bytes{0};  // 其中 RELAY
   std::map<wire::PacketType, int> received;
   int malformed{0};             // 解不開的封包
   int stale{0};                 // 重複、比視窗還舊、重開機前的 session、比上一次舊的狀態
@@ -338,8 +348,8 @@ private:
 
   // 送出
   wire::Header newHeader(wire::PacketType type);
-  void send(Bytes bytes, wire::PacketType type);
-  void sendCbbaState(double now);
+  void send(Bytes bytes, wire::PacketType type, TxKind kind = TxKind::BASE);
+  void sendCbbaState(double now, bool retry = false);
   void sendAgentState(double now);
 
   // 收到

@@ -15,14 +15,17 @@
 //   CBBA → BT   current_task (swarm_interfaces/Task)         目前要執行的任務；task_id = 0 表示沒有任務
 //               task_closed  (swarm_interfaces/Task)         任務結束（status DONE／CANCELLED），每個任務一次（2026-10-13，
 //                                                            我們加的、狗端沒有）：無人機發布火警後懸停監控，等地面處置完成才走
-//               task_announced (swarm_interfaces/Task)       全隊已知的任務，每個任務一次（2026-10-14，只有 agent_type = UAV 才發，
-//                                                            狗端沒有這個話題）：無人機的火點去重複要知道別台已經報過的火
+//               task_announced (swarm_interfaces/Task)       全隊已知的任務，每個任務一次（2026-10-14，預設只有 agent_type = UAV
+//                                                            才發，狗端沒有這個話題；參數 publish_announced 可以改，2026-11-09 給
+//                                                            整合測試量狗的送達）：無人機的火點去重複要知道別台已經報過的火
 //               task_orphaned (swarm_interfaces/Task)        孤兒任務（2026-10-17，我們加的）：任務還開著，但 orphan_warn_sec 內
 //                                                            一直沒有人得標、也沒有正式指派。只通知（給地面站），不處理
 //   CBBA → 測試、地面站
 //               cbba_path    (std_msgs/UInt32MultiArray)     這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次
 //                                                            （2026-10-27，我們加的）：current_task 只有路徑第一個，弱網測試要比對
 //                                                            「每台分到幾個任務」才看得到後面的；BT 不用訂
+//               cbba_tx      (std_msgs/UInt64MultiArray)     送出位元組的累計 [全部, 重傳, 轉送]，每 tx_stats_sec（0.2 s）發一次
+//                                                            （2026-11-09，我們加的）：第 5 週的頻寬圖（每台 TX、重傳 TX）；BT 不用訂
 //
 // 參與出價（spec §2.3 規則 2、4）：robot_state 在 state_timeout 內有更新，而且 mode == AUTO。
 //   MANUAL（平板接管）、ESTOP（急停）、沒有 robot_state 時對所有任務出價 0，手上的任務立刻釋放。
@@ -66,6 +69,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/u_int32_multi_array.hpp>
+#include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
@@ -205,6 +209,9 @@ public:
     // 孤兒任務：開著但這麼久沒有人得標就警告（0 = 不檢查）。全隊能做的都被永久排除（PERMANENT）、不在 AUTO 或失聯時，
     // CBBA 不會有任何訊號，期限又是軟限制，地面站不會知道（2026-10-17，宜臻的實作說明）
     orphan_warn_sec_ = declare_parameter<double>("orphan_warn_sec", 30.0);
+    // task_announced 要不要發（2026-11-09）：預設只有無人機發（火點去重複），狗的 cbba_node 照舊沒有這個話題。
+    // 整合測試（itest comm／loss --dogs）給狗 true，才量得到「狗知道幾個任務」（送達）；真的狗不用設
+    const bool publish_announced = declare_parameter<bool>("publish_announced", uav);
     // PREEMPTED（被接管 PREEMPTED_BY_MANUAL；無人機的備用 BT 路過發現火警 FIRE_FOUND）的排除時間，預設和
     // failure_exclude_sec 一樣。cbba_v60.yaml、cbba_uav.yaml 設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的
     // 空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時）
@@ -300,8 +307,9 @@ public:
     current_pub_ = create_publisher<TaskMsg>(topic("current_task"), rclcpp::QoS(1).reliable().transient_local());
     // 晚啟動的 BT 也要知道之前結束的任務：transient_local、保留最近 100 個
     closed_pub_ = create_publisher<TaskMsg>(topic("task_closed"), rclcpp::QoS(100).reliable().transient_local());
-    // 全隊已知的任務（無人機的火點去重複用，2026-10-14）：只有無人機發，狗的 cbba_node 完全不變
-    if (uav) {
+    // 全隊已知的任務（無人機的火點去重複用，2026-10-14）：預設只有無人機發，狗的 cbba_node 完全不變
+    // （publish_announced 參數，測試時狗也可以發）
+    if (publish_announced) {
       announced_pub_ = create_publisher<TaskMsg>(topic("task_announced"),
           rclcpp::QoS(256).reliable().transient_local());
     }
@@ -310,6 +318,10 @@ public:
     path_pub_ = create_publisher<std_msgs::msg::UInt32MultiArray>(topic("cbba_path"),
         rclcpp::QoS(1).reliable().transient_local());
     path_pub_->publish(std_msgs::msg::UInt32MultiArray());
+    // 送出位元組的累計（2026-11-09，第 5 週頻寬圖）：[全部, 重傳, 轉送]，送進 UDP 之前（tc 丟掉的也算），
+    // 每 tx_stats_sec 發一次；整合測試用固定的 10 s 區間相減，算每台的 TX、重傳 TX
+    tx_stats_sec_ = declare_parameter<double>("tx_stats_sec", tx_stats_sec_);
+    tx_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>(topic("cbba_tx"), rclcpp::QoS(10).reliable());
     if (participate_ == "state") {
       // best effort 的訂閱可以接 reliable 和 best effort 的發布（BT 用 reliable）
       state_sub_ = create_subscription<RobotStateMsg>(
@@ -566,6 +578,19 @@ private:
     publishOutputs(now);
     report(now);
     logStats(now);
+    publishTx(now);
+  }
+
+  void publishTx(double now)
+  {
+    if (tx_stats_sec_ <= 0.0 || now - tx_last_ < tx_stats_sec_) {
+      return;
+    }
+    tx_last_ = now;
+    const auto & st = comm_->stats();
+    std_msgs::msg::UInt64MultiArray m;
+    m.data = {st.tx_bytes, st.tx_retry_bytes, st.tx_relay_bytes};
+    tx_pub_->publish(m);
   }
 
   // 封包統計（2026-10-28，協定版本 3）：每 stats_log_sec 印一次這段時間送出的流量與各種封包的則數、位元組，
@@ -773,6 +798,8 @@ private:
 
   std::vector<TaskId> last_path_;
   double stats_log_sec_{10.0};   // 封包統計的間隔（0 = 不印）
+  double tx_stats_sec_{0.2};     // cbba_tx 的間隔（0 = 不發）
+  double tx_last_{-1e9};
   double stats_last_{-1.0};
   CommStats stats_prev_;
   std::map<TaskId, std::pair<AgentId, std::string>> bid_logged_;   // 出價表：上次印的（得標者, why）
@@ -791,7 +818,8 @@ private:
 
   rclcpp::Publisher<TaskMsg>::SharedPtr current_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr closed_pub_;
-  rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 只有無人機
+  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr tx_pub_;
+  rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 預設只有無人機（publish_announced）
   rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt32MultiArray>::SharedPtr path_pub_;
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;

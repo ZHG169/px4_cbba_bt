@@ -21,8 +21,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from plot_loss import GRID, INK, MUTED, SURFACE, pick_font, style  # noqa: E402
 
-# 參考調色盤（dataviz 的 palette.md）的類別色，照順序：uav1、uav2、uav3
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]
+# 參考調色盤（dataviz 的 palette.md）的類別色，照順序：uav1、uav2、uav3；狗（2026-11-09，loss --dogs）接在後面：
+# 紫、棕、灰藍（和無人機的藍、橘、綠分得開）
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#8e44ad", "#a8641f", "#5b6f86", "#c2185b", "#00838f", "#6d4c41"]
 
 LABELS = {
     "zh": dict(loss="掉包率（%）", got="每台分到幾個任務（平均；誤差線 = 最少～最多）", tasks="任務數",
@@ -57,7 +58,13 @@ def main():
         sys.exit(__doc__)
     levels = load(dirs)
     loss = list(levels)
-    n_agents = len(counts(next(iter(levels.values()))[0]["got_per_agent"]))
+    first = next(iter(levels.values()))[0]
+    n_agents = len(counts(first["got_per_agent"]))
+    # trials.csv 有 agents 欄（2026-11-09 起）時用它的名稱（uav1、dog50…），舊的照順序叫 uav1、uav2…
+    names = first["agents"].split("/") if first.get("agents") else [f"uav{a + 1}" for a in range(n_agents)]
+    # 狗一律叫 dog1～dogN（2026-11-09 使用者）：舊的 trials.csv 記的是機號（dog50…），照順序改名
+    dogs = [nm for nm in names if nm.startswith("dog")]
+    names = [f"dog{dogs.index(nm) + 1}" if nm in dogs else nm for nm in names]
     expect = counts(next(iter(levels.values()))[0]["expected_per_agent"])
     n_tasks = int(next(iter(levels.values()))[0]["tasks"])
 
@@ -80,14 +87,14 @@ def main():
             lo.append(m - min(got))
             hi.append(max(got) - m)
         pos = [x - 0.4 + width * (a + 0.5) for x in xs]
-        ax.bar(pos, mean, width, color=SERIES[a], edgecolor=SURFACE, linewidth=2, label=L["agent"].format(v=a + 1))
+        ax.bar(pos, mean, width, color=SERIES[a], edgecolor=SURFACE, linewidth=2, label=names[a])
         ax.errorbar(pos, mean, yerr=[lo, hi], fmt="none", ecolor=INK, elinewidth=1, capsize=3)
     if len(set(expect)) == 1:
         ax.axhline(expect[0], color=MUTED, linewidth=1, linestyle="--", label=L["expect"].format(e=expect[0]))
     ax.set_xticks(list(xs))
     ax.set_xticklabels([str(l) for l in loss])
     ax.set_ylim(0, max(6, max(max(counts(r["got_per_agent"])) for lv in levels.values() for r in lv) + 1))
-    ax.legend(frameon=False, labelcolor=INK, loc="upper left", ncol=n_agents + 1, fontsize=9)
+    ax.legend(frameon=False, labelcolor=INK, loc="upper left", ncol=min(n_agents + 1, 4), fontsize=9)
 
     # ---- 右：試驗分成三類（100% 堆疊）
     ax = axes[1]
@@ -126,7 +133,7 @@ def main():
     print(out)
 
     # 表格版（同一份數字，給報告用）
-    print("| 掉包率 | 次數 | " + " | ".join(f"uav{a + 1} 平均（最少～最多）" for a in range(n_agents)) +
+    print("| 掉包率 | 次數 | " + " | ".join(f"{names[a]} 平均（最少～最多）" for a in range(n_agents)) +
           " | 和理論相同 | 不平均 | 沒做完 |")
     print("|---" * (n_agents + 5) + "|")
     for i, l in enumerate(loss):

@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- 插入任務 T的地面標記（2026-11-05）：取代 1.5 m 的平台（看起來像場景裡多出來的設備）。直徑 3 m：yard 俯瞰鏡頭 300 m 高、
+     1 px 約 0.11 m，約 27 px。只有 visual，狗、無人機不會撞到；顏色和 docker/itest/label_gazebo.py 的標籤一致
+     （G 綠、M 藍、T 黃、F 紅）。G 由 gen_patrol_site.py 放進場景，M、T 由 patrol_scenario.sh mark-at 生成 -->
+<sdf version="1.9">
+  <model name="task_marker_t">
+    <static>true</static>
+    <link name="link">
+      <pose>0 0 0.015 0 0 0</pose>
+      <visual name="visual">
+        <geometry><cylinder><radius>1.5</radius><length>0.03</length></cylinder></geometry>
+        <material>
+          <ambient>0.95 0.75 0.05 1</ambient><diffuse>0.95 0.75 0.05 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular><emissive>0.285 0.225 0.015 1</emissive>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <functional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "uav_px4_bt/avoidance.hpp"
@@ -57,6 +59,9 @@ struct Result
   std::vector<double> min_speed;    // 每台離目標 > 1.5 m、開始 2 s 後的最低水平速度
   std::vector<std::vector<AvoidEvent>> events;
   bool emergency{false};
+  std::pair<double, double> first_emergency{0.0, 0.0};   // （機號, 秒）
+  std::vector<Agent> final_state;   // 結束時每台的位置、速度、目標（診斷用）
+  std::vector<std::string> trace;   // 每台角色開始／解除的時刻（診斷用）
 };
 
 // agents[i] 的機號 = i + 1；task_hover = 執行中而且離目標 < 0.5 m（同 UavContext::moveTo）。
@@ -78,8 +83,8 @@ Result simulate(std::vector<Agent> agents, const CbfParams & params, double dura
   for (std::size_t i = 0; i < n; ++i) {
     vref[i] = agents[i].v;
   }
-  auto hover = [](const Agent & a) {
-      return a.busy && std::hypot(a.goal.x - a.p.x, a.goal.y - a.p.y) < 0.5;
+  auto hover = [](const Agent & a) {   // 停住＝已到目標（同 UavContext::moveTo、位置廣播 bit 3；2026-11-07 不看 busy）
+      return std::hypot(a.goal.x - a.p.x, a.goal.y - a.p.y) < 0.5;
     };
   std::vector<Agent> beacon = agents;
   double beacon_time = 0.0;
@@ -101,10 +106,21 @@ Result simulate(std::vector<Agent> agents, const CbfParams & params, double dura
         }
       }
       const AvoidSelf self{agents[i].p, agents[i].goal,
-        {hover(agents[i]), agents[i].busy, static_cast<std::uint16_t>(i + 1)}, agents[i].v, vref[i], dt};
+        {hover(agents[i]), static_cast<std::uint16_t>(i + 1)}, agents[i].v, vref[i], dt};
       const AvoidOutput out = av[i].step(self, nb, params);
       vref[i] = out.velocity;
       r.events[i].insert(r.events[i].end(), out.events.begin(), out.events.end());
+      for (const AvoidEvent & e : out.events) {
+        if (e.kind == AvoidEvent::Kind::START || e.kind == AvoidEvent::Kind::RELEASE) {
+          r.trace.push_back("t=" + std::to_string(t).substr(0, 6) + " uav" + std::to_string(i + 1) +
+            (e.kind == AvoidEvent::Kind::START ? " START nb=" : " RELEASE nb=") + std::to_string(e.neighbor) +
+            " yields=" + std::to_string(e.self_yields) + " dist=" + std::to_string(e.distance).substr(0, 5) +
+            " speed=" + std::to_string(std::hypot(agents[i].v.x, agents[i].v.y)).substr(0, 5));
+        }
+      }
+      if (out.emergency && !r.emergency) {
+        r.first_emergency = {static_cast<double>(i + 1), t};   // 第一次緊急退讓：哪一台（機號）、第幾秒（診斷用）
+      }
       r.emergency = r.emergency || out.emergency;
       cmd[i] = out.velocity;
     }
@@ -133,10 +149,28 @@ Result simulate(std::vector<Agent> agents, const CbfParams & params, double dura
     }
     if (reached) {
       r.all_reached = true;
+      r.final_state = agents;
       return r;
     }
   }
+  r.final_state = agents;
   return r;
+}
+
+// 診斷：沒到的時候印每台最後的位置、速度、目標，和角色開始／解除的時序
+std::string dump(const Result & r)
+{
+  std::string m;
+  for (std::size_t i = 0; i < r.final_state.size(); ++i) {
+    const Agent & a = r.final_state[i];
+    m += "uav" + std::to_string(i + 1) + " p=(" + std::to_string(a.p.x).substr(0, 6) + "," +
+      std::to_string(a.p.y).substr(0, 6) + ") goal=(" + std::to_string(a.goal.x).substr(0, 6) + "," +
+      std::to_string(a.goal.y).substr(0, 6) + ") speed=" + std::to_string(std::hypot(a.v.x, a.v.y)).substr(0, 5) + "\n";
+  }
+  for (const std::string & line : r.trace) {
+    m += "  " + line + "\n";
+  }
+  return m;
 }
 
 const AvoidEvent * firstStart(const std::vector<AvoidEvent> & ev)
@@ -152,21 +186,17 @@ const AvoidEvent * firstStart(const std::vector<AvoidEvent> & ev)
 
 TEST(RightOfWay, KeyOrder)
 {
-  // K = (task_hover, busy, −機號)：任務中懸停 ＞ 執行中 ＞ 待命 ＞ 機號小
-  EXPECT_TRUE(hasRightOfWay({true, true, 9}, {false, true, 1}));
-  EXPECT_FALSE(hasRightOfWay({false, true, 1}, {true, true, 9}));
-  EXPECT_TRUE(hasRightOfWay({false, true, 9}, {false, false, 1}));
-  EXPECT_TRUE(hasRightOfWay({false, true, 2}, {false, true, 3}));
-  EXPECT_FALSE(hasRightOfWay({false, true, 3}, {false, true, 2}));
+  // 2026-11-07：停住的優先（移動中的讓）；兩台一樣時機號小的優先（機號大的讓）。不看 busy、任務類型
+  EXPECT_TRUE(hasRightOfWay({true, 9}, {false, 1}));
+  EXPECT_FALSE(hasRightOfWay({false, 1}, {true, 9}));
+  EXPECT_TRUE(hasRightOfWay({false, 2}, {false, 3}));
+  EXPECT_FALSE(hasRightOfWay({false, 3}, {false, 2}));
+  EXPECT_TRUE(hasRightOfWay({true, 2}, {true, 3}));
   // 兩台用同一份資料算：一定一台有、一台沒有
   for (bool h1 : {false, true}) {
-    for (bool b1 : {false, true}) {
-      for (bool h2 : {false, true}) {
-        for (bool b2 : {false, true}) {
-          const RightOfWayKey a{h1, b1, 2}, b{h2, b2, 3};
-          EXPECT_NE(hasRightOfWay(a, b), hasRightOfWay(b, a));
-        }
-      }
+    for (bool h2 : {false, true}) {
+      const RightOfWayKey a{h1, 2}, b{h2, 3};
+      EXPECT_NE(hasRightOfWay(a, b), hasRightOfWay(b, a));
     }
   }
 }
@@ -184,6 +214,23 @@ TEST(ConflictPredictor, FiniteSegmentCpa)
   EXPECT_NEAR(b.d, 2.0, 1e-9);
   // 沒有相對運動
   EXPECT_FALSE(predictCpa(1.0, 1.0, 0.0, 0.0, 5.0).approaching);
+}
+
+TEST(ConflictPredictor, NeighborArrivesAfterSelfStops)
+{
+  // 自己 0.1 m/s、1 s 後停在目標；鄰機在 10 m 外以 2.5 m/s 正對飛來（4 s 後經過）。只看到自己到目標（1 s）時最近點還有
+  // 7.4 m，看不到；兩段一起算：停住之後鄰機飛過來，最近點在 4 s 時、幾乎重疊（2026-11-06，D7 的原因）
+  const Cpa old = predictCpa(-10.0, 0.0, 0.1 + 2.5, 0.0, 1.0);
+  EXPECT_GT(old.d, 7.0);
+  const Cpa c = predictCpaStop(-10.0, 0.0, 0.1, 0.0, -2.5, 0.0, 1.0, 5.0);
+  EXPECT_TRUE(c.approaching);
+  EXPECT_LT(c.d, 0.1);
+  EXPECT_NEAR(c.t, 4.0, 0.05);
+  // 停住之前就最近（還沒到目標時對方從旁邊過去）：和單段一樣
+  const Cpa a = predictCpaStop(-10.0, 1.0, 0.0, 0.0, -2.0, 0.0, 10.0, 5.0);
+  const Cpa b = predictCpa(-10.0, 1.0, 2.0, 0.0, 5.0);
+  EXPECT_NEAR(a.d, b.d, 1e-9);
+  EXPECT_NEAR(a.t, b.t, 1e-9);
 }
 
 TEST(Avoidance, OffsetPassNoConstraintNoSlowdown)
@@ -218,7 +265,7 @@ TEST(Avoidance, DepartureTowardPassingNeighbor)
         }
       });
   EXPECT_TRUE(departed);
-  EXPECT_TRUE(r.all_reached);
+  EXPECT_TRUE(r.all_reached) << dump(r);
   const AvoidEvent * s2 = firstStart(r.events[1]);
   ASSERT_NE(s2, nullptr);
   EXPECT_EQ(s2->neighbor, 3u);
@@ -254,7 +301,7 @@ TEST(Avoidance, CrossingNoStall)
 
 TEST(Avoidance, TaskHoverHasRightOfWay)
 {
-  // 航線正好穿過一台在任務點懸停的鄰機（機號比較大）：任務懸停優先 → 懸停的不動，飛的那台繞過去、不停
+  // 航線正好穿過一台在任務點懸停的鄰機（機號比較大）：停著的優先 → 懸停的不動，飛的那台繞過去、不停
   const CbfParams p = yamlParams();
   const Result r = simulate({{{0, 0, 8}, {}, {20, 0, 8}}, {{10, 0.2, 8}, {}, {10, 0.2, 8}}}, p);
   EXPECT_TRUE(r.all_reached);
@@ -265,15 +312,38 @@ TEST(Avoidance, TaskHoverHasRightOfWay)
   EXPECT_TRUE(firstStart(r.events[0])->self_yields);
 }
 
-TEST(Avoidance, IdleMovesOutOfBusyPath)
+TEST(Avoidance, BusyGoesAroundParkedIdle)
 {
-  // 待命的停在執行中那台的航線上（機號比較小）：執行中優先 → 待命的往旁邊移開，執行中的到得了、不停
+  // 待命的停在執行中那台的航線上（機號比較小）：停著的優先（2026-11-06 使用者：不管停著的原因，都由移動中的繞開；
+  // 原本是待命的往旁邊移開）→ 執行中的繞過去、不停，待命的不動
   const CbfParams p = yamlParams();
   const Result r = simulate({{{10, 0, 8}, {}, {10, 0, 8}, false}, {{0, 0.1, 8}, {}, {20, 0.1, 8}}}, p, 120.0);
+  EXPECT_TRUE(r.all_reached);
   EXPECT_GE(r.min_distance, p.safe_radius);
   EXPECT_LT(r.stall[1], 1.0);
-  ASSERT_NE(firstStart(r.events[0]), nullptr);
-  EXPECT_TRUE(firstStart(r.events[0])->self_yields);
+  EXPECT_LT(r.path[0], 0.1);
+  ASSERT_NE(firstStart(r.events[1]), nullptr);
+  EXPECT_TRUE(firstStart(r.events[1])->self_yields);
+}
+
+TEST(Avoidance, HomingPassesParkedNeighborAtSpeed)
+{
+  // 2026-11-05 yard SITL 的 0.41 m（D7）：uav3 已經停在起飛點 (−40, −20) 上空待命，uav2 以 3 m/s 從北邊回 (−40, −25)，
+  // 直線航線偏差約 0.4 m 穿過 uav3。停著的優先 → uav2 提早用 VO 繞開；uav3 不動、沒有緊急退讓、不低於 safe_radius
+  const CbfParams p = fastParams();
+  const Vec3 from{-42.4, 11.7, 8}, home2{-40, -25, 8};
+  const Vec3 dir = (home2 - from) * (1.0 / norm(home2 - from));
+  const Result r = simulate({{{-40, -30, 8}, {}, {-40, -30, 8}, false},
+      {from, dir * 3.0, home2, false},
+      {{-39.9, -20, 8}, {}, {-39.9, -20, 8}, false}}, p, 60.0);
+  EXPECT_TRUE(r.all_reached);
+  EXPECT_GE(r.min_distance, p.safe_radius);
+  EXPECT_FALSE(r.emergency);
+  EXPECT_LT(r.path[2], 0.3);                  // 停著的 uav3 沒被推開
+  const AvoidEvent * s2 = firstStart(r.events[1]);
+  ASSERT_NE(s2, nullptr);
+  EXPECT_EQ(s2->neighbor, 3u);
+  EXPECT_TRUE(s2->self_yields);
 }
 
 TEST(Avoidance, SpawnPadIdleStaysStill)
@@ -306,6 +376,51 @@ TEST(Avoidance, FastHomingSwapNextToNeighborsHome)
   EXPECT_LT(r.path[2], 6.5 + 2.0 * p.miss_clearance);
 }
 
+TEST(Avoidance, HomingPassesNeighborParkedAtHome)
+{
+  // 2026-11-05 yard SITL 的 0.41 m（D7）：uav3 已經回到起飛點 (−40, −20) 上空待命（還在修正幾公分，約 0.1 m/s），
+  // uav2 以 3 m/s 從北邊回 (−40, −25)，直線航線穿過 uav3。2026-11-07 使用者的規則：有一台停著，就由移動中的讓開 →
+  // uav2 提早（6 m 外）用 VO 繞開，uav3 不讓、沒有緊急退讓、不低於 safe_radius、都回到起飛點。
+  // （11/06 的版本是「都待命 → 機號大的 uav3 讓」，用來驗證兩段預測：原本預測窗口被截成約 1 s，剩 3.8 m 才看到）
+  const CbfParams p = fastParams();
+  const Vec3 from{-42.4, 11.7, 8}, home2{-40, -25, 8};
+  const Vec3 dir = (home2 - from) * (1.0 / norm(home2 - from));
+  // uav3 的目標每秒在起飛點左右 0.12 m 切換：模擬懸停時一直在修正幾公分（名目速度約 0.1 m/s，不算「沒在動」）；
+  // 不這樣做的話模擬沒有雜訊，uav3 幾秒內就完全停住，走的是「沒在動」那條路，重現不了 SITL
+  const Result r = simulate({{{-40, -30, 8}, {}, {-40, -30, 8}, false},
+      {from, dir * 3.0, home2, false},
+      {{-39.9, -20, 8}, {}, {-40, -20, 8}, false}}, p, 60.0,
+      [](double t, std::vector<Agent> & a) {
+        a[2].goal = {-40.0 + (std::fmod(t, 2.0) < 1.0 ? 0.12 : -0.12), -20.0, 8.0};
+      });
+  EXPECT_TRUE(r.all_reached);
+  EXPECT_GE(r.min_distance, p.safe_radius);
+  if (r.emergency) {   // 診斷：哪一台、什麼時候、當時的距離與違反量
+    std::string msg = "first emergency: uav" + std::to_string(static_cast<int>(r.first_emergency.first)) +
+      " t=" + std::to_string(r.first_emergency.second) + "\n";
+    for (std::size_t i = 0; i < r.events.size(); ++i) {
+      for (const AvoidEvent & e : r.events[i]) {
+        if (e.kind == AvoidEvent::Kind::EMERGENCY_ON || e.kind == AvoidEvent::Kind::START ||
+          e.kind == AvoidEvent::Kind::RELEASE)
+        {
+          msg += "  uav" + std::to_string(i + 1) + " kind=" + std::to_string(static_cast<int>(e.kind)) +
+            " nb=" + std::to_string(e.neighbor) + " yields=" + std::to_string(e.self_yields) +
+            " dist=" + std::to_string(e.distance) + " d_cpa=" + std::to_string(e.d_cpa) +
+            " t_cpa=" + std::to_string(e.t_cpa) + " worst=" + std::to_string(e.worst) + "\n";
+        }
+      }
+    }
+    ADD_FAILURE() << msg;
+  }
+  const AvoidEvent * s2 = firstStart(r.events[1]);
+  ASSERT_NE(s2, nullptr);
+  EXPECT_EQ(s2->neighbor, 3u);
+  EXPECT_TRUE(s2->self_yields);               // 停著的 uav3 優先：移動中的 uav2 讓
+  EXPECT_GT(s2->distance, 6.0);               // 提早看到、提早繞
+  const AvoidEvent * s3 = firstStart(r.events[2]);
+  EXPECT_TRUE(s3 == nullptr || !s3->self_yields);   // uav3 不讓
+}
+
 TEST(Avoidance, FastCrossingNoStall)
 {
   // 3 m/s 垂直交叉：不低於 safe_radius、都不停
@@ -319,15 +434,15 @@ TEST(Avoidance, FastCrossingNoStall)
 
 TEST(Avoidance, RolesLockedDuringEncounter)
 {
-  // 交會開始後，即使對方的 busy、task_hover 改變，角色也不換
+  // 交會開始後，即使雙方的停住／移動改變，角色也不換
   const CbfParams p = yamlParams();
   CollisionAvoider av;
-  const AvoidSelf self{{0, 0, 8}, {20, 0, 8}, {false, true, 3}, {}, {}, 0.05};
+  AvoidSelf self{{0, 0, 8}, {20, 0, 8}, {false, 3}, {}, {}, 0.05};
   std::vector<Neighbor> nb{Neighbor{2, {6, 0, 8}, {-0.5, 0, 0}, 0.0, true, false}};
   av.step(self, nb, p);
   ASSERT_EQ(av.encounters().count(2), 1u);
-  EXPECT_TRUE(av.encounters().at(2).self_yields);     // 機號 3 > 2：讓
-  nb[0].busy = false;                                  // 對方變成待命（照路權應該換成對方讓）
+  EXPECT_TRUE(av.encounters().at(2).self_yields);     // 兩台都在動、機號 3 > 2：讓
+  self.key.stopped = true;                             // 自己變成停住（照路權應該換成對方讓）
   av.step(self, nb, p);
   ASSERT_EQ(av.encounters().count(2), 1u);
   EXPECT_TRUE(av.encounters().at(2).self_yields);     // 不換
@@ -338,7 +453,7 @@ TEST(Avoidance, EmergencyWhenSqueezed)
   // 兩台鄰機從兩側擠進 safe_radius：緊急退讓（不用投影的結果），速度往外
   const CbfParams p = yamlParams();
   CollisionAvoider av;
-  const AvoidSelf self{{0, 0, 8}, {0, 0, 8}, {false, false, 3}, {}, {}, 0.05};
+  const AvoidSelf self{{0, 0, 8}, {0, 0, 8}, {false, 3}, {}, {}, 0.05};
   const std::vector<Neighbor> nb{Neighbor{1, {0.7, 0.1, 8}, {}, 0.0, true, false},
     Neighbor{2, {-0.9, 0.1, 8}, {}, 0.0, true, false}};
   const AvoidOutput out = av.step(self, nb, p);

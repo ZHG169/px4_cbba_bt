@@ -10,6 +10,7 @@
 
   - 只用 UDPv4（關掉共享記憶體，確保流量一定經過網卡、tc 才有效）
   - maxInitialPeersRange=32：每個 IP 最多探索 32 個 ROS 節點（預設只有 4 個）
+  - remote_locators 16：遠端參與者最多記 16 個單播位址（預設 4 個；sim 有 6 張以上的網卡時要，2026-11-09）
 -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <profiles>
@@ -35,6 +36,16 @@ ${CBBA_WHITELIST}
 ${CBBA_PEERS}
           </initialPeersList>
         </builtin>
+        <!-- 遠端參與者最多記幾個位址（2026-11-09）：Fast DDS 預設單播 4 個。sim 每台無人機、每隻狗各一張線材網卡，
+             3 台＋3 隻狗時 sim 的節點廣播 6 個位址，收的那端只留前 4 個、可能剛好丟掉自己那條線 → 連不到 sim
+             （itest comm 加 3 隻狗時 uav1、dog52 收不到 robot_state）。收的那端套用這個上限，所以每個容器都要。
+             PX4 的 XRCE agent 建的參與者不吃這份設定（PX4 自己送一段 XML），仍是 4 個，所以 sim 的線材網卡還是要 ≤ 4 張（gen_compose.py：狗共用一條線） -->
+        <allocation>
+          <remote_locators>
+            <max_unicast_locators>16</max_unicast_locators>
+            <max_multicast_locators>4</max_multicast_locators>
+          </remote_locators>
+        </allocation>
       </rtps>
     </participant>
   </profiles>

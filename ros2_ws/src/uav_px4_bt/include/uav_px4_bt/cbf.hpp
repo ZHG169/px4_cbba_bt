@@ -58,7 +58,7 @@ struct Neighbor
   Vec3 velocity;
   double age{0.0};    // 資料的年齡（秒）：收到之後經過的時間
   bool busy{false};   // 正在執行任務（前往或停留）：待命的要讓路給它
-  bool task_hover{false};   // 在任務點懸停（BT 已經到點、正在停留／辨識／監控；位置廣播 flags bit 3，2026-10-24）
+  bool task_hover{false};   // 停住（位置廣播 flags bit 3；2026-11-07 起＝沒有移動意圖，路權用它；名稱沿用 10/24 的任務中懸停）
 };
 
 struct CbfParams
