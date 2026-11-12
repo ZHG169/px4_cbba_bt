@@ -397,7 +397,8 @@ itest `--dogs`／斷網情境／`dog_patrol.py`／`plot_blackout.py`、cbba_core
    11/11 單元測試全過）；**第 2b 步**（11/12 寫完；**2a＋2b 11/12 整合測試通過**：itest comm --dogs 3 C0～C9、uav）：`swarm_interfaces` 的 Task／TaskResult／Bid 的 task_id 改 uint64、`cbba_path` 改
    UInt64MultiArray；無人機 BT（`TaskId`、`taskHex`，骨架副本、`uav_task_manager_node`、`px4_platform`、備用 BT、測試）、`task_executor`、
    伯宇狗 BT 的介接層（直接改 handoff，patch 存在 `docker/dog/task_manager_uint64.patch`，原檔備份 `docs/handoff_uav_2026-10-12/task_manager.orig_20261112`）、
-   itest 的 `config.json`；Python（fake_dog、itest）不用改；
+   itest 的 `config.json`；Python（fake_dog、itest）不用改；**第 2c 步**（11/12 寫完；單元測試、itest comm --dogs 3 通過）：世代存檔（`state_dir`、`epoch_required`）、
+   `CbbaComm::newTaskId()`、同機號偵測（`trackSession`、`SessionFilter::pin`、`agent_conflict` 話題）；
    2c：世代存檔＋同機號偵測；3 TASK_SPEC；4 閘道；5 DETECTION。
    原規劃：CBBA 合約已定（11/11，`cbba_m0_contract.md`）→ 給伯宇的介面變更清單（task_id uint64、Task／TaskResult 加欄位、`current_task.spec`、WAITING_SPEC）→ 註冊表裡 CBBA 用的 tools、platforms、fleet 三份 → 之後才是無人機（uav_adapter，SITL 後端用 `Px4Platform`）。見「下一階段：2-1b」。
 2. 第 5 週收尾（選做）：

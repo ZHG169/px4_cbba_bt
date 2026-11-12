@@ -148,6 +148,8 @@ inline bool validTaskId(TaskId id)
   }
   return taskCreator(id) != 0 && taskEpoch(id) != 0;
 }
+// 世代的下一個值（每次啟動 + 1，存檔；0 保留給舊型 ID，所以 0xFFFF 之後回到 1）
+inline Epoch nextEpoch(Epoch previous) {return previous >= 0xFFFFu ? 1 : static_cast<Epoch>(previous + 1);}
 // 同一個（建立者, 世代）的流水號上限：舊型 16 位元、版本 4 32 位元
 inline std::uint64_t seqLimit(Epoch epoch) {return epoch == 0 ? 0x10000ull : 0x100000000ull;}
 // log 用：舊型印十進位（和版本 3 的 log 一樣），版本 4 印 creator.epoch.seq

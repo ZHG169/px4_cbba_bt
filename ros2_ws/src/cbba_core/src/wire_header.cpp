@@ -175,6 +175,23 @@ bool SessionFilter::accept(const Header & header)
   return s.seen.insert(header.sequence).second;   // 視窗內：沒收過才接受
 }
 
+void SessionFilter::pin(std::uint16_t sender, std::uint64_t session)
+{
+  Sender & s = senders_[sender];
+  if (s.session != session) {
+    if (s.session != 0) {
+      s.retired.push_back(s.session);
+      if (s.retired.size() > kRetiredMemory) {
+        s.retired.pop_front();
+      }
+    }
+    s.retired.erase(std::remove(s.retired.begin(), s.retired.end(), session), s.retired.end());
+    s.session = session;
+  }
+  s.highest = 0;
+  s.seen.clear();
+}
+
 bool SessionFilter::restarted(std::uint16_t sender) const
 {
   const auto it = senders_.find(sender);

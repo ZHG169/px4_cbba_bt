@@ -400,7 +400,19 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     return;
   }
   if (h->sender_id == id()) {
-    return;   // multicast loopback 收到自己的
+    // multicast loopback 收到自己的；session 不是自己的 = 別台用了自己的機號（版本 4 的同機號偵測）
+    if (h->session_id != session_) {
+      if (h->session_id != self_conflict_session_) {
+        ++stats_.id_conflicts;
+        self_conflict_session_ = h->session_id;
+      }
+      self_conflict_last_ = now;
+    }
+    return;
+  }
+  if (trackSession(*h, now)) {
+    ++stats_.conflict_dropped;
+    return;
   }
   if (!filter_.accept(*h)) {
     ++stats_.stale;
@@ -426,6 +438,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
   if (start_ < 0.0) {
     start_ = now;
   }
+  releaseConflicts(now);
 
   // 依目前位置、電量重新評估
   if (now >= next_reevaluate_) {
@@ -1337,6 +1350,10 @@ void CbbaComm::onTaskAnnounce(const Bytes & bytes, double now)
     ++stats_.duplicates;
     return;
   }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;   // 同機號衝突中較晚的那台建立的：不轉送、不收
+    return;
+  }
   if (b->relay.origin_id != id()) {
     relay(bytes);   // 第一次收到時原封不動轉送一次
   }
@@ -1346,6 +1363,10 @@ void CbbaComm::onTaskAnnounce(const Bytes & bytes, double now)
 // 任務定義加進本機（TASK_ANNOUNCE、SYNC_BATCH 共用）
 void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
 {
+  if (rejectedOrigin(b.relay)) {   // SYNC_BATCH 補來的也一樣
+    ++stats_.conflict_dropped;
+    return;
+  }
   Task t;
   t.id = b.task_id;
   t.type = static_cast<TaskType>(b.task_type);
@@ -1384,6 +1405,96 @@ void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
   e.spec_length = b.spec_length;
   e.spec_crc = b.spec_crc;
   addTask(b.relay, t, now);
+}
+
+// ===========================================================================
+// 協定版本 4：版本 4 的 task_id、同機號偵測（2026-11-11，cbba_m0_contract.md 第六節）
+// ===========================================================================
+std::optional<TaskId> CbbaComm::newTaskId()
+{
+  if (config_.epoch == 0 || next_seq_ == 0xFFFFFFFFu) {
+    return std::nullopt;   // 流水號用完：要重新啟動（換世代）
+  }
+  return makeTaskId(id(), config_.epoch, ++next_seq_);
+}
+
+std::optional<std::uint64_t> CbbaComm::selfConflict(double now) const
+{
+  if (self_conflict_session_ == 0 || now - self_conflict_last_ > config_.conflict_release) {
+    return std::nullopt;
+  }
+  return self_conflict_session_;
+}
+
+// 記下每台各個 session 第一次、最後一次聽到的時間。同一個機號，較早出現的 session 在較晚的出現 conflict_grace 秒之後
+// 還在講話 → 兩台用了同一個機號：留較早的（filter 指回它），較晚的 session 之後的封包都丟掉（回傳 true）。
+// 沒有偵測的話，SessionFilter 會把每次換 session 當成重開機，兩台的封包輪流被當成過期丟掉，而且兩台建立的任務
+// task_id 會撞在一起（版本 4 有世代，撞的機會小，但仍可能）
+bool CbbaComm::trackSession(const wire::Header & h, double now)
+{
+  const auto conflict = conflicts_.find(h.sender_id);
+  if (conflict != conflicts_.end() && h.session_id == conflict->second.rejected_session) {
+    sessions_[h.sender_id][h.session_id].last = now;   // 釋放時要知道它還在
+    return true;
+  }
+  auto & seen = sessions_[h.sender_id];
+  auto [it, inserted] = seen.try_emplace(h.session_id, SessionSeen{now, now});
+  it->second.last = now;
+  if (inserted && seen.size() > 4) {   // 只記最近的幾個 session（重開機很多次時不會一直長）
+    auto oldest = seen.begin();
+    for (auto s = seen.begin(); s != seen.end(); ++s) {
+      if (s->second.last < oldest->second.last) {
+        oldest = s;
+      }
+    }
+    seen.erase(oldest);
+  }
+  if (conflict != conflicts_.end()) {
+    return false;
+  }
+  for (const auto & [session, other] : seen) {
+    if (session == h.session_id) {
+      continue;
+    }
+    const SessionSeen & mine = seen.at(h.session_id);
+    const bool other_older = other.first <= mine.first;
+    const SessionSeen & older = other_older ? other : mine;
+    const SessionSeen & newer = other_older ? mine : other;
+    if (older.last > newer.first + config_.conflict_grace) {
+      AgentConflict c;
+      c.agent = h.sender_id;
+      c.kept_session = other_older ? session : h.session_id;
+      c.rejected_session = other_older ? h.session_id : session;
+      c.since = now;
+      conflicts_[h.sender_id] = c;
+      ++stats_.id_conflicts;
+      filter_.pin(h.sender_id, c.kept_session);
+      return h.session_id == c.rejected_session;
+    }
+  }
+  return false;
+}
+
+bool CbbaComm::rejectedOrigin(const wire::RelayHeader & origin) const
+{
+  const auto c = conflicts_.find(origin.origin_id);
+  return c != conflicts_.end() && origin.origin_session == c->second.rejected_session;
+}
+
+// 留下的 session 這麼久沒聲音：較早的那台關掉了，改接受較晚的（當成一般的重開機）
+void CbbaComm::releaseConflicts(double now)
+{
+  for (auto it = conflicts_.begin(); it != conflicts_.end(); ) {
+    auto & seen = sessions_[it->first];
+    const auto kept = seen.find(it->second.kept_session);
+    if (kept == seen.end() || now - kept->second.last > config_.conflict_release) {
+      filter_.pin(it->first, it->second.rejected_session);
+      seen.erase(it->second.kept_session);
+      it = conflicts_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 // ===========================================================================

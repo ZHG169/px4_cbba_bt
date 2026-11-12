@@ -1211,3 +1211,125 @@ TEST(CbbaComm, AnnounceCarriesV4Fields)
   EXPECT_EQ(r.ext.spec_length, 300u);
   EXPECT_EQ(r.ext.spec_crc, 0xABCDu);
 }
+
+// ===========================================================================
+// 協定版本 4：世代、版本 4 的 task_id、同機號偵測（2026-11-11）
+// ===========================================================================
+TEST(Epoch, NextSkipsZero)
+{
+  // 世代 0 保留給舊型 ID：0xFFFF 之後回到 1
+  EXPECT_EQ(nextEpoch(0), 1);
+  EXPECT_EQ(nextEpoch(41), 42);
+  EXPECT_EQ(nextEpoch(0xFFFF), 1);
+}
+
+TEST(CbbaComm, NewTaskIdUsesEpoch)
+{
+  // 有世代時產生版本 4 的 task_id（建立者自己、流水號從 1 起）；沒有世代時不能產生
+  CommConfig cc;
+  cc.epoch = 7;
+  Swarm swarm(0.0, 1, cc);
+  swarm.add(200, {0, 0, 5});
+  const auto a = swarm.node(200).newTaskId();
+  const auto b = swarm.node(200).newTaskId();
+  ASSERT_TRUE(a && b);
+  EXPECT_EQ(*a, makeTaskId(200, 7, 1));
+  EXPECT_EQ(*b, makeTaskId(200, 7, 2));
+  EXPECT_EQ(swarm.node(200).epoch(), 7);
+
+  Swarm legacy;
+  legacy.add(1, {0, 0, 5});
+  EXPECT_FALSE(legacy.node(1).newTaskId());
+}
+
+namespace
+{
+Bytes fakeAgentState(AgentId sender, std::uint64_t session, std::uint32_t seq)
+{
+  wire::Header h;
+  h.sender_id = sender;
+  h.session_id = session;
+  h.sequence = seq;
+  return wire::encodeAgentState(h, wire::AgentStateBody{});
+}
+}  // namespace
+
+TEST(Conflict, RestartIsNotAConflict)
+{
+  // 真的重開機：舊 session 不再講話，不算同機號衝突
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.run(2.0);
+  swarm.restart(2);
+  swarm.run(3.0);
+  EXPECT_TRUE(swarm.node(1).conflicts().empty());
+  EXPECT_EQ(swarm.node(1).stats().id_conflicts, 0);
+}
+
+TEST(Conflict, SameIdTwoSessionsKeepsEarlierAndRejectsLaterTasks)
+{
+  // 另一台也用機號 2（session 0x99）：真的 uav2 先出現 → 留它；0x99 的封包、它建立的任務拒收；
+  // 真的 uav2 關掉 conflict_release 之後解除，改接受 0x99
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.run(2.0);
+  const std::uint64_t real = swarm.node(2).sessionId();
+  std::uint32_t seq = 0;
+  for (int i = 0; i < 20; ++i) {
+    swarm.run(0.1);
+    swarm.node(1).receive(fakeAgentState(2, 0x99, ++seq), swarm.now());
+  }
+  ASSERT_EQ(swarm.node(1).conflicts().count(2), 1u);
+  const AgentConflict & c = swarm.node(1).conflicts().at(2);
+  EXPECT_EQ(c.kept_session, real);
+  EXPECT_EQ(c.rejected_session, 0x99u);
+  EXPECT_GE(swarm.node(1).stats().id_conflicts, 1);
+
+  // 0x99 建立的任務：拒收、不轉送
+  wire::Header h;
+  h.sender_id = 2;
+  h.session_id = 0x99;
+  h.sequence = ++seq;
+  wire::TaskAnnounceBody b;
+  b.relay = wire::originOf(h);
+  b.task_id = makeTaskId(2, 77);
+  b.task_type = 1;
+  b.value = 80.0f;
+  swarm.node(1).receive(wire::encodeTaskAnnounce(h, b), swarm.now());
+  EXPECT_FALSE(swarm.node(1).knows(makeTaskId(2, 77)));
+  EXPECT_GT(swarm.node(1).stats().conflict_dropped, 0);
+  // 真的 uav2 照常：它建立的任務收得到
+  swarm.node(2).addLocalTask(newTask(2, 1, 9, 0, swarm.now()), swarm.now());
+  swarm.run(1.0);
+  EXPECT_TRUE(swarm.node(1).knows(makeTaskId(2, 1)));
+
+  // 真的 uav2 關掉：解除衝突，之後 0x99 的封包照常收
+  swarm.setOnline(2, false);
+  for (int i = 0; i < 70; ++i) {
+    swarm.run(0.1);
+    swarm.node(1).receive(fakeAgentState(2, 0x99, ++seq), swarm.now());
+  }
+  EXPECT_TRUE(swarm.node(1).conflicts().empty());
+  h.sequence = ++seq;
+  b.relay = wire::originOf(h);
+  swarm.node(1).receive(wire::encodeTaskAnnounce(h, b), swarm.now());
+  EXPECT_TRUE(swarm.node(1).knows(makeTaskId(2, 77)));
+}
+
+TEST(Conflict, OtherNodeUsingMyIdIsReported)
+{
+  // 別台用了自己的機號（收到的封包 sender 是自己、session 不是自己的）：記下，conflict_release 之後不再算
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.run(1.0);
+  EXPECT_FALSE(swarm.node(1).selfConflict(swarm.now()));
+  swarm.node(1).receive(fakeAgentState(1, 0x55, 1), swarm.now());
+  const auto self = swarm.node(1).selfConflict(swarm.now());
+  ASSERT_TRUE(self);
+  EXPECT_EQ(*self, 0x55u);
+  EXPECT_EQ(swarm.node(1).stats().id_conflicts, 1);
+  swarm.run(6.0);
+  EXPECT_FALSE(swarm.node(1).selfConflict(swarm.now()));
+}

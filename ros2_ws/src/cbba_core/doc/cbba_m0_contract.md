@@ -311,6 +311,14 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 
 世代到 65535 後回到 1（實際上不會用到；每天重開 10 次要 18 年）。
 
+### 實作（2026-11-12，第 2c 步）
+
+| 項目 | 程式 |
+|---|---|
+| 世代 | `cbba_node` 參數 `state_dir`、`epoch_required`；`CommConfig::epoch`；`types.hpp` 的 `nextEpoch` |
+| 版本 4 的 task_id | `CbbaComm::newTaskId()`（建立者自己、這次的世代、流水號從 1 起；給第 4 步的閘道注入用） |
+| 同機號偵測 | `CbbaComm::trackSession`：同一個機號的兩個 session，較早的在較晚的出現 `conflict_grace`（1 s）之後還在講話 → 衝突，`SessionFilter::pin` 指回較早的，較晚的封包、它建立的任務（含別台轉送、SYNC_BATCH 補來的）都拒收；較早的 `conflict_release`（5 s）沒聲音就解除、改接受較晚的。別台用了自己的機號（loopback 收到別的 session）由 `selfConflict()` 回報。cbba_node 印 ERROR、發 `agent_conflict`（std_msgs/UInt16，衝突的機號） |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

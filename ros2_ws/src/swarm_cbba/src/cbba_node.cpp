@@ -60,8 +60,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -69,6 +71,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/u_int16.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
@@ -191,7 +194,14 @@ public:
     }
     const bool uav = agent_type == "UAV";
     agent_id_ = static_cast<AgentId>(agent_id);
-    acquireLock(declare_parameter<std::string>("lock_dir", defaultLockDir()), agent_id);
+    const std::string lock_dir = declare_parameter<std::string>("lock_dir", defaultLockDir());
+    acquireLock(lock_dir, agent_id);
+    // 世代（協定版本 4，2026-11-11）：存在 <state_dir>/epoch_<機號>，每次啟動 + 1 再寫回。程序鎖保證同一台機器只有一個人在改。
+    // state_dir 預設 CBBA_STATE_DIR，沒設時和程序鎖同一個目錄（docker：主機的 /tmp/cbba_locks，主機重開機會清掉，
+    // 模擬時全隊一起重開所以沒關係）。實機的閘道要設成不會被清掉的目錄，並設 epoch_required = true
+    const std::string state_dir = declare_parameter<std::string>("state_dir", envOr("CBBA_STATE_DIR", lock_dir));
+    const bool epoch_required = declare_parameter<bool>("epoch_required", false);
+    epoch_ = loadEpoch(state_dir, agent_id, epoch_required);
     // 空字串＝相對名稱，由 launch 的 namespace 決定（/v60/current_task …）；給了就是 /<ns>/…
     const std::string ns = declare_parameter<std::string>("ns", "");
     const auto topic = [&ns](const char * name) {
@@ -284,6 +294,7 @@ public:
       }
       comm.cancel_authorities.push_back(static_cast<AgentId>(id));
     }
+    comm.epoch = epoch_;
 
     UdpConfig udp;
     udp.group = declare_parameter<std::string>("udp_group", udp.group);
@@ -326,6 +337,8 @@ public:
     }
     orphan_pub_ = create_publisher<TaskMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
     // 路徑（2026-10-27）：只要最新的一份，晚訂閱的也拿得到
+    // 同機號衝突（協定版本 4，2026-11-11）：衝突的機號，每次新的衝突發一次（給閘道、地面站）
+    conflict_pub_ = create_publisher<std_msgs::msg::UInt16>(topic("agent_conflict"), rclcpp::QoS(10).reliable());
     path_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>(topic("cbba_path"),
         rclcpp::QoS(1).reliable().transient_local());
     path_pub_->publish(std_msgs::msg::UInt64MultiArray());
@@ -374,6 +387,58 @@ public:
   }
 
 private:
+  // 讀世代、+ 1、寫回（先寫暫存檔再 rename，寫到一半斷電也不會留下壞掉的檔案）。寫回成功才用：
+  // 寫不回去的話下次啟動會拿到同一個世代，建立的 task_id 會和這次的撞在一起。
+  // 讀寫失敗時：required（閘道）拒絕啟動；否則（機器人，很少建任務）用隨機世代並警告
+  Epoch loadEpoch(const std::string & dir, int agent_id, bool required)
+  {
+    const std::string path = dir + "/epoch_" + std::to_string(agent_id);
+    std::string error;
+    unsigned long previous = 0;
+    {
+      std::ifstream in(path);
+      if (in && !(in >> previous)) {
+        error = "內容不是數字";
+      }
+    }
+    if (error.empty() && previous > 0xFFFFu) {
+      error = "內容超過 65535";
+    }
+    Epoch epoch = 0;
+    if (error.empty()) {
+      epoch = nextEpoch(static_cast<Epoch>(previous));
+      std::error_code ec;
+      std::filesystem::create_directories(dir, ec);
+      const std::string tmp = path + ".tmp";
+      {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << epoch << "\n";
+        out.flush();
+        if (!out) {
+          error = "寫不進 " + tmp;
+        }
+      }
+      if (error.empty()) {
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+          error = "rename 失敗：" + ec.message();
+        }
+      }
+    }
+    if (error.empty()) {
+      RCLCPP_INFO(get_logger(), "世代 %u（%s，上次 %lu）", static_cast<unsigned>(epoch), path.c_str(), previous);
+      return epoch;
+    }
+    if (required) {
+      throw std::runtime_error("epoch file " + path + ": " + error + "（epoch_required = true，拒絕啟動）");
+    }
+    std::random_device rd;
+    epoch = static_cast<Epoch>(1 + rd() % 0xFFFFu);
+    RCLCPP_WARN(get_logger(), "世代檔 %s：%s → 改用隨機世代 %u（重開機後可能和之前的撞，機器人很少建任務所以只警告）",
+      path.c_str(), error.c_str(), static_cast<unsigned>(epoch));
+    return epoch;
+  }
+
   // 同一機號只能有一個 cbba_node。檔案裡寫 PID 方便查是誰拿著
   void acquireLock(const std::string & dir, int agent_id)
   {
@@ -795,9 +860,36 @@ private:
         "本機建立的任務有 %d 個和已知的 task_id 重複，沒有送出：BT 重開機後流水號要接續，不能重用",
         last_rejected_);
     }
+    reportConflicts(now);
+  }
+
+  // 同機號衝突（協定版本 4）：log 錯誤、agent_conflict 發衝突的機號（自己的機號被別台用了也發自己的）
+  void reportConflicts(double now)
+  {
+    for (const auto & [agent, c] : comm_->conflicts()) {
+      if (conflict_reported_.insert({agent, c.rejected_session}).second) {
+        RCLCPP_ERROR(get_logger(),
+          "同機號衝突：機號 %u 有兩台在講話（session %016llX、%016llX）→ 留先出現的 %016llX，"
+          "較晚那台的封包和它建立的任務都拒收。檢查各機的 agent_id", agent,
+          static_cast<unsigned long long>(c.kept_session), static_cast<unsigned long long>(c.rejected_session),
+          static_cast<unsigned long long>(c.kept_session));
+        conflict_pub_->publish(std_msgs::msg::UInt16().set__data(agent));
+      }
+    }
+    const auto self = comm_->selfConflict(now);
+    if (self && conflict_reported_.insert({agent_id_, *self}).second) {
+      RCLCPP_ERROR(get_logger(),
+        "同機號衝突：另一台也用機號 %u（session %016llX，我是 %016llX）。先出現的那台會被留下，"
+        "如果我比較晚，我建立的任務別台會拒收。檢查各機的 agent_id", agent_id_,
+        static_cast<unsigned long long>(*self), static_cast<unsigned long long>(comm_->sessionId()));
+      conflict_pub_->publish(std_msgs::msg::UInt16().set__data(agent_id_));
+    }
   }
 
   int lock_fd_{-1};
+  Epoch epoch_{0};
+  std::set<std::pair<AgentId, std::uint64_t>> conflict_reported_;   // 已經報過的（機號, 被拒收的 session）
+  rclcpp::Publisher<std_msgs::msg::UInt16>::SharedPtr conflict_pub_;
   AgentId agent_id_{50};
   std::string participate_{"state"};
   double state_timeout_{1.5};

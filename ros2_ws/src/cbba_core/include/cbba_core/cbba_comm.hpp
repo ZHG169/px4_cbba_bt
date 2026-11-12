@@ -111,6 +111,21 @@ struct CommConfig
   double join_timeout{5.0};       // 有鄰居但摘要一直對不上時最多等多久
   std::size_t max_packet{wire::kDefaultMaxPacket};   // CBBA_STATE 每批（整個封包）的上限
   std::vector<AgentId> cancel_authorities;   // 除了建立者，可以取消任何任務的機號（授權的管理端），全隊要一樣
+  // 協定版本 4（2026-11-11，cbba_m0_contract.md 第六節）
+  Epoch epoch{0};                 // 這次啟動的世代（節點層讀存檔、+ 1、寫回後給）；0 = 不能產生版本 4 的 task_id
+  // 同機號偵測：同一個機號的兩個 session，較早的那個在較晚的出現 conflict_grace 秒之後還在講話 → 兩台用了同一個機號
+  //（真的重開機時，舊 session 只會有在網路上延遲的封包，不會超過幾百 ms）
+  double conflict_grace{1.0};
+  double conflict_release{5.0};   // 留下的（較早的）session 這麼久沒聲音 → 解除，改接受較晚的（較早的那台關掉了）
+};
+
+// 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
+struct AgentConflict
+{
+  AgentId agent{kNoAgent};
+  std::uint64_t kept_session{0};
+  std::uint64_t rejected_session{0};
+  double since{0.0};
 };
 
 // 正式指派的狀態（CBBA_STATE 紀錄的 assign_state）
@@ -247,6 +262,8 @@ struct CommStats
   int repair_items_sent{0};     // SYNC_BATCH 送出的筆數（任務定義＋結束紀錄）
   int repair_items_applied{0};  // 收到的 SYNC_BATCH 筆數
   int repair_deferred{0};       // 補發額度不夠、留到下次的次數
+  int id_conflicts{0};          // 偵測到的同機號衝突（含別台用了自己的機號）
+  int conflict_dropped{0};      // 因為同機號衝突拒收的封包、任務定義
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -314,6 +331,13 @@ public:
   // ---------- 狀態查詢 ----------
   AgentId id() const {return agent_.state().id;}
   std::uint64_t sessionId() const {return session_;}
+  Epoch epoch() const {return config_.epoch;}
+  // 版本 4 的新 task_id（建立者 = 自己、這次的世代、流水號從 1 起）。沒有世代（epoch = 0）或流水號用完時 nullopt。
+  // 給閘道注入任務用（第 4 步）；機器人的 BT 照舊用舊型 ID（new_task）
+  std::optional<TaskId> newTaskId();
+  // 同機號衝突：別台（key = 機號），以及別台用了自己的機號（它的 session；最近 conflict_release 秒內還聽得到才算）
+  const std::map<AgentId, AgentConflict> & conflicts() const {return conflicts_;}
+  std::optional<std::uint64_t> selfConflict(double now) const;
   const CbbaAgent & agent() const {return agent_;}
   // 目前要交給 BT 的任務：路徑上第一個還沒回報完成的任務
   std::optional<Task> currentTask() const;
@@ -410,6 +434,21 @@ private:
   CbbaAgent agent_;
   CommConfig config_;
   std::uint64_t session_{0};
+  std::uint32_t next_seq_{0};   // newTaskId 上一次用的流水號
+
+  // 同機號偵測（版本 4）
+  struct SessionSeen
+  {
+    double first{0.0};
+    double last{0.0};
+  };
+  bool trackSession(const wire::Header & h, double now);   // true：這個封包來自被拒收的 session
+  bool rejectedOrigin(const wire::RelayHeader & origin) const;
+  void releaseConflicts(double now);
+  std::map<AgentId, std::map<std::uint64_t, SessionSeen>> sessions_;
+  std::map<AgentId, AgentConflict> conflicts_;
+  std::uint64_t self_conflict_session_{0};
+  double self_conflict_last_{-1e9};
 
   std::map<TaskId, wire::RelayHeader> origins_;   // 任務 → TASK_ANNOUNCE 的 origin（補發時沿用）
   std::vector<PendingTask> queued_;

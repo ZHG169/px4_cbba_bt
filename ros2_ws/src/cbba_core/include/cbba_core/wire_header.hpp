@@ -161,6 +161,10 @@ public:
 
   bool accept(const Header & header);
 
+  // 把某台目前的 session 指定成 session（版本 4，2026-11-11：同機號兩個 session 同時在講話時，留先出現的那個）。
+  // 原本的 session 記成已退役；session 如果在已退役的清單裡就拿出來。序號視窗重來（之後收到的照常接受）
+  void pin(std::uint16_t sender, std::uint64_t session);
+
   // 某台目前的 session 有沒有換過（重開機）。第一次聽到不算
   bool restarted(std::uint16_t sender) const;
 
