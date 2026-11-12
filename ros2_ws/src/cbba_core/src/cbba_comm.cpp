@@ -92,11 +92,14 @@ CbbaComm::CbbaComm(
   if (!wire::validAgentId(state.id)) {
     throw std::invalid_argument("agent id must be 1~65534");
   }
+  if (config_.gateway) {
+    agent_.setActive(false, 0.0);   // 閘道永遠不出價
+  }
 }
 
 void CbbaComm::setParticipating(bool participating, double now)
 {
-  if (participating == agent_.active()) {
+  if (participating == agent_.active() || (participating && config_.gateway)) {
     return;
   }
   markChanged(agent_.setActive(participating, now));
@@ -563,8 +566,9 @@ wire::AgentStateBody CbbaComm::agentStateBody(double now) const
     b.flags.offboard = status_.offboard;
     b.flags.landed = status_.landed;
   }
-  b.vehicle_type = static_cast<std::uint8_t>(s.type);
-  b.capabilities = availableCaps(s);
+  // 閘道不屬於任何載具平台、沒有能力（2026-11-13）
+  b.vehicle_type = config_.gateway ? wire::kVehicleGateway : static_cast<std::uint8_t>(s.type);
+  b.capabilities = config_.gateway ? 0 : availableCaps(s);
   b.x = static_cast<float>(s.position.x);
   b.y = static_cast<float>(s.position.y);
   b.z = static_cast<float>(s.position.z);
@@ -633,7 +637,10 @@ void CbbaComm::onAgentState(const wire::Header & h, const Bytes & bytes)
   n.status_seq = h.sequence;
   n.has_status = true;
   n.flags = b->flags;
-  n.vehicle_type = static_cast<AgentType>(b->vehicle_type);
+  n.gateway = b->vehicle_type == wire::kVehicleGateway;
+  if (!n.gateway) {
+    n.vehicle_type = static_cast<AgentType>(b->vehicle_type);
+  }
   n.capabilities = b->capabilities;
   n.position = {b->x, b->y, b->z};
   n.battery = b->battery;
@@ -1188,6 +1195,28 @@ std::vector<AgentId> CbbaComm::aliveNeighbors(double now) const
   std::vector<AgentId> out;
   for (const auto & [agent, n] : neighbors_) {
     if (now - n.last_heard <= config_.neighbor_timeout) {
+      out.push_back(agent);
+    }
+  }
+  return out;
+}
+
+std::vector<AgentId> CbbaComm::capableAgents(const Task & task, double now) const
+{
+  std::vector<AgentId> out;
+  if (!config_.gateway && fitness(agent_.state(), task) == Fitness::OK) {
+    out.push_back(id());
+  }
+  for (const auto & [agent, n] : neighbors_) {
+    if (!n.has_status || n.gateway || now - n.last_heard > config_.neighbor_timeout) {
+      continue;
+    }
+    // 鄰居的能力就是它廣播的「目前可用」：宣告全部、扣掉沒有的（capabilities = 0 在 AgentState 代表「用預設」，不能直接放）
+    AgentState s;
+    s.type = n.vehicle_type;
+    s.capabilities = ~Capabilities{0};
+    s.failed_caps = ~n.capabilities;
+    if (fitness(s, task) == Fitness::OK) {
       out.push_back(agent);
     }
   }

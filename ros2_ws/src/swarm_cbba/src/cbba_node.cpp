@@ -33,6 +33,10 @@
 //   無人機的 robot_state 由 px4_state_bridge 發；mode 由正式 BT 決定（/uavN/bt_mode：起飛完成、BT 在控制 = AUTO，
 //   被接管、PX4 失效保護、返航 = MANUAL，2026-10-17），備用 BT 時 bridge 自己判斷（在空中、起飛完成、offboard）。
 //   participate = always（測試協商用）：一律參與，不訂閱 robot_state，位置與電量用參數 initial_position、battery。
+//   participate = never（閘道，2-1b M0 第 4a 步，2026-11-12）：非競標的 CBBA 協定節點，不屬於任何載具平台
+//   （AGENT_STATE 平台 0、能力 0，別台不把它算進能力統計，2026-11-13）。永遠不出價、不訂閱 robot_state，照常轉送、補發、記任務、
+//   回完成確認；提供 service inject_task（InjectTask.srv，cbba_core/gateway.hpp：冪等、配版本 4 的 task_id），
+//   發 assignments（TaskAssignments：開著的任務的得標者與正式指派）。閘道的機號要列進全隊的 cancel_authorities。
 //
 // 正式指派（流程在 cbba_core/assignment_manager.hpp）：同一任務連續 assign_hold 秒排第一就發 current_task，
 // 不和 BT 握手（BT 的哨兵負責中斷舊的）。指派版本只在 CBBA 節點之間用（機間封包）：
@@ -75,11 +79,14 @@
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
+#include <swarm_interfaces/msg/task_assignments.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
+#include <swarm_interfaces/srv/inject_task.hpp>
 
 #include "cbba_core/assignment_manager.hpp"
 #include "cbba_core/capabilities.hpp"
 #include "cbba_core/cbba_comm.hpp"
+#include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
 
 namespace cbba_core
@@ -90,6 +97,8 @@ namespace
 using RobotStateMsg = swarm_interfaces::msg::RobotState;
 using TaskMsg = swarm_interfaces::msg::Task;
 using TaskResultMsg = swarm_interfaces::msg::TaskResult;
+using AssignmentsMsg = swarm_interfaces::msg::TaskAssignments;
+using InjectTaskSrv = swarm_interfaces::srv::InjectTask;
 
 std::string envOr(const char * name, const std::string & fallback)
 {
@@ -210,9 +219,10 @@ public:
       };
 
     participate_ = declare_parameter<std::string>("participate", "state");
-    if (participate_ != "state" && participate_ != "always") {
-      throw std::invalid_argument("participate must be state or always");
+    if (participate_ != "state" && participate_ != "always" && participate_ != "never") {
+      throw std::invalid_argument("participate must be state, always or never");
     }
+    const bool gateway = participate_ == "never";
     state_timeout_ = declare_parameter<double>("state_timeout", 1.5);
     // AIR_RECON 的 z 低於巡檢高度時抬到巡檢高度（地面處置任務不改）
     recon_altitude_ = declare_parameter<double>("recon_altitude", 5.0);
@@ -296,6 +306,7 @@ public:
       comm.cancel_authorities.push_back(static_cast<AgentId>(id));
     }
     comm.epoch = epoch_;
+    comm.gateway = gateway;   // 非競標的協定節點：AGENT_STATE 平台 0、能力 0，不列入能力統計
 
     UdpConfig udp;
     udp.group = declare_parameter<std::string>("udp_group", udp.group);
@@ -352,6 +363,21 @@ public:
     // 每 tx_stats_sec 發一次；整合測試用固定的 10 s 區間相減，算每台的 TX、重傳 TX
     tx_stats_sec_ = declare_parameter<double>("tx_stats_sec", tx_stats_sec_);
     tx_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>(topic("cbba_tx"), rclcpp::QoS(10).reliable());
+    // 分配結果（2-1b M0 第 4a 步）：預設只有閘道發
+    if (declare_parameter<bool>("publish_assignments", gateway)) {
+      assignments_period_ = declare_parameter<double>("assignments_period", assignments_period_);
+      assignments_pub_ = create_publisher<AssignmentsMsg>(topic("assignments"),
+          rclcpp::QoS(1).reliable().transient_local());
+    }
+    if (gateway) {
+      gateway_ = std::make_unique<Gateway>(*comm_);
+      inject_srv_ = create_service<InjectTaskSrv>(topic("inject_task"),
+          [this](const std::shared_ptr<InjectTaskSrv::Request> req,
+          std::shared_ptr<InjectTaskSrv::Response> res) {onInject(*req, *res);});
+      if (epoch_ == 0) {
+        RCLCPP_WARN(get_logger(), "閘道沒有世代：inject_task 會全部拒絕");
+      }
+    }
     if (participate_ == "state") {
       // best effort 的訂閱可以接 reliable 和 best effort 的發布（BT 用 reliable）
       state_sub_ = create_subscription<RobotStateMsg>(
@@ -380,9 +406,15 @@ public:
       state_sub_ ? state_sub_->get_topic_name() : "（不訂閱 robot_state）",
       result_sub_->get_topic_name(), new_task_sub_->get_topic_name(),
       participate_ == "always" ? "一律（位置與電量來自參數）" :
+      participate_ == "never" ? "永不（閘道：提供 inject_task）" :
       "robot_state 在 state_timeout 內有更新且 mode = AUTO");
-    RCLCPP_INFO(get_logger(), "平台 %s，能力 %s%s", platformName(platformOf(s.type)),
-      capabilitiesToString(availableCaps(s)).c_str(), s.capabilities == 0 ? "（依 agent_type 的預設）" : "");
+    if (gateway) {
+      RCLCPP_INFO(get_logger(), "閘道：非競標的 CBBA 協定節點（建立、同步、監控、關閉任務），不屬於任何載具平台、"
+        "不列入能力統計（agent_type、capabilities 參數不用）");
+    } else {
+      RCLCPP_INFO(get_logger(), "平台 %s，能力 %s%s", platformName(platformOf(s.type)),
+        capabilitiesToString(availableCaps(s)).c_str(), s.capabilities == 0 ? "（依 agent_type 的預設）" : "");
+    }
   }
 
   ~CbbaNode() override
@@ -637,6 +669,7 @@ private:
       participate = fresh && mode_ == RobotStateMsg::AUTO;
     } else {
       status.telemetry_ok = true;
+      participate = participate_ == "always";
     }
     comm_->setStatus(status);
     if (participate != comm_->participating()) {
@@ -667,10 +700,115 @@ private:
     assignments_->step(now);
     assignments_->takeRequests();              // 不握手：沒有要送給 BT 的請求
     publishOutputs(now);
+    publishAssignments(now);
     checkSpecWait(now);
     report(now);
     logStats(now);
     publishTx(now);
+  }
+
+  // 閘道注入（InjectTask.srv → cbba_core::Gateway）
+  void onInject(const InjectTaskSrv::Request & req, InjectTaskSrv::Response & res)
+  {
+    const double now = wallNow();
+    InjectRequest in;
+    in.incident_id = req.incident_id;
+    in.role = req.role;
+    in.revision = req.revision;
+    Task & t = in.task;
+    t.platform = req.platform;
+    std::string bad;
+    const auto caps = parseCapabilities(req.required_capabilities, &bad);
+    InjectResult r;
+    if (!caps) {
+      r.reason = "不認得的能力 \"" + bad + "\"";
+    } else {
+      t.required_caps = *caps;
+      t.priority = req.priority;
+      t.position = {req.position.x, req.position.y, req.position.z};
+      t.value = req.value;
+      t.duration_sec = req.service_time_s;
+      TaskExt & e = t.ext;
+      e.floor = req.floor;
+      e.deadline_hard = req.deadline_hard;
+      e.half_life_s = req.half_life_s;
+      e.can_preempt = req.can_preempt;
+      e.preempt_margin_pct = req.preempt_margin_pct;
+      e.commit_radius = req.commit_radius;
+      e.min_battery_reserve = req.min_battery_reserve;
+      e.role_index = req.role_index;
+      e.role_count = req.role_count;
+      e.optional = req.optional;
+      e.all_or_nothing = req.all_or_nothing;
+      e.skip_satisfies = req.skip_satisfies;
+      e.precedence = req.precedence;
+      e.sync_window_s = req.sync_window_s;
+      e.optional_no_capable_s = req.optional_no_capable_s;
+      e.optional_unassigned_s = req.optional_unassigned_s;
+      in.deadline_sec = req.deadline_sec;
+      in.release_sec = req.release_sec;
+      in.expires_sec = req.expires_sec;
+      in.spec = req.spec;
+      r = gateway_->inject(in, now);
+    }
+    res.accepted = r.status != InjectStatus::REJECTED;
+    res.duplicate = r.status == InjectStatus::DUPLICATE;
+    res.reason = r.reason;
+    res.task_id = r.task_id;
+    res.group_id = r.group_id;
+    res.revision = r.revision;
+    const std::string key = req.incident_id + (req.role.empty() ? "" : "/" + req.role) + " rev " +
+      std::to_string(req.revision);
+    if (r.status == InjectStatus::CREATED) {
+      RCLCPP_INFO(get_logger(), "注入 %s → 任務 %s%s：%s P%u (%.1f, %.1f, %.1f) 能力 %s%s",
+        key.c_str(), taskName(r.task_id).c_str(),
+        r.group_id != 0 ? (" 組 " + taskName(r.group_id)).c_str() : "",
+        platformName(t.platform), static_cast<unsigned>(t.priority), t.position.x, t.position.y, t.position.z,
+        capabilitiesToString(t.required_caps).c_str(),
+        req.spec.empty() ? "" : ("，TaskSpec " + std::to_string(req.spec.size()) + " B").c_str());
+    } else if (r.status == InjectStatus::DUPLICATE) {
+      RCLCPP_INFO(get_logger(), "注入 %s：重複，沿用任務 %s", key.c_str(), taskName(r.task_id).c_str());
+    } else {
+      RCLCPP_WARN(get_logger(), "注入 %s 拒絕：%s", key.c_str(), r.reason.c_str());
+    }
+  }
+
+  // 分配結果（閘道）：開著的任務的得標者與正式指派；內容變了才發，最快每 assignments_period 一次
+  void publishAssignments(double now)
+  {
+    if (!assignments_pub_ || now - assignments_last_ < assignments_period_) {
+      return;
+    }
+    AssignmentsMsg msg;
+    msg.agent_id = agent_id_;
+    const auto & agent = comm_->agent();
+    for (const auto & [id, task] : agent.tasks()) {
+      if (task.status != TaskStatus::OPEN) {
+        continue;
+      }
+      swarm_interfaces::msg::TaskAssignment a;
+      a.task_id = id;
+      a.revision = task.revision;
+      a.group_id = task.ext.group_id;
+      a.role_index = task.ext.role_index;
+      a.priority = priorityLevel(task);
+      a.winner_id = agent.winner(id);
+      a.winner_bid = a.winner_id != kNoAgent ? static_cast<float>(agent.score(id)) : 0.0f;
+      const Assignment as = comm_->assignment(id);
+      a.assign_version = as.version;
+      a.assignee_id = as.assignee;
+      a.assign_state = static_cast<std::uint8_t>(as.state);
+      a.spec_ready = comm_->specReady(id);
+      msg.tasks.push_back(a);
+    }
+    if (assignments_sent_ && msg.tasks == last_assignments_.tasks) {
+      return;
+    }
+    assignments_sent_ = true;
+    assignments_last_ = now;
+    last_assignments_ = msg;
+    msg.stamp = toRosTime(now);
+    assignments_pub_->publish(msg);
   }
 
   void publishTx(double now)
@@ -966,6 +1104,14 @@ private:
   rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 預設只有無人機（publish_announced）
   rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr spec_missing_pub_;
+  // 閘道（participate: never）
+  std::unique_ptr<Gateway> gateway_;
+  rclcpp::Service<InjectTaskSrv>::SharedPtr inject_srv_;
+  rclcpp::Publisher<AssignmentsMsg>::SharedPtr assignments_pub_;
+  double assignments_period_{0.5};
+  double assignments_last_{-1e9};
+  bool assignments_sent_{false};
+  AssignmentsMsg last_assignments_;
   double spec_wait_{5.0};
   TaskId spec_warned_task_{0};
   double spec_warned_at_{-1e9};

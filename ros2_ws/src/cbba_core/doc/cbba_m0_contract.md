@@ -40,6 +40,19 @@ task.platform ∈ {ANY, agent.platform}
 | 可用的能力 | available = 宣告的 − 回報故障的（`E_HW` 時執行端在 task_result 帶 `failed_capability`；或話題 `capability_status`，M1 再定） | 2-1b：E_HW → 標記能力不可用、轉派 |
 | 廣播 | AGENT_STATE 加 platform 1 B、available_caps 8 B | 閘道的「機隊可行性」、孤兒任務警告要知道全隊有誰能做 |
 
+### 閘道不是載具（使用者 2026-11-13 定義）
+
+**閘道是非競標的 CBBA 協定節點，負責建立、同步、監控與關閉任務；不屬於任何載具平台，也不得列入任務可行性與 optional 角色的能力統計。**
+
+| 項目 | 做法 |
+|---|---|
+| 封包 | AGENT_STATE 的 vehicle_type = **0**（閘道）、capabilities = 0、參與出價 = 0；三者不一致的整則當成壞封包（版本 4 的節點都要重新編譯才收得到閘道的 AGENT_STATE） |
+| 核心 | `CommConfig::gateway`：永遠不出價（`setParticipating(true)` 不理會）；轉送、補發、完成確認、TASK_CLOSE 照常 |
+| 能力統計 | `CbbaComm::capableAgents(task, now)`：自己（不是閘道時）＋聽得到的載具鄰居裡平台、能力符合的；閘道一律不算。機隊可行性、O1、孤兒任務的原因都用它 |
+| 節點 | `cbba_node` 的 `participate: never` 就是閘道（`agent_type`、`capabilities` 參數不用） |
+
+平台代碼 0 在**任務**裡是「不限平台」（ANY），在 AGENT_STATE（載具）裡是「閘道、不是載具」，兩個欄位不同、不會混用。
+
 ### 舊任務種類的對應（過渡期）
 
 現有的 `TaskType` 先保留，`new_task` 沒有帶 platform、能力時照下表補上，現有的 itest、demo 不用改：
@@ -330,6 +343,14 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | WAITING_SPEC | `AssignmentManager`：排第一、assign_hold 已過但 `specReady` 是 false → 不建立正式指派、不發 current_task；`waitingSpec()`；AGENT_STATE exec_flags bit 4；佇列裡的火警（保留）也要收齊才保留 |
 | 執行端 | `current_task.spec`（Task.msg 加 `revision`、`spec`）；`new_task` 帶 spec 的話一起送；超過 `spec_wait`（參數，5 s）發 `task_spec_missing`、印警告，每 `spec_wait` 一次 |
 | 快取 | 任務結束 `spec_keep_sec`（60 s）後丟掉內容 |
+
+### 實作（2026-11-12，第 4a 步：閘道的注入）
+
+| 項目 | 程式 |
+|---|---|
+| 注入 | `gateway.hpp/.cpp` 的 `Gateway::inject`（不依賴 ROS）：欄位檢查（平台、P0～P3、角色組、precedence、時間、spec 大小）、冪等鍵 (incident_id, role, revision)、`newTaskId()` 配 task_id；同一個 incident 有角色組時配一個 group_id（格式同 task_id、共用流水號）；交給 `addLocalTask`（還沒和鄰居同步時排隊）。對照表只在記憶體：閘道重開後同一事件再注入是新任務 |
+| 節點 | `cbba_node` 的 `participate: never`（不訂 robot_state、永不出價）時提供 `inject_task`（`InjectTask.srv`，時間欄位是從注入起算的秒數）、發 `assignments`（`TaskAssignments.msg`，開著的任務；`publish_assignments`）；`config/cbba_gateway.yaml`（機號 200、`epoch_required`）；`cbba_uav.yaml`、`cbba_v60.yaml` 的 `cancel_authorities: [200]` |
+| 還沒做 | 改版（較大的 revision，4b）；過期（4c）；失聯接手依優先級、commit_radius（4d）；optional 關閉 O1～O4（4e）。注入的新型任務（type 0）BT 還不會執行（伯宇的 ExecuteSteps 在 M1～M2） |
 
 ### 「統一由閘道建立任務」
 

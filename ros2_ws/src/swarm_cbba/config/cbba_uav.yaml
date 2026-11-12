@@ -5,3 +5,4 @@
     recon_altitude: 5.0       # AIR_RECON 的 z 低於這個高度就抬到巡檢高度；能量模型用 UAV 預設
     preempt_exclude_sec: 5.0  # 被接管（PREEMPTED_BY_MANUAL）交還的任務多久不接：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（2026-10-17）
     # 備用 BT 的 fire_task.divert_on_sight（預設關）也用 PREEMPTED：打開時，監控火點期間可能被派回原任務
+    cancel_authorities: [200] # 閘道（2-1b，participate: never）可以取消任何任務；全隊要一樣（2026-11-12）

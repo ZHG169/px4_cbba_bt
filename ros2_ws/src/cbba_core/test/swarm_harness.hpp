@@ -41,6 +41,16 @@ public:
     return *nodes_.back();
   }
 
+  // 閘道（2026-11-13）：非競標的協定節點，config 和其他節點相同、只多 gateway = true
+  CbbaComm & addGateway(AgentId id, Vec3 pos = {})
+  {
+    CommConfig config = config_;
+    config.gateway = true;
+    nodes_.push_back(std::make_unique<CbbaComm>(makeState(id, pos, 100.0), ScoringParams{}, config));
+    online_.push_back(true);
+    return *nodes_.back();
+  }
+
   // 模擬重開機：換一個全新的節點（新的 session、什麼都不知道）
   CbbaComm & restart(AgentId id)
   {

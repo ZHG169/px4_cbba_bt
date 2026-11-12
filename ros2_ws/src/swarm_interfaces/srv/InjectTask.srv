@@ -1,0 +1,45 @@
+# 閘道注入任務（2-1b M0 第 4a 步，2026-11-12；合約 cbba_core/doc/cbba_m0_contract.md 第三節「注入」）
+# 只有閘道的 cbba_node（participate: never）提供：/<ns>/inject_task。task_id 由閘道配（版本 4：建立者｜世代｜流水號）。
+# 冪等鍵 (incident_id, role, revision)：同一個鍵重送回同一個 task_id、不重發（duplicate = true）；
+# revision 比已注入的舊 → 拒絕；較新 → 改版（第 4b 步才做，現在拒絕）。
+# 時間欄位是「從注入時刻起算的秒數」，0 = 沒有。
+uint8 PLATFORM_ANY = 0
+uint8 PLATFORM_UAV = 1
+uint8 PLATFORM_QUADRUPED = 2
+
+string incident_id                 # 事件識別（規劃器給），不能是空的
+string role                        # 角色名稱；空 = 單獨任務（角色組時必填）
+uint16 revision                    # 內容版本
+uint8 platform                     # PLATFORM_*
+string[] required_capabilities     # 能力標籤（tools.yaml 的名稱，例如 mobility_ground、thermal_camera）
+uint8 priority                     # P0～P3（0 最高）
+geometry_msgs/Point position       # 出價用的前往點（map ENU）
+uint8 floor                        # 樓層；0 = 不分
+float32 value                      # 同級內的價值（> 0）
+float32 service_time_s             # 現場執行時間
+float32 deadline_sec               # 期限（從現在起）；0 = 沒有
+bool deadline_hard                 # 期限是硬限制
+float32 release_sec                # 多久之後才能開始；0 = 立即
+float32 expires_sec                # 多久之後失效；0 = 不失效
+uint16 half_life_s                 # 價值衰減（目前只帶不用）
+uint8 can_preempt                  # 可以搶占的優先級遮罩（位元 p = Pp）；0 = 預設（比自己低的級）
+uint8 preempt_margin_pct           # 同級搶占要好多少；0 = 同級不搶
+float32 commit_radius              # 執行者離目標這麼近之後不可搶占（m）；0 = 不用
+uint8 min_battery_reserve          # 做完還要剩的電量（%）；0 = 用載具的設定
+uint8 role_index                   # 第幾個角色（0 起）
+uint8 role_count                   # 共幾個角色；0 = 單獨任務。最多 8
+bool optional
+bool all_or_nothing
+bool skip_satisfies                # optional 角色被略過時，等它的角色視為條件已滿足
+uint8 precedence                   # 要等哪幾個角色（位元 = role_index）
+uint16 sync_window_s
+uint16 optional_no_capable_s       # optional 關閉 O1 的等待；0 = 預設 10 s
+uint16 optional_unassigned_s       # optional 關閉 O2 的等待；0 = 預設 15 s
+string spec                        # TaskSpec（JSON，B 層：steps 等）；空 = 沒有
+---
+bool accepted                      # 建立了，或同一個鍵重送（duplicate）
+bool duplicate
+string reason                      # 拒絕的原因
+uint64 task_id
+uint64 group_id                    # 角色組；0 = 單獨任務
+uint16 revision                    # 這個任務目前的 revision

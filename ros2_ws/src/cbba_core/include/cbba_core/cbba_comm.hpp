@@ -121,6 +121,10 @@ struct CommConfig
   // TaskSpec（版本 4，2026-11-12）
   double spec_pull_period{1.0};   // 缺 TaskSpec 的進行中任務：每這麼久向一個鄰居要一次（WAITING_SPEC 超時改成每 gap_request_gap 向每個鄰居要）
   double spec_keep_sec{60.0};     // 任務結束這麼久之後丟掉 TaskSpec 的內容（CRC 留在任務定義裡）
+  // 閘道（2026-11-13 使用者定義）：非競標的 CBBA 協定節點，負責建立、同步、監控與關閉任務；不屬於任何載具平台，
+  // 不列入任務可行性與 optional 角色的能力統計。永遠不出價（setParticipating(true) 不理會），AGENT_STATE 的
+  // vehicle_type = 0、capabilities = 0。轉送、補發、完成確認、TASK_CLOSE 照常
+  bool gateway{false};
 };
 
 // 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
@@ -216,11 +220,12 @@ struct NeighborInfo
   std::map<TaskId, AgentId> pending_view;
   // AGENT_STATE（sequence 比上一則舊的丟掉）
   bool has_status{false};
+  bool gateway{false};               // 它是閘道（AGENT_STATE 的 vehicle_type = 0）：不是載具，不算進能力統計
   bool waiting_spec{false};          // 它排第一的任務在等 TaskSpec（版本 4 的 AGENT_STATE）
   std::uint32_t status_seq{0};
   wire::StateFlags flags;
-  AgentType vehicle_type{AgentType::UAV};
-  Capabilities capabilities{0};      // 它目前可用的能力（版本 4 的 AGENT_STATE）
+  AgentType vehicle_type{AgentType::UAV};   // 載具的平台（閘道時沒有意義）
+  Capabilities capabilities{0};      // 它目前可用的能力（版本 4 的 AGENT_STATE；閘道一定是 0）
   Vec3 position{};
   double battery{0.0};
   bool exec_known{false};           // 它的 BT 有在回報執行狀態
@@ -294,6 +299,7 @@ public:
   void setStatus(const VehicleStatus & status) {status_ = status;}
   void setParticipating(bool participating, double now);
   bool participating() const {return agent_.active();}
+  bool isGateway() const {return config_.gateway;}
 
   // BT 發現的新任務。task.id 的建立者必須是自己（taskCreator(task_id) == 機號）。
   // task_id 已知、建立者不對時回傳 false。還沒和鄰居同步時先排隊（回傳 true），同步後才發現重複的
@@ -368,6 +374,10 @@ public:
   std::uint32_t roundKey() const;
   std::uint16_t exchangeStep() const {return exchange_step_;}
   std::vector<AgentId> aliveNeighbors(double now) const;
+  // 能做這個任務的載具（平台、能力符合）：自己（不是閘道時）＋收過 AGENT_STATE、還聽得到的直接鄰居。
+  // 閘道一律不算（2026-11-13 的定義）。不看是否參與出價、電量、排除：給閘道的機隊可行性、optional 關閉 O1、
+  // 孤兒任務的原因用（O1 要不要只算參與出價的，第 4e 步再定）
+  std::vector<AgentId> capableAgents(const Task & task, double now) const;
   const std::map<AgentId, NeighborInfo> & neighbors() const {return neighbors_;}
   const CommStats & stats() const {return stats_;}
   wire::AgentStateBody agentStateBody(double now) const;

@@ -1,0 +1,7 @@
+/**:   # 閘道（GCS）的 cbba_node（2-1b M0 第 4a 步，2026-11-12）：不出價，提供 inject_task、發 assignments
+  ros__parameters:
+    agent_id: 200
+    participate: "never"
+    epoch_required: true      # 閘道是主要的建立者：世代檔讀寫失敗就拒絕啟動（state_dir 要是不會被清掉的目錄，實機設 /var/lib/cbba）
+    cancel_authorities: [200] # 全隊要一樣
+    assignments_period: 0.5   # assignments 最快多久發一次（內容變了才發）

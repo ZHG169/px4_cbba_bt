@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "cbba_core/wire_agent_state.hpp"
@@ -187,4 +188,27 @@ TEST(WireAgentState, RejectsInvalid)
   wrong = sample();
   wrong.path.assign(256, 0x00010001);
   EXPECT_THROW(encodeAgentState(makeHeader(), wrong), std::invalid_argument);
+}
+
+TEST(WireAgentState, GatewayIsNotAVehicle)
+{
+  // 閘道（vehicle_type 0，2026-11-13）：能力 0、不參與出價才合法；有能力或參與出價的整則當成壞封包
+  AgentStateBody b = sample();
+  b.vehicle_type = kVehicleGateway;
+  b.capabilities = 0;
+  b.flags.participating = false;
+  const auto d = decodeAgentState(encodeAgentState(makeHeader(), b));
+  ASSERT_TRUE(d);
+  EXPECT_EQ(d->vehicle_type, kVehicleGateway);
+
+  AgentStateBody with_caps = b;
+  with_caps.capabilities = 1;
+  EXPECT_THROW(encodeAgentState(makeHeader(), with_caps), std::invalid_argument);
+  AgentStateBody bidding = b;
+  bidding.flags.participating = true;
+  EXPECT_THROW(encodeAgentState(makeHeader(), bidding), std::invalid_argument);
+
+  auto bad = encodeAgentState(makeHeader(), b);
+  bad[kHeaderSize + 9] = 1;                          // capabilities 的最低位元組
+  EXPECT_FALSE(decodeAgentState(bad));
 }

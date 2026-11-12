@@ -24,7 +24,14 @@ constexpr std::uint8_t kHasActive = 1u << 2;
 constexpr std::uint8_t kHasQueued = 1u << 3;
 constexpr std::uint8_t kWaitingSpec = 1u << 4;
 
-bool validVehicle(std::uint8_t type) {return type == 1 || type == 2;}
+// 閘道（0）不是載具：沒有能力、不出價（2026-11-13）
+bool validVehicle(const AgentStateBody & b)
+{
+  if (b.vehicle_type == kVehicleGateway) {
+    return b.capabilities == 0 && !b.flags.participating;
+  }
+  return b.vehicle_type == 1 || b.vehicle_type == 2;
+}
 }  // namespace
 
 std::uint8_t packFlags(const StateFlags & f)
@@ -50,7 +57,7 @@ StateFlags unpackFlags(std::uint8_t flags)
 
 std::vector<std::uint8_t> encodeAgentState(Header header, const AgentStateBody & b)
 {
-  if (b.path.size() > 255 || b.neighbors.size() > 255 || !validVehicle(b.vehicle_type) ||
+  if (b.path.size() > 255 || b.neighbors.size() > 255 || !validVehicle(b) ||
     b.execution_state > kMaxExecutionState)
   {
     throw std::invalid_argument("invalid AGENT_STATE body");
@@ -129,7 +136,7 @@ std::optional<AgentStateBody> decodeAgentState(const std::uint8_t * data, std::s
   for (auto & n : b.neighbors) {
     n = r.u16();
   }
-  if (!r.ok() || r.remaining() != 0 || !validVehicle(b.vehicle_type) ||
+  if (!r.ok() || r.remaining() != 0 || !validVehicle(b) ||
     b.execution_state > kMaxExecutionState || !std::isfinite(b.x) || !std::isfinite(b.y) ||
     !std::isfinite(b.z) || !std::isfinite(b.battery) || std::isnan(b.remaining_time))
   {

@@ -272,6 +272,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 |---|---|
 | 協定 | 版本 4（和版本 3 互相拒收，全隊一起重新編譯）。M0 只定合約，實作從 M1 起 |
 | task_id | **uint64 = 建立者 16 ｜ 世代 16 ｜ 流水號 32**；**舊型 ID 相容模式**：上半 32 位元 = 0 的是舊型（`機號 × 65536 + 流水號`，數值同版本 3，epoch = 0，BT 自己算，保留到 M3）；版本 4 ID 只由 cbba_node／閘道產生（不加 `cbba_epoch` 話題）；**狗端通訊由使用者統一負責**：第 2 步時狗和無人機的 current_task、BT 內部任務識別、task_result 一起改成 uint64（BT 流程不動）；摘要每筆固定 24 B（known、closed 為 uint32，逐欄序列化）；世代每次啟動 + 1 並存檔（閘道讀不到就拒絕啟動；機器人讀不到用隨機世代＋警告）；同一機號同時兩個 session → 告警、拒收較晚的。group_id 同格式。log 印 `creator.epoch.seq`。`swarm_interfaces` 的 Task／TaskResult／Bid 的 task_id 改 uint64（伯宇的 task_manager 約 12 處要改） |
+| 閘道（2026-11-13 使用者定義） | **非競標的 CBBA 協定節點，負責建立、同步、監控與關閉任務；不屬於任何載具平台，不列入任務可行性與 optional 角色的能力統計**。AGENT_STATE 的 vehicle_type = 0、能力 0、不參與（不一致的當壞封包）；`CommConfig::gateway`；`CbbaComm::capableAgents` 不算閘道 |
 | 誰建任務 | **統一由閘道（GCS）建**：閘道跑不出價的 cbba_node（`participate: never`，機號暫定 200，列進全隊 `cancel_authorities`），`inject_task` service，冪等鍵 (incident_id, role, revision)。機器人的偵測（無人機看到火等）送 DETECTION 給閘道，不自己建任務；舊型 `new_task`（TaskType）保留到 M3 |
 | 閘道斷線 | 機器人**不自己展開任務**（也不展開 fallback）：已知任務照常競標、執行；新的偵測暫存在 cbba_node，恢復後送出。斷線判定 `gateway_timeout` 3 s。fallback_template 只在閘道在線時由閘道重建較簡化的任務組；CBBA 不自己刪減角色。代價：斷網中看到的新火警要等閘道恢復才有任務 |
 | 能力過濾 | 可出價 ⇔ task.platform ∈ {ANY, agent.platform} ∧ required_caps ⊆ available_caps；取代 `isCompatible`。能力 uint64 位元遮罩、平台 uint8（0 ANY、1 uav、2 quadruped），位元位置寫在註冊表 `tools.yaml`／`platforms.yaml`、只增不改；載具能力從 `fleet.yaml`；E_HW 拿掉故障的能力；AGENT_STATE 廣播 platform、available_caps。舊 TaskType 自動對應（AIR_RECON → uav＋mobility_air、rgb_camera；GROUND_INTERVENTION／PATROL → quadruped＋mobility_ground） |
@@ -299,8 +300,12 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | 2a 協定版本 4 封包 | task_id 64 位元（舊型 ID 相容：上半 32 位元 0、epoch 0）；CBBA_STATE 紀錄 27 B（加 revision；revision 不同的那筆不交給規則）、摘要 24 B 鍵（建立者, 世代）；TASK_ANNOUNCE 123 B（A 層全部欄位，存在 `Task::ext`，M0 只傳送保存）；AGENT_STATE 帶能力、task_id 8 B；GAP_REQUEST 帶世代、流水號 4 B | `wire_*`、`cbba_comm.cpp`、`types.hpp` | ✅ 11/12 |
 | 2b 機內 task_id uint64 | Task／TaskResult／Bid 的 task_id uint64、`cbba_path` UInt64MultiArray；無人機 BT（`TaskId`、`taskHex`）、`task_executor`、**伯宇狗 BT 介接層**（直接改 handoff；patch `docker/dog/task_manager_uint64.patch`，原檔備份 `docs/handoff_uav_2026-10-12/task_manager.orig_20261112`，不能放在 `bt/` 底下）；Python 不用改 | `swarm_interfaces`、`uav_px4_bt`、`cbba_node.cpp`、itest `config.json` | ✅ 11/12 itest comm --dogs 3（C0～C9）、uav |
 | 2c 世代、同機號 | 世代檔 `<state_dir>/epoch_<機號>`（+ 1 寫回成功才用；`epoch_required` 讀寫失敗就拒絕啟動，給閘道）；`CbbaComm::newTaskId()`（版本 4 ID，給閘道）；同機號偵測：較早的 session 在較晚的出現 1 s 後還在講話 → 留較早的（`SessionFilter::pin`）、拒收較晚的封包與任務，較早的 5 s 沒聲音就解除；別台用了自己的機號 `selfConflict()`；`agent_conflict` 話題 | `cbba_comm.cpp`、`wire_header.cpp`、`cbba_node.cpp` | ✅ 11/12 單元＋itest comm |
-| 3 TaskSpec | TASK_SPEC（種類 9，轉送）分段 ≤ 1100 B；encoding 0 原文、**1 zlib 保留暫不用**（使用者 11/12：先不加依賴）；收齊比對長度＋CRC；缺口請求的值 3「缺 TaskSpec」、缺的任務 1 s 後開始要；WAITING_SPEC（不建立正式指派、不發 current_task、AGENT_STATE exec_flags bit 4）；`spec_wait` 5 s 後向每個鄰居要＋`task_spec_missing`（不算失敗）；Task.msg 加 `revision`、`spec`，`current_task.spec` 一定是收齊的；`new_task` 帶 spec 會一起送；結束 60 s 後丟內容 | `wire_task_spec.hpp/.cpp`、`cbba_comm.cpp`、`assignment_manager.cpp`、`cbba_node.cpp` | ⏳ 11/12 寫完、待測試 |
-| 4 閘道 | `participate: never`、`inject_task`（冪等鍵 (incident_id, role, revision)、`newTaskId`）、revision 更新、過期、optional 角色關閉（O1～O4、`membership_ready`、`skip_satisfies`）、`assignments` 話題、失聯接手依優先級、commit_radius | — | 還沒做 |
+| 3 TaskSpec | TASK_SPEC（種類 9，轉送）分段 ≤ 1100 B；encoding 0 原文、**1 zlib 保留暫不用**（使用者 11/12：先不加依賴）；收齊比對長度＋CRC；缺口請求的值 3「缺 TaskSpec」、缺的任務 1 s 後開始要；WAITING_SPEC（不建立正式指派、不發 current_task、AGENT_STATE exec_flags bit 4）；`spec_wait` 5 s 後向每個鄰居要＋`task_spec_missing`（不算失敗）；Task.msg 加 `revision`、`spec`，`current_task.spec` 一定是收齊的；`new_task` 帶 spec 會一起送；結束 60 s 後丟內容 | `wire_task_spec.hpp/.cpp`、`cbba_comm.cpp`、`assignment_manager.cpp`、`cbba_node.cpp` | ✅ 11/12（`2553ca8`；通訊測試通過） |
+| 4a 閘道的注入 | `participate: never`（不訂 robot_state、永不出價）；`inject_task`（`InjectTask.srv`：A 層＋spec＋冪等鍵 (incident_id, role, revision)，同鍵回同一個 task_id、不重發；較舊拒絕；時間欄位是從注入起算的秒數）；group_id（同一 incident 的角色組共用）；`assignments`（`TaskAssignments.msg`）；`cbba_gateway.yaml`（200、`epoch_required`）；uav／v60 yaml 的 `cancel_authorities: [200]`。11/13：閘道不是載具（AGENT_STATE 平台 0、能力 0，`CommConfig::gateway`、`capableAgents`） | `gateway.hpp/.cpp`、`wire_agent_state`、`cbba_comm`、`cbba_node.cpp`、`swarm_interfaces`、`test_gateway`（5 項）、`test_wire_agent_state` | ✅ 11/13 單元＋手動測試（閘道 + 假狗） |
+| 4b 改版 | 較大的 revision：建立者才能改、取代定義並轉送；只改位置／時間／價值保留指派，改 platform／caps／priority 撤銷；TaskSpec 換新；摘要算 revision；current_task 同 task_id 新 revision 再發 | — | 還沒做 |
+| 4c 過期 | expires 到了本機停止出價、撤銷自己的指派；建立者送 TASK_CLOSE reason 3 | — | 還沒做 |
+| 4d 搶占與接手 | 失聯接手依優先級（`takeover_by_priority`）、commit_radius（cbba_node 用 robot_state 算、AGENT_STATE 報已接近） | — | 還沒做 |
+| 4e optional 關閉 | O1～O4、`membership_ready`、`skip_satisfies`、TASK_CLOSE reason 4、`task_orphaned` 帶原因 | — | 還沒做 |
 | 5 DETECTION | 機器人偵測送閘道、斷線暫存（欄位和 EVT-1 一起定） | — | 還沒做 |
 
 itest 現在不會建帶 TaskSpec 的任務：TaskSpec 的整合測試在第 4 步閘道注入時一起做。
@@ -404,16 +409,15 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 - 2026-11-08 `out/20261108_162805_demo`：dog1 模擬偵測發現 F2；影片已補畫偵測範圍（舊版留成 `*_before_detect.mp4`）。
 - 2026-10-24 `out/20261024_235929_demo`（`assign_random --seed 7`，3 m/s）：全過，X1 VO 繞過懸停的 uav2、最近 2.25 m。單元測試（10/24）：test_avoidance 15、test_cbf 16、test_flight_beacon 5、test_motion 8、test_skeleton 41、test_tree 13 全過、零警告。
 
-**commit**：最新 `9e4eea9`（2026-11-12，M0 第 2c 步）；之前 `b9d3649`（第 1、2a、2b 步）、`2edd074`（第 5 週收尾＋M0 合約，含 11/05～11/10 的全部）。
-**還沒 commit**：第 3 步 TaskSpec（11/12）。
+**commit**：最新 `2553ca8`（2026-11-12，M0 第 3 步 TaskSpec）；之前 `9e4eea9`（第 2c 步）、`b9d3649`（第 1、2a、2b 步）、`2edd074`（第 5 週收尾＋M0 合約，含 11/05～11/10 的全部）。
+**還沒 commit**：無。
 不要進 repo：`graphify-out/`、`docs/reports/82fd836a-…實驗規劃.pdf`（使用者的檔案，要不要收先問）、`swarm_zenoh` 的 `__pycache__`、`ros2_ws/src/world/`（伯宇的原檔）、
 隊友的資料（`docs/handoff_uav_*`、`docs/messageImage_*.jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`、宜臻的實作說明 .md，`.gitignore`）。
 共用的 `ros2_ws/install` 改 C++ 後要在 uav 容器重新編譯 6 個套件；改了 `docker/.env`、`gen_compose.py`、Fast DDS 範本後要 `./stop.sh && ./start.sh`。
 
 ### 還沒做的（依建議順序）
 
-0. **第 3 步 TaskSpec 測試通過後 commit**。
-1. **2-1b 的 M0（11/20）**：照「2-1b M0 的 CBBA 實作進度」接著做第 4 步閘道、第 5 步 DETECTION；給伯宇的介面變更清單；註冊表的 tools、platforms、fleet。
+1. **2-1b 的 M0（11/20）**：照「2-1b M0 的 CBBA 實作進度」接著做第 4b～4e 步、第 5 步 DETECTION；給伯宇的介面變更清單；註冊表的 tools、platforms、fleet。
    使用者的順序：先做 CBBA（CB 全部），再做無人機（uav_adapter，SITL 後端用 `Px4Platform`）。
 2. 第 5 週收尾（選做）：
    - 重跑 `demo --scenario blackout`，讓報告的 B1～B3 是修正後的量法；斷網 8 s vs 20 s 的對照；C9 重複 5～10 次。

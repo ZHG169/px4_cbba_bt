@@ -22,6 +22,7 @@ add_library(${PROJECT_NAME}_core
   src/wire_task_spec.cpp
   src/cbba_comm.cpp
   src/assignment_manager.cpp
+  src/gateway.cpp
   src/udp_link.cpp
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
@@ -53,6 +54,7 @@ set(CBBA_CORE_TESTS
   test_comm
   test_exec_constraints
   test_assignment
+  test_gateway
   test_mission_sim
 )
 

@@ -15,7 +15,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotState.msg"
   "msg/TaskResult.msg"
   "msg/FireDetection.msg"
+  "msg/TaskAssignment.msg"
+  "msg/TaskAssignments.msg"
   "srv/ManualOverride.srv"
+  "srv/InjectTask.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
 )
 

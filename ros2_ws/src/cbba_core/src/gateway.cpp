@@ -1,0 +1,170 @@
+#include "cbba_core/gateway.hpp"
+
+#include <cmath>
+
+#include "cbba_core/wire_task_spec.hpp"
+
+namespace cbba_core
+{
+
+namespace
+{
+// 期限、失效等時刻在封包裡是毫秒的低 32 位元（約 49.7 天循環，還原時取 ±24.8 天內最近的），超過就會繞回去
+constexpr double kMaxRelativeSec = 20.0 * 86400.0;
+// 封包裡 uint16 的欄位（service_time_s、commit_radius_dm）
+constexpr double kMaxU16 = 65535.0;
+}  // namespace
+
+const char * toString(InjectStatus status)
+{
+  switch (status) {
+    case InjectStatus::CREATED: return "建立";
+    case InjectStatus::DUPLICATE: return "重複（沿用）";
+    case InjectStatus::REJECTED: return "拒絕";
+  }
+  return "?";
+}
+
+std::string Gateway::check(const InjectRequest & req) const
+{
+  const Task & t = req.task;
+  const TaskExt & e = t.ext;
+  if (req.incident_id.empty()) {
+    return "incident_id 是空的";
+  }
+  if (t.platform > 2) {
+    return "platform 要是 0（不限）、1（uav）、2（quadruped）";
+  }
+  if (t.priority > 3) {
+    return "priority 要是 0～3（P0 最高）";
+  }
+  if (!std::isfinite(t.position.x) || !std::isfinite(t.position.y) || !std::isfinite(t.position.z)) {
+    return "position 不是有限值";
+  }
+  if (!std::isfinite(t.value) || t.value <= 0.0) {
+    return "value 要大於 0";
+  }
+  if (!std::isfinite(t.duration_sec) || t.duration_sec < 0.0 || t.duration_sec > kMaxU16) {
+    return "service_time_s 要在 0～65535";
+  }
+  for (double s : {req.deadline_sec, req.release_sec, req.expires_sec}) {
+    if (!std::isfinite(s) || s < 0.0 || s > kMaxRelativeSec) {
+      return "deadline_sec、release_sec、expires_sec 要在 0～20 天（0 = 沒有）";
+    }
+  }
+  if (req.expires_sec > 0.0 && req.release_sec >= req.expires_sec) {
+    return "release_sec 要早於 expires_sec";
+  }
+  if (!std::isfinite(e.commit_radius) || e.commit_radius < 0.0 || e.commit_radius * 10.0 > kMaxU16) {
+    return "commit_radius 要在 0～6553 m";
+  }
+  if (e.min_battery_reserve > 100 || e.preempt_margin_pct > 100) {
+    return "min_battery_reserve、preempt_margin_pct 要在 0～100";
+  }
+  if (e.can_preempt > 0x0F) {
+    return "can_preempt 只有 P0～P3 四個位元";
+  }
+  if (e.role_count > 8) {
+    return "role_count 最多 8（precedence 是 8 位元）";
+  }
+  if (e.role_count == 0) {
+    if (e.role_index != 0 || e.precedence != 0 || e.optional || e.all_or_nothing || e.skip_satisfies ||
+      e.sync_window_s != 0)
+    {
+      return "單獨任務（role_count = 0）不能設角色、precedence、optional 等協同欄位";
+    }
+  } else {
+    if (req.role.empty()) {
+      return "角色組（role_count > 0）要給 role 名稱";
+    }
+    if (e.role_index >= e.role_count) {
+      return "role_index 要小於 role_count";
+    }
+    if ((e.precedence >> e.role_count) != 0 || (e.precedence & (1u << e.role_index)) != 0) {
+      return "precedence 只能指同組的其他角色";
+    }
+  }
+  if (e.skip_satisfies && !e.optional) {
+    return "skip_satisfies 只用在 optional 角色";
+  }
+  if (req.spec.size() > wire::kMaxSpecChunk * wire::kMaxSpecParts) {
+    return "spec 太大（上限 " + std::to_string(wire::kMaxSpecChunk * wire::kMaxSpecParts) + " B）";
+  }
+  return {};
+}
+
+InjectResult Gateway::inject(const InjectRequest & req, double now)
+{
+  InjectResult r;
+  r.revision = req.revision;
+  const auto key = std::make_pair(req.incident_id, req.role);
+  const auto known = injected_.find(key);
+  if (known != injected_.end()) {
+    r.task_id = known->second.task_id;
+    const auto group = groups_.find(req.incident_id);
+    r.group_id = group != groups_.end() ? group->second : 0;
+    if (req.revision == known->second.revision) {
+      r.status = InjectStatus::DUPLICATE;   // 冪等：同一個鍵重送，不重發
+      return r;
+    }
+    r.reason = req.revision < known->second.revision ?
+      "revision " + std::to_string(req.revision) + " 比已注入的 " + std::to_string(known->second.revision) + " 舊" :
+      "revision 更新（同一個任務改內容）還沒實作（第 4b 步）";
+    r.revision = known->second.revision;
+    return r;
+  }
+  if (const std::string bad = check(req); !bad.empty()) {
+    r.reason = bad;
+    return r;
+  }
+  if (comm_.epoch() == 0) {
+    r.reason = "沒有世代（epoch = 0），不能產生版本 4 的 task_id";
+    return r;
+  }
+
+  TaskId group_id = 0;
+  if (req.task.ext.role_count > 0) {
+    const auto g = groups_.find(req.incident_id);
+    if (g != groups_.end()) {
+      group_id = g->second;
+    } else if (const auto id = comm_.newTaskId()) {
+      group_id = *id;
+    } else {
+      r.reason = "流水號用完（要重新啟動換世代）";
+      return r;
+    }
+  }
+  const auto id = comm_.newTaskId();
+  if (!id) {
+    r.reason = "流水號用完（要重新啟動換世代）";
+    return r;
+  }
+
+  Task t = req.task;
+  t.id = *id;
+  t.type = TaskType::NONE;
+  t.status = TaskStatus::OPEN;
+  t.created = now;
+  t.status_stamp = now;
+  t.explicit_deadline = req.deadline_sec > 0.0;
+  t.deadline_sec = t.explicit_deadline ? req.deadline_sec : 300.0;
+  t.revision = req.revision;
+  t.success_prob = 1.0;
+  t.ext.group_id = group_id;
+  t.ext.release = req.release_sec > 0.0 ? now + req.release_sec : 0.0;
+  t.ext.expires = req.expires_sec > 0.0 ? now + req.expires_sec : 0.0;
+  if (!comm_.addLocalTask(t, now, req.spec)) {
+    r.reason = "協定層拒收（task_id 重複或 spec 超過上限）";
+    return r;
+  }
+  if (group_id != 0) {
+    groups_.emplace(req.incident_id, group_id);
+  }
+  injected_[key] = Injected{t.id, t.revision};
+  r.status = InjectStatus::CREATED;
+  r.task_id = t.id;
+  r.group_id = group_id;
+  return r;
+}
+
+}  // namespace cbba_core

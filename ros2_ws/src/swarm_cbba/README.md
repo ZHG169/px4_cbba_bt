@@ -76,7 +76,29 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `udp_group`、`udp_port` | 239.255.42.99、14600 | 全隊要一樣 |
 | `cancel_authorities` | [] | 除了建立者，可以取消任務的機號（全隊要一樣） |
 | `lock_dir` | `CBBA_LOCK_DIR` → `$XDG_RUNTIME_DIR/cbba` → `/tmp/cbba` | 程序鎖：同一機號只能開一個 |
-| `participate` | `state` | `always`＝不看 `robot_state`、一律參與（只用來測協商），位置與電量用 `initial_position`、`battery` |
+| `participate` | `state` | `always`＝不看 `robot_state`、一律參與（只用來測協商），位置與電量用 `initial_position`、`battery`；`never`＝閘道（下一節） |
+| `publish_assignments`、`assignments_period` | 閘道 true、0.5 s | `assignments`（TaskAssignments）：開著的任務的得標者與正式指派，變動時發 |
+
+## 閘道（2-1b M0 第 4a 步，2026-11-12）
+
+閘道是**非競標的 CBBA 協定節點**（建立、同步、監控、關閉任務），不屬於任何載具平台：AGENT_STATE 的平台 0、能力 0，
+別台不把它算進任務可行性與 optional 角色的能力統計（2026-11-13）。閘道（GCS）跑一個**不出價**的 cbba_node（`config/cbba_gateway.yaml`：機號 200、`participate: never`、`epoch_required: true`），
+規劃器經由 service 注入任務；冪等、欄位檢查在 `cbba_core/gateway.hpp`。全隊的 `cancel_authorities` 要有 200（`cbba_uav.yaml`、`cbba_v60.yaml` 已加）。
+
+| 介面 | 說明 |
+|---|---|
+| `inject_task`（`InjectTask.srv`） | A 層欄位＋`spec`（TaskSpec JSON）＋冪等鍵 (incident_id, role, revision) → accepted、duplicate、reason、task_id（版本 4）、group_id、revision。同一個鍵重送回同一個 task_id、不重發；revision 較舊拒絕；**較新（改版）第 4b 步才做，現在拒絕**。時間欄位是從注入時刻起算的秒數 |
+| `assignments`（`TaskAssignments.msg`） | 開著的任務：revision、group／role、priority、得標者與得標價、正式指派（版本、執行者、狀態）、spec_ready |
+| `cancel_task` | 照舊；閘道是建立者，也在 `cancel_authorities` |
+
+```bash
+ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/gcs -r __node:=gcs_cbba_node \
+  --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_gateway.yaml
+ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask \
+  "{incident_id: 'smoke-1', revision: 1, platform: 2, required_capabilities: [mobility_ground], priority: 0,
+    position: {x: 10.0, y: 5.0, z: 0.0}, value: 100.0, service_time_s: 10.0, expires_sec: 600.0,
+    spec: '{\"steps\":[{\"action\":\"inspect\"}]}'}"
+```
 
 ## 測試
 

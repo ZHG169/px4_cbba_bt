@@ -9,7 +9,9 @@
 //   flags            bit 0 參與出價、bit 1 遙測正常（robot_state 有在更新）、bit 2 飛行狀態有效、
 //                    bit 3 armed、bit 4 offboard、bit 5 landed、bit 6 跟隨中（固定 0，等 BT）
 //                    bit 3～5 只在 bit 2 為 1 時有意義（機器狗一律 0）
-//   vehicle_type     1 無人機、2 地面載具（和 types.hpp 的 AgentType 相同；也是 2-1b 的 platform：1 uav、2 quadruped）
+//   vehicle_type     1 無人機、2 地面載具（和 types.hpp 的 AgentType 相同；也是 2-1b 的 platform：1 uav、2 quadruped）；
+//                    0 = 閘道（2026-11-13 使用者定義：非競標的 CBBA 協定節點，負責建立、同步、監控與關閉任務，不屬於任何
+//                    載具平台）。閘道的 capabilities 一定是 0、bit 0（參與出價）一定是 0，不合的整則當成壞封包
 //   capabilities     目前可用的能力遮罩（版本 4，capabilities.hpp；宣告的扣掉故障的）。閘道的機隊可行性、optional 關閉 O1 用
 //   x、y、z          map ENU（公尺）
 //   battery          0～100 %
@@ -40,6 +42,7 @@ namespace cbba_core::wire
 
 constexpr std::size_t kAgentStateBaseSize = kHeaderSize + 70;   // L = K = 0
 constexpr std::uint8_t kMaxExecutionState = 5;
+constexpr std::uint8_t kVehicleGateway = 0;   // vehicle_type：閘道（不是載具）
 
 struct StateFlags
 {
@@ -86,7 +89,8 @@ constexpr std::size_t agentStateSize(std::size_t path, std::size_t neighbors)
 }
 
 // 編碼成完整封包；header.type 會設成 AGENT_STATE。path 或 neighbors 超過 255 筆、
-// vehicle_type 不是 1 或 2、execution_state 超過 5、鄰居機號不合法時丟出 std::invalid_argument。
+// vehicle_type 不是 0～2（閘道時 capabilities 不是 0 或參與出價）、execution_state 超過 5、鄰居機號不合法時
+// 丟出 std::invalid_argument。
 std::vector<std::uint8_t> encodeAgentState(Header header, const AgentStateBody & body);
 
 // 解碼完整封包。表頭不合法、不是 AGENT_STATE、長度和筆數對不上、欄位不合法時回傳 nullopt。
