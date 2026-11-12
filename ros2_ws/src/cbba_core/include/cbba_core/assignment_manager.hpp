@@ -19,6 +19,10 @@
 //
 // require_accept = false（無人機的 BT 還沒好）：跳過和 BT 的握手（請求當下就算接受），
 // 可行性檢查、版本、回報檢查照常。
+//
+// WAITING_SPEC（協定版本 4，2026-11-12，合約第二節「TaskSpec 的傳送」）：排第一、assign_hold 已過，但這個 revision 的
+// TaskSpec 還沒收齊 → 不建立正式指派、不發 current_task（不鎖定，別台照 CBBA 規則仍可以贏走），等收齊立刻開始。
+// 等超過 spec_wait 不算失敗：CbbaComm 改向每個鄰居要（setWaitingSpec 的 urgent），節點層告警（task_spec_missing）
 #pragma once
 
 #include <cstdint>
@@ -57,6 +61,13 @@ struct AssignmentConfig
   double max_queue_wait{120.0};
   // 執行中的任務超過「開始時估的前往＋停留時間」再加這麼多秒還沒完成：不再排隊接新任務（2026-10-13）
   double overrun_margin{10.0};
+  double spec_wait{5.0};          // WAITING_SPEC 超過這麼久：加強補發、告警（不當成失敗）
+};
+
+struct WaitingSpec
+{
+  TaskId task{0};
+  double since{0.0};
 };
 
 enum class RequestKind : std::uint8_t { ACTIVATE = 1, RESERVE = 2, RELEASE = 3 };
@@ -116,6 +127,8 @@ public:
 
   const std::optional<HeldAssignment> & active() const {return active_;}
   const std::optional<HeldAssignment> & reserved() const {return reserved_;}
+  // 排第一、在等 TaskSpec 的任務（沒有時 nullopt）
+  const std::optional<WaitingSpec> & waitingSpec() const {return waiting_spec_;}
   std::optional<HeldAssignment> pending() const;
 
 private:
@@ -159,6 +172,8 @@ private:
   double candidate_since_{0.0};
   TaskId queue_candidate_{0};
   double queue_since_{0.0};
+  std::optional<WaitingSpec> waiting_spec_;
+  void setWaiting(TaskId task, double now);
 
   std::vector<AssignmentRequest> requests_;
   bool assigned_changed_{true};   // 一開始發一次「沒有任務」

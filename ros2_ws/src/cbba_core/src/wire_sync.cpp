@@ -19,7 +19,8 @@ bool seqRangeOk(std::uint16_t epoch, std::uint32_t first, std::size_t count)
 bool validItemType(std::uint8_t type)
 {
   return type == static_cast<std::uint8_t>(PacketType::TASK_ANNOUNCE) ||
-         type == static_cast<std::uint8_t>(PacketType::TASK_CLOSE);
+         type == static_cast<std::uint8_t>(PacketType::TASK_CLOSE) ||
+         type == static_cast<std::uint8_t>(PacketType::TASK_SPEC);
 }
 }  // namespace
 
@@ -45,7 +46,7 @@ std::vector<std::uint8_t> encodeGapRequest(Header header, const GapRequestBody &
     std::uint8_t byte = 0;
     for (std::size_t k = 0; k < 4; ++k) {
       const auto v = i + k < count ? static_cast<std::uint8_t>(b.states[i + k]) : 0u;
-      if (v > static_cast<std::uint8_t>(SeqState::CLOSED)) {
+      if (v > static_cast<std::uint8_t>(SeqState::OPEN_NO_SPEC)) {
         throw std::invalid_argument("invalid GAP_REQUEST state");
       }
       byte = static_cast<std::uint8_t>(byte | (v << (6 - 2 * k)));
@@ -85,7 +86,7 @@ std::optional<GapRequestBody> decodeGapRequest(const std::uint8_t * data, std::s
         }
         continue;
       }
-      if (v > static_cast<std::uint8_t>(SeqState::CLOSED)) {
+      if (v > static_cast<std::uint8_t>(SeqState::OPEN_NO_SPEC)) {
         return std::nullopt;
       }
       b.states.push_back(static_cast<SeqState>(v));

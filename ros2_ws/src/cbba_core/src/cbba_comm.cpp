@@ -103,8 +103,11 @@ void CbbaComm::setParticipating(bool participating, double now)
   dirty_ = true;   // 鄰居要馬上知道
 }
 
-bool CbbaComm::addLocalTask(const Task & task, double now)
+bool CbbaComm::addLocalTask(const Task & task, double now, const std::string & spec)
 {
+  if (spec.size() > wire::kMaxSpecChunk * wire::kMaxSpecParts) {
+    return false;   // TaskSpec 超過 255 段
+  }
   if (!validTaskId(task.id) || taskCreator(task.id) != id() || origins_.count(task.id) > 0 ||
     std::any_of(queued_.begin(), queued_.end(),
     [&task](const PendingTask & p) {return p.task.id == task.id;}))
@@ -116,10 +119,10 @@ bool CbbaComm::addLocalTask(const Task & task, double now)
   }
   updateJoined(now);
   if (!joined_) {
-    queued_.push_back(PendingTask{task, now});   // 先和鄰居同步，補齊既有任務
+    queued_.push_back(PendingTask{task, now, spec});   // 先和鄰居同步，補齊既有任務
     return true;
   }
-  return assign(task, now);
+  return assign(task, now, spec);
 }
 
 const char * toString(ReportCheck check)
@@ -430,6 +433,7 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     case PacketType::TASK_CLOSE: onTaskClose(bytes, now); break;
     case PacketType::GAP_REQUEST: onGapRequest(bytes); break;
     case PacketType::SYNC_BATCH: onSyncBatch(*h, bytes, now); break;
+    case PacketType::TASK_SPEC: onTaskSpec(bytes, now); break;
   }
 }
 
@@ -439,6 +443,8 @@ std::vector<Bytes> CbbaComm::poll(double now)
     start_ = now;
   }
   releaseConflicts(now);
+  pullSpecs(now);
+  forgetSpecs(now);
 
   // 依目前位置、電量重新評估
   if (now >= next_reevaluate_) {
@@ -457,7 +463,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
     std::vector<PendingTask> queued;
     queued.swap(queued_);
     for (const PendingTask & p : queued) {
-      assign(p.task, now);
+      assign(p.task, now, p.spec);
     }
   }
 
@@ -567,6 +573,7 @@ wire::AgentStateBody CbbaComm::agentStateBody(double now) const
   b.execution_state = exec_report_.execution_state;
   b.preemptible = exec_report_.preemptible;
   b.remaining_time = static_cast<float>(exec_report_.remaining_time);
+  b.waiting_spec = waiting_spec_ != 0;
   for (const auto & [task_id, a] : assignments_) {
     if (a.assignee != id() || !isOpen(task_id)) {
       continue;
@@ -634,6 +641,7 @@ void CbbaComm::onAgentState(const wire::Header & h, const Bytes & bytes)
   n.execution_state = b->execution_state;
   n.preemptible = b->preemptible;
   n.remaining_time = b->remaining_time;
+  n.waiting_spec = b->waiting_spec;
   n.active.reset();
   n.queued.reset();
   if (b->has_active) {
@@ -848,7 +856,10 @@ wire::SeqState CbbaComm::seqState(TaskId task_id) const
   if (origins_.count(task_id) == 0) {
     return wire::SeqState::UNKNOWN;
   }
-  return isOpen(task_id) ? wire::SeqState::OPEN : wire::SeqState::CLOSED;
+  if (!isOpen(task_id)) {
+    return wire::SeqState::CLOSED;
+  }
+  return specReady(task_id) ? wire::SeqState::OPEN : wire::SeqState::OPEN_NO_SPEC;
 }
 
 // 這次 CBBA_STATE 要不要帶摘要：收斂後每 digest_period 一次；自己的狀態變了、或有鄰居和我不一致時每次都帶
@@ -982,6 +993,12 @@ void CbbaComm::onGapRequest(const Bytes & bytes)
       queueRepair(task_id, announce, close);
       any = true;
     }
+    // TaskSpec（版本 4）：對方不認得或缺、我有收齊的（進行中的任務才補）
+    const bool need_spec = theirs == wire::SeqState::UNKNOWN || theirs == wire::SeqState::OPEN_NO_SPEC;
+    if (need_spec && mine == wire::SeqState::OPEN && specs_.count(task_id) > 0 && specs_.at(task_id).complete) {
+      queueSpecRepair(task_id);
+      any = true;
+    }
   }
   if (any) {
     ++stats_.gap_answers;
@@ -1010,52 +1027,92 @@ void CbbaComm::drainRepair(double now)
   wire::Header item_header;
   item_header.sender_id = id();
   item_header.session_id = session_;
-  while (!repair_open_.empty() || !repair_closed_.empty()) {
+  // 順序：進行中任務的定義與結束 → TaskSpec 的段（版本 4）→ 已結束任務的
+  while (!repair_open_.empty() || !repair_spec_.empty() || !repair_closed_.empty()) {
     std::vector<wire::SyncItem> items;
     std::vector<std::pair<std::map<TaskId, RepairNeed> *, TaskId>> taken;
+    std::vector<std::pair<TaskId, std::uint8_t>> taken_spec;
     std::size_t size = wire::kSyncBatchBaseSize;
     bool full = false;
-    for (auto * queue : {&repair_open_, &repair_closed_}) {
-      for (const auto & [task_id, need] : *queue) {
+    // 放得進去就放（第一筆一定放：單筆超過上限時照樣送，不會卡住佇列）
+    const auto fits = [&](const std::vector<wire::SyncItem> & mine) {
+        std::size_t add = 0;
+        for (const wire::SyncItem & item : mine) {
+          add += wire::syncItemSize(item);
+        }
+        if (!items.empty() && (size + add > config_.max_packet || items.size() + mine.size() > 255)) {
+          return false;
+        }
+        size += add;
+        return true;
+      };
+    const auto taskItems = [&](TaskId task_id, const RepairNeed & need) {
         std::vector<wire::SyncItem> mine;
         if (need.announce && origins_.count(task_id) > 0) {
-          if (auto item = wire::toSyncItem(wire::encodeTaskAnnounce(item_header, announceBody(task_id))))
-          {
+          if (auto item = wire::toSyncItem(wire::encodeTaskAnnounce(item_header, announceBody(task_id)))) {
             mine.push_back(std::move(*item));
           }
         }
         const auto close = closes_.find(task_id);
         if (need.close && close != closes_.end()) {
-          if (auto item = wire::toSyncItem(wire::encodeTaskClose(item_header, close->second)))
-          {
+          if (auto item = wire::toSyncItem(wire::encodeTaskClose(item_header, close->second))) {
             mine.push_back(std::move(*item));
           }
         }
-        std::size_t add = 0;
-        for (const wire::SyncItem & item : mine) {
-          add += wire::syncItemSize(item);
-        }
-        // 第一筆一定放得進去（單筆超過上限時照樣送，不會卡住佇列）
-        if (!items.empty() && (size + add > config_.max_packet || items.size() + mine.size() > 255)) {
-          full = true;
-          break;
-        }
-        size += add;
-        for (wire::SyncItem & item : mine) {
-          items.push_back(std::move(item));
-        }
-        taken.emplace_back(queue, task_id);
-      }
-      if (full) {
+        return mine;
+      };
+    for (const auto & [task_id, need] : repair_open_) {
+      std::vector<wire::SyncItem> mine = taskItems(task_id, need);
+      if (!fits(mine)) {
+        full = true;
         break;
       }
-    }
-    if (items.empty()) {   // 佇列裡的都已經沒有東西可送（例如結束紀錄不見了）
-      for (const auto & [queue, task_id] : taken) {
-        queue->erase(task_id);
+      for (wire::SyncItem & item : mine) {
+        items.push_back(std::move(item));
       }
-      if (taken.empty()) {
+      taken.emplace_back(&repair_open_, task_id);
+    }
+    for (auto it = repair_spec_.begin(); !full && it != repair_spec_.end(); ++it) {
+      std::vector<wire::SyncItem> mine;
+      const auto st = specs_.find(it->first);
+      if (st != specs_.end() && st->second.complete && it->second < st->second.part_count) {
+        if (auto item = wire::toSyncItem(wire::encodeTaskSpec(item_header, specPartBody(it->first, it->second)))) {
+          mine.push_back(std::move(*item));
+        }
+      }
+      if (!fits(mine)) {
+        full = true;
+        break;
+      }
+      for (wire::SyncItem & item : mine) {
+        items.push_back(std::move(item));
+      }
+      taken_spec.push_back(*it);
+    }
+    for (auto it = repair_closed_.begin(); !full && it != repair_closed_.end(); ++it) {
+      std::vector<wire::SyncItem> mine = taskItems(it->first, it->second);
+      if (!fits(mine)) {
+        full = true;
+        break;
+      }
+      for (wire::SyncItem & item : mine) {
+        items.push_back(std::move(item));
+      }
+      taken.emplace_back(&repair_closed_, it->first);
+    }
+    const auto drop_taken = [&]() {
+        for (const auto & [queue, task_id] : taken) {
+          queue->erase(task_id);
+        }
+        for (const auto & key : taken_spec) {
+          repair_spec_.erase(key);
+        }
+      };
+    if (items.empty()) {   // 佇列裡的都已經沒有東西可送（例如結束紀錄、TaskSpec 不見了）
+      drop_taken();
+      if (taken.empty() && taken_spec.empty()) {
         repair_open_.clear();
+        repair_spec_.clear();
         repair_closed_.clear();
       }
       break;
@@ -1068,16 +1125,14 @@ void CbbaComm::drainRepair(double now)
     stats_.repair_items_sent += static_cast<int>(items.size());
     send(wire::encodeSyncBatch(newHeader(PacketType::SYNC_BATCH), items), PacketType::SYNC_BATCH,
       TxKind::RETRY);
-    for (const auto & [queue, task_id] : taken) {
-      queue->erase(task_id);
-    }
+    drop_taken();
     if (!full) {
       break;
     }
   }
 }
 
-// 收到補發：每一筆照 TASK_ANNOUNCE／TASK_CLOSE 處理（驗證、權限一樣），但不轉送（只在直接鄰居之間補），
+// 收到補發：每一筆照 TASK_ANNOUNCE／TASK_CLOSE／TASK_SPEC 處理（驗證、權限一樣），但不轉送（只在直接鄰居之間補），
 // 並登記去重複（之後同一則的轉送不再處理、不再轉送）
 void CbbaComm::onSyncBatch(const wire::Header & h, const Bytes & bytes, double now)
 {
@@ -1096,6 +1151,18 @@ void CbbaComm::onSyncBatch(const wire::Header & h, const Bytes & bytes, double n
       }
       dedup_.firstSeen(PacketType::TASK_ANNOUNCE, b->relay, now);
       applyAnnounce(*b, now);
+    } else if (item.type == PacketType::TASK_SPEC) {
+      const auto b = wire::decodeTaskSpec(packet);
+      if (!b) {
+        ++stats_.malformed;
+        continue;
+      }
+      if (rejectedOrigin(b->relay) || b->relay.origin_id != taskCreator(b->task_id)) {
+        ++stats_.spec_bad;
+        continue;
+      }
+      dedup_.firstSeen(PacketType::TASK_SPEC, b->relay, now);
+      applySpecPart(*b);
     } else {
       const auto b = wire::decodeTaskClose(packet);
       if (!b) {
@@ -1224,7 +1291,7 @@ std::optional<Task> CbbaComm::currentTask() const
   return std::nullopt;
 }
 
-bool CbbaComm::assign(const Task & task, double now)
+bool CbbaComm::assign(const Task & task, double now, const std::string & spec)
 {
   if (origins_.count(task.id) > 0) {
     ++stats_.rejected_local_tasks;   // 同步後才發現這個 task_id 已經有了（BT 重用了 task_id）
@@ -1234,11 +1301,33 @@ bool CbbaComm::assign(const Task & task, double now)
   const wire::RelayHeader origin = wire::originOf(h);
   Task t = task;
   t.status = TaskStatus::OPEN;
+  t.ext.spec_length = static_cast<std::uint32_t>(spec.size());
+  t.ext.spec_crc = spec.empty() ? 0 : wire::specCrc(spec);
   if (!addTask(origin, t, now)) {
     return false;
   }
   dedup_.firstSeen(PacketType::TASK_ANNOUNCE, origin, now);   // 自己發的先登記
   send(wire::encodeTaskAnnounce(h, announceBody(t.id)), PacketType::TASK_ANNOUNCE);
+  if (spec.empty()) {
+    return true;
+  }
+  // TaskSpec：任務定義之後每段各一則（新的序號、origin），自己先存成收齊的（補發用）
+  const auto chunks = wire::splitSpec(spec);
+  SpecStore & st = specs_[t.id];
+  st = SpecStore{};
+  st.revision = t.revision;
+  st.part_count = static_cast<std::uint8_t>(chunks.size());
+  st.data = chunks;
+  st.have.assign(chunks.size(), true);
+  st.complete = true;
+  st.json = spec;
+  for (std::size_t k = 0; k < chunks.size(); ++k) {
+    const wire::Header ph = newHeader(PacketType::TASK_SPEC);
+    st.origin.push_back(wire::originOf(ph));
+    dedup_.firstSeen(PacketType::TASK_SPEC, st.origin.back(), now);
+    send(wire::encodeTaskSpec(ph, specPartBody(t.id, static_cast<std::uint8_t>(k))), PacketType::TASK_SPEC);
+    ++stats_.spec_parts_sent;
+  }
   return true;
 }
 
@@ -1306,6 +1395,9 @@ bool CbbaComm::addTask(const wire::RelayHeader & origin, const Task & task, doub
     closes_[task.id] = early->second;
     early_closes_.erase(early);
     markClosed(task.id, reason, now);
+  }
+  if (specs_.count(task.id) > 0) {
+    completeSpec(task.id);   // TaskSpec 的段比任務定義先到（補發時兩者延遲不同）
   }
   return true;
 }
@@ -1405,6 +1497,200 @@ void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
   e.spec_length = b.spec_length;
   e.spec_crc = b.spec_crc;
   addTask(b.relay, t, now);
+}
+
+// ===========================================================================
+// TaskSpec（協定版本 4，2026-11-12，cbba_m0_contract.md 第二節「TaskSpec 的傳送」）
+// ===========================================================================
+bool CbbaComm::specReady(TaskId id) const
+{
+  const auto t = agent_.tasks().find(id);
+  if (t == agent_.tasks().end()) {
+    return false;
+  }
+  if (t->second.ext.spec_length == 0) {
+    return true;   // 舊型任務、沒有 TaskSpec 的任務
+  }
+  const auto st = specs_.find(id);
+  return st != specs_.end() && st->second.complete && st->second.revision == t->second.revision;
+}
+
+std::optional<std::string> CbbaComm::taskSpec(TaskId id) const
+{
+  if (!specReady(id)) {
+    return std::nullopt;
+  }
+  const auto st = specs_.find(id);
+  return st == specs_.end() ? std::string() : st->second.json;
+}
+
+wire::TaskSpecBody CbbaComm::specPartBody(TaskId id, std::uint8_t part) const
+{
+  const SpecStore & st = specs_.at(id);
+  wire::TaskSpecBody b;
+  b.relay = st.origin.at(part);
+  b.task_id = id;
+  b.revision = st.revision;
+  b.encoding = st.encoding;
+  b.part_index = part;
+  b.part_count = st.part_count;
+  b.data = st.data.at(part);
+  return b;
+}
+
+void CbbaComm::onTaskSpec(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeTaskSpec(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::TASK_SPEC, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  if (b->relay.origin_id != taskCreator(b->task_id)) {
+    ++stats_.spec_bad;   // 只收建立者送出的，不轉送
+    return;
+  }
+  if (b->relay.origin_id != id()) {
+    relay(bytes);
+  }
+  applySpecPart(*b);
+}
+
+// 收一段：比已知的 revision 舊的丟掉；新的 revision（或同一個 revision 但段數、編碼不同）從頭收
+void CbbaComm::applySpecPart(const wire::TaskSpecBody & b)
+{
+  const auto task = agent_.tasks().find(b.task_id);
+  if (task != agent_.tasks().end() && !isOpen(b.task_id)) {
+    return;   // 已結束的任務不再收 TaskSpec
+  }
+  SpecStore & st = specs_[b.task_id];
+  if (st.part_count != 0 && b.revision < st.revision) {
+    return;
+  }
+  if (st.part_count == 0 || b.revision > st.revision || b.part_count != st.part_count ||
+    b.encoding != st.encoding)
+  {
+    st = SpecStore{};
+    st.revision = b.revision;
+    st.encoding = b.encoding;
+    st.part_count = b.part_count;
+    st.data.resize(b.part_count);
+    st.origin.resize(b.part_count);
+    st.have.assign(b.part_count, false);
+  }
+  if (st.complete || st.have.at(b.part_index)) {
+    return;
+  }
+  st.data[b.part_index] = b.data;
+  st.origin[b.part_index] = b.relay;
+  st.have[b.part_index] = true;
+  ++stats_.spec_parts_received;
+  completeSpec(b.task_id);
+}
+
+// 各段都到、任務定義也到了：接起來比對長度與 CRC（和任務定義的 revision 要一樣）。
+// 對不上：整份丟掉重收（spec_bad）；不認得的編碼（zlib 暫不用）：留著、當成缺 TaskSpec
+void CbbaComm::completeSpec(TaskId id)
+{
+  SpecStore & st = specs_.at(id);
+  if (st.complete || st.part_count == 0 ||
+    std::find(st.have.begin(), st.have.end(), false) != st.have.end())
+  {
+    return;
+  }
+  const auto task = agent_.tasks().find(id);
+  if (task == agent_.tasks().end() || task->second.revision != st.revision ||
+    st.encoding != wire::kSpecEncodingJson)
+  {
+    return;
+  }
+  std::string json;
+  for (const auto & part : st.data) {
+    json.append(part.begin(), part.end());
+  }
+  if (json.size() != task->second.ext.spec_length || wire::specCrc(json) != task->second.ext.spec_crc) {
+    ++stats_.spec_bad;
+    st.have.assign(st.part_count, false);
+    return;
+  }
+  st.complete = true;
+  st.json = std::move(json);
+}
+
+// 缺 TaskSpec 的進行中任務：定期向鄰居要（缺口請求的狀態 OPEN_NO_SPEC，只問那一個流水號）。
+// 平常每 spec_pull_period 問一個鄰居（建立者聽得到就問建立者，否則輪流）；WAITING_SPEC 超過 spec_wait（urgent）
+// 時每 gap_request_gap 問每個鄰居
+void CbbaComm::pullSpecs(double now)
+{
+  const std::vector<AgentId> alive = aliveNeighbors(now);
+  if (alive.empty()) {
+    return;
+  }
+  for (const auto & [id, task] : agent_.tasks()) {
+    if (task.ext.spec_length == 0 || !isOpen(id) || specReady(id)) {
+      continue;
+    }
+    const bool urgent = id == waiting_spec_ && spec_urgent_;
+    const double gap = urgent ? config_.gap_request_gap : config_.spec_pull_period;
+    // 第一次發現缺時從現在算起：剛收到任務定義時各段多半還在路上，等一個週期再要
+    double & last = last_spec_pull_.try_emplace(id, now).first->second;
+    if (now - last < gap) {
+      continue;
+    }
+    last = now;
+    std::vector<AgentId> targets;
+    const AgentId creator = taskCreator(id);
+    if (urgent) {
+      targets = alive;
+    } else if (std::find(alive.begin(), alive.end(), creator) != alive.end()) {
+      targets.push_back(creator);
+    } else {
+      targets.push_back(alive[spec_pull_cursor_++ % alive.size()]);
+    }
+    for (AgentId target : targets) {
+      wire::GapRequestBody b;
+      b.target_id = target;
+      b.creator = creator;
+      b.epoch = taskEpoch(id);
+      b.first_seq = taskSeq(id);
+      b.states = {wire::SeqState::OPEN_NO_SPEC};
+      send(wire::encodeGapRequest(newHeader(PacketType::GAP_REQUEST), b), PacketType::GAP_REQUEST,
+        TxKind::RETRY);
+      ++stats_.spec_requests;
+    }
+  }
+}
+
+// 任務結束 spec_keep_sec 之後丟掉 TaskSpec 的內容（記憶體不隨已結束的任務成長；CRC 留在任務定義裡）
+void CbbaComm::forgetSpecs(double now)
+{
+  for (auto it = specs_.begin(); it != specs_.end(); ) {
+    const auto closed = closed_at_.find(it->first);
+    if (closed != closed_at_.end() && now - closed->second > config_.spec_keep_sec) {
+      last_spec_pull_.erase(it->first);
+      it = specs_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void CbbaComm::queueSpecRepair(TaskId id)
+{
+  const auto st = specs_.find(id);
+  if (st == specs_.end() || !st->second.complete) {
+    return;
+  }
+  for (std::uint8_t k = 0; k < st->second.part_count; ++k) {
+    repair_spec_.insert({id, k});
+  }
 }
 
 // ===========================================================================

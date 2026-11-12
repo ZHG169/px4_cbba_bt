@@ -119,7 +119,7 @@ CBBA_STATE 不帶任務內容（A 層在 TASK_ANNOUNCE、B 層在 TASK_SPEC）�
 
 | 項目 | 做法 |
 |---|---|
-| 封包 | 新種類 TASK_SPEC：task_id、revision、part_index、part_count、這一段的資料；TaskSpec JSON 用 zlib 壓縮後切段（每段 ≤ 1100 B） |
+| 封包 | 新種類 TASK_SPEC：task_id、revision、encoding、part_index、part_count、這一段的資料；TaskSpec JSON 切段（每段 ≤ 1100 B）。**encoding 0 = 原文 JSON（M0 只用這個）；1 = zlib 保留、暫不用**（使用者 2026-11-12：先不加 zlib 依賴，等範本展開器做出真的 TaskSpec、看實際大小再決定；加的時候只是多支援一種編碼，協定不用升版，不認得的編碼當成缺 TaskSpec） |
 | 驗證 | 收齊後比對 TASK_ANNOUNCE 的 spec_length、spec_crc；不符整份丟掉、重新要。只收建立者送出的（origin = task_id 的建立者） |
 | 轉送、補發 | 和 TASK_ANNOUNCE 一樣：建立時、改版時送，轉送；版本 3 的缺口請求點陣圖加一個狀態「有定義、缺 TaskSpec」，回覆時只補缺的段；SYNC_BATCH 可以裝 TASK_SPEC 段，照 token bucket 限速，排在進行中任務定義之後 |
 | 快取 | 每台 cbba_node 存（task_id, revision）→ TaskSpec；同一個任務只留最新 revision；任務結束後 `spec_keep_sec`（預設 60 s）丟掉內容、只留 CRC（避免記憶體隨已結束任務成長） |
@@ -318,6 +318,18 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | 世代 | `cbba_node` 參數 `state_dir`、`epoch_required`；`CommConfig::epoch`；`types.hpp` 的 `nextEpoch` |
 | 版本 4 的 task_id | `CbbaComm::newTaskId()`（建立者自己、這次的世代、流水號從 1 起；給第 4 步的閘道注入用） |
 | 同機號偵測 | `CbbaComm::trackSession`：同一個機號的兩個 session，較早的在較晚的出現 `conflict_grace`（1 s）之後還在講話 → 衝突，`SessionFilter::pin` 指回較早的，較晚的封包、它建立的任務（含別台轉送、SYNC_BATCH 補來的）都拒收；較早的 `conflict_release`（5 s）沒聲音就解除、改接受較晚的。別台用了自己的機號（loopback 收到別的 session）由 `selfConflict()` 回報。cbba_node 印 ERROR、發 `agent_conflict`（std_msgs/UInt16，衝突的機號） |
+
+### 實作（2026-11-12，第 3 步：TaskSpec）
+
+| 項目 | 程式 |
+|---|---|
+| 封包 | `wire_task_spec.hpp`：TASK_SPEC（種類 9，轉送）＝ 表頭 20＋轉送 14＋task_id 8、revision 2、encoding 1、第幾段 1、共幾段 1、長度 2＋資料（≤ 1100 B）。encoding 0 原文；1 zlib 保留 |
+| 建立 | `CbbaComm::addLocalTask(task, now, spec)`：填任務定義的 spec_length、spec_crc（CRC-32），任務定義之後每段一則 |
+| 收 | 只收 origin 是建立者的段；各段到齊、任務定義也到了才比對長度與 CRC（不符整份重收，`spec_bad`）；比已知 revision 舊的丟掉 |
+| 補發 | GAP_REQUEST 點陣圖的值 3 = 進行中但缺 TaskSpec；缺的任務第一次發現後每 `spec_pull_period`（1 s）向一個鄰居要（建立者聽得到就問建立者），WAITING_SPEC 超過 `spec_wait` 改每 `gap_request_gap` 向每個鄰居要；回覆用 SYNC_BATCH，段排在進行中任務的定義之後、已結束的之前 |
+| WAITING_SPEC | `AssignmentManager`：排第一、assign_hold 已過但 `specReady` 是 false → 不建立正式指派、不發 current_task；`waitingSpec()`；AGENT_STATE exec_flags bit 4；佇列裡的火警（保留）也要收齊才保留 |
+| 執行端 | `current_task.spec`（Task.msg 加 `revision`、`spec`）；`new_task` 帶 spec 的話一起送；超過 `spec_wait`（參數，5 s）發 `task_spec_missing`、印警告，每 `spec_wait` 一次 |
+| 快取 | 任務結束 `spec_keep_sec`（60 s）後丟掉內容 |
 
 ### 「統一由閘道建立任務」
 

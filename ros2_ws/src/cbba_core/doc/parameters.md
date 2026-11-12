@@ -44,6 +44,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `capabilities` | `[]` | 能力標籤（2026-11-11，2-1b M0 合約第一節；名稱見 `capabilities.hpp`，例如 `[mobility_ground, rgb_camera, thermal_camera]`）。空 = 依 `agent_type` 的預設（UAV：mobility_air、rgb_camera；UGV：mobility_ground、rgb_camera），和原本的相容表結果相同。不認得的名稱拒絕啟動。之後改從 `fleet.yaml` 讀 |
 | `state_dir` | `CBBA_STATE_DIR`，沒設時同 `lock_dir` | 世代檔 `epoch_<機號>` 放這裡（協定版本 4，2026-11-11）：每次啟動讀出、+ 1、寫回，版本 4 的 task_id 用這個世代。docker 的預設是主機的 `/tmp/cbba_locks`（主機重開機會清掉，模擬時全隊一起重開所以沒關係）；**實機的閘道要設成不會被清掉的目錄** |
 | `epoch_required` | false | true：世代檔讀寫失敗就拒絕啟動（閘道要開，因為它長期建任務）；false：改用隨機世代並警告（機器人） |
+| `spec_wait` | 5.0 s | 排第一但 TaskSpec 還沒收齊（WAITING_SPEC）超過這麼久：向每個鄰居要、印警告、發 `task_spec_missing`（每 `spec_wait` 一次）；**不算失敗**、不交還（2026-11-12） |
 | `ns` | 空字串 | 空＝話題用相對名稱，由 launch 的 namespace（或 `-r __ns:=/uavN`）決定；給了就是 `/<ns>/current_task`… |
 | `mesh_ip` | 環境變數 `MESH_IP` | UDP 只走這張網卡（mesh）。空字串由系統決定，可能會走到 PX4 的線材網路 |
 | `udp_group`、`udp_port` | `239.255.42.99`、`14600` | multicast 群組。**全隊（含機器狗）要一樣** |

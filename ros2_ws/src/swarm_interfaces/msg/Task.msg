@@ -18,3 +18,7 @@ float32 value                         # 任務價值
 float32 duration_sec                  # 預估的現場執行時間
 uint8 status
 builtin_interfaces/Time status_stamp  # 狀態最後一次改變的時間
+# 2026-11-12（協定版本 4，2-1b M0 合約第四節）：舊的 BT 不讀這兩個，重新編譯就能跑
+uint16 revision                       # 任務定義的版本（建立者改內容時 + 1）
+string spec                           # TaskSpec（JSON：steps 等）。只有 current_task 帶，而且一定是收齊的；
+                                      # 沒有 TaskSpec 的任務是空字串。new_task 帶的話一起送給全隊（TASK_SPEC）

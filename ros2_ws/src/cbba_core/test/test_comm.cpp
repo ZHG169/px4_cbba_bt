@@ -1190,9 +1190,8 @@ TEST(CbbaComm, AnnounceCarriesV4Fields)
   t.ext.optional = true;
   t.ext.skip_satisfies = true;
   t.ext.commit_radius = 5.0;
-  t.ext.spec_length = 300;
-  t.ext.spec_crc = 0xABCDu;
-  ASSERT_TRUE(swarm.node(1).addLocalTask(t, swarm.now()));
+  const std::string spec(300, 's');   // spec_length、spec_crc 由 addLocalTask 依 TaskSpec 填
+  ASSERT_TRUE(swarm.node(1).addLocalTask(t, swarm.now(), spec));
   swarm.run(1.0);
   ASSERT_TRUE(swarm.node(2).knows(t.id));
   const Task & r = swarm.node(2).agent().tasks().at(t.id);
@@ -1209,7 +1208,7 @@ TEST(CbbaComm, AnnounceCarriesV4Fields)
   EXPECT_FALSE(r.ext.all_or_nothing);
   EXPECT_NEAR(r.ext.commit_radius, 5.0, 1e-9);
   EXPECT_EQ(r.ext.spec_length, 300u);
-  EXPECT_EQ(r.ext.spec_crc, 0xABCDu);
+  EXPECT_EQ(r.ext.spec_crc, wire::specCrc(spec));
 }
 
 // ===========================================================================
@@ -1332,4 +1331,83 @@ TEST(Conflict, OtherNodeUsingMyIdIsReported)
   EXPECT_EQ(swarm.node(1).stats().id_conflicts, 1);
   swarm.run(6.0);
   EXPECT_FALSE(swarm.node(1).selfConflict(swarm.now()));
+}
+
+// ===========================================================================
+// TaskSpec（協定版本 4，2026-11-12）
+// ===========================================================================
+TEST(TaskSpec, ReachesEveryoneAndMatchesCrc)
+{
+  // 建立者帶 TaskSpec（3 段）：任務定義填好長度、CRC，全隊收齊、內容一樣
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.run(2.0);
+  std::string spec = "{\"steps\":[";
+  while (spec.size() < 2500) {
+    spec += "{\"action\":\"go_to\",\"location\":\"OBS_ENTRANCE_1\"},";
+  }
+  spec += "{}]}";
+  ASSERT_TRUE(swarm.node(1).addLocalTask(newTask(1, 1, 5, 0, swarm.now()), swarm.now(), spec));
+  EXPECT_EQ(swarm.node(1).stats().spec_parts_sent, 3);
+  swarm.run(1.0);
+  for (AgentId a : {1, 2, 3}) {
+    EXPECT_TRUE(swarm.node(a).specReady(makeTaskId(1, 1))) << a;
+    const auto got = swarm.node(a).taskSpec(makeTaskId(1, 1));
+    ASSERT_TRUE(got) << a;
+    EXPECT_EQ(*got, spec) << a;
+    EXPECT_EQ(swarm.node(a).agent().tasks().at(makeTaskId(1, 1)).ext.spec_length, spec.size()) << a;
+  }
+  // 舊型任務（沒有 TaskSpec）一直是 ready、內容是空字串
+  swarm.node(2).addLocalTask(newTask(2, 1, 11, 0, swarm.now()), swarm.now());
+  swarm.run(1.0);
+  EXPECT_TRUE(swarm.node(3).specReady(makeTaskId(2, 1)));
+  EXPECT_EQ(*swarm.node(3).taskSpec(makeTaskId(2, 1)), "");
+}
+
+TEST(TaskSpec, MissingSpecIsPulledFromNeighbor)
+{
+  // uav3 收到任務定義，TaskSpec 一直到不了（直接的、轉送的、補發的 SYNC_BATCH 都擋）：定期去要；
+  // 放開之後由要的那一則補齊（只擋「下一則」不夠：建立時摘要不同，uav3 一問，定義和 TaskSpec 就從補發一起來了）
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.run(2.0);
+  for (AgentId from : {1, 2}) {
+    swarm.block(from, 3, PacketType::TASK_SPEC);
+    swarm.block(from, 3, PacketType::SYNC_BATCH);
+  }
+  ASSERT_TRUE(swarm.node(1).addLocalTask(newTask(1, 1, 5, 0, swarm.now()), swarm.now(), "{\"steps\":[]}"));
+  swarm.run(1.5);
+  ASSERT_TRUE(swarm.node(3).knows(makeTaskId(1, 1)));
+  EXPECT_FALSE(swarm.node(3).specReady(makeTaskId(1, 1)));
+  EXPECT_FALSE(swarm.node(3).taskSpec(makeTaskId(1, 1)));
+  EXPECT_GT(swarm.node(3).stats().spec_requests, 0);   // 缺了 1 s 後開始要
+  for (AgentId from : {1, 2}) {
+    swarm.block(from, 3, PacketType::TASK_SPEC, false);
+    swarm.block(from, 3, PacketType::SYNC_BATCH, false);
+  }
+  swarm.run(2.5);
+  EXPECT_TRUE(swarm.node(3).specReady(makeTaskId(1, 1)));
+}
+
+TEST(TaskSpec, LateJoinerGetsDefinitionAndSpec)
+{
+  // 建立時 uav3 不在：恢復後摘要不同 → 任務定義和 TaskSpec 一起補
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.run(2.0);
+  swarm.setOnline(3, false);
+  ASSERT_TRUE(swarm.node(1).addLocalTask(newTask(1, 1, 5, 0, swarm.now()), swarm.now(),
+    std::string(1500, 'a')));
+  swarm.run(0.5);
+  swarm.setOnline(3, true);
+  swarm.run(4.0);
+  ASSERT_TRUE(swarm.node(3).knows(makeTaskId(1, 1)));
+  EXPECT_TRUE(swarm.node(3).specReady(makeTaskId(1, 1)));
+  EXPECT_EQ(*swarm.node(3).taskSpec(makeTaskId(1, 1)), std::string(1500, 'a'));
 }

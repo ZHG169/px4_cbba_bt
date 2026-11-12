@@ -78,6 +78,7 @@
 #include "cbba_core/wire_header.hpp"
 #include "cbba_core/wire_sync.hpp"
 #include "cbba_core/wire_task_announce.hpp"
+#include "cbba_core/wire_task_spec.hpp"
 
 namespace cbba_core
 {
@@ -117,6 +118,9 @@ struct CommConfig
   //（真的重開機時，舊 session 只會有在網路上延遲的封包，不會超過幾百 ms）
   double conflict_grace{1.0};
   double conflict_release{5.0};   // 留下的（較早的）session 這麼久沒聲音 → 解除，改接受較晚的（較早的那台關掉了）
+  // TaskSpec（版本 4，2026-11-12）
+  double spec_pull_period{1.0};   // 缺 TaskSpec 的進行中任務：每這麼久向一個鄰居要一次（WAITING_SPEC 超時改成每 gap_request_gap 向每個鄰居要）
+  double spec_keep_sec{60.0};     // 任務結束這麼久之後丟掉 TaskSpec 的內容（CRC 留在任務定義裡）
 };
 
 // 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
@@ -212,6 +216,7 @@ struct NeighborInfo
   std::map<TaskId, AgentId> pending_view;
   // AGENT_STATE（sequence 比上一則舊的丟掉）
   bool has_status{false};
+  bool waiting_spec{false};          // 它排第一的任務在等 TaskSpec（版本 4 的 AGENT_STATE）
   std::uint32_t status_seq{0};
   wire::StateFlags flags;
   AgentType vehicle_type{AgentType::UAV};
@@ -262,6 +267,10 @@ struct CommStats
   int repair_items_sent{0};     // SYNC_BATCH 送出的筆數（任務定義＋結束紀錄）
   int repair_items_applied{0};  // 收到的 SYNC_BATCH 筆數
   int repair_deferred{0};       // 補發額度不夠、留到下次的次數
+  int spec_parts_sent{0};       // 送出的 TaskSpec 段（建立時；補發算在 repair_items_sent）
+  int spec_parts_received{0};   // 收到的新段（不含重複）
+  int spec_bad{0};              // 收齊卻長度、CRC 對不上，或 origin 不是建立者的段
+  int spec_requests{0};         // 為了缺 TaskSpec 送出的缺口請求
   int id_conflicts{0};          // 偵測到的同機號衝突（含別台用了自己的機號）
   int conflict_dropped{0};      // 因為同機號衝突拒收的封包、任務定義
 };
@@ -289,7 +298,16 @@ public:
   // BT 發現的新任務。task.id 的建立者必須是自己（taskCreator(task_id) == 機號）。
   // task_id 已知、建立者不對時回傳 false。還沒和鄰居同步時先排隊（回傳 true），同步後才發現重複的
   // 記在 stats().rejected_local_tasks。
-  bool addLocalTask(const Task & task, double now);
+  // spec：TaskSpec（JSON，原文；版本 4）。不是空的時填好任務定義的 spec_length、spec_crc，任務定義之後送 TASK_SPEC 各段；
+  // 超過 255 段時回傳 false
+  bool addLocalTask(const Task & task, double now, const std::string & spec = std::string());
+
+  // TaskSpec（版本 4）：這個任務可以開始執行了嗎（不需要 TaskSpec，或這個 revision 的已經收齊、長度與 CRC 對）
+  bool specReady(TaskId id) const;
+  // 收齊的 TaskSpec（不需要時是空字串；還沒收齊時 nullopt）
+  std::optional<std::string> taskSpec(TaskId id) const;
+  // 指派流程告訴通訊層：哪個任務排第一在等 TaskSpec（0 = 沒有）；urgent = 等超過 spec_wait，改向每個鄰居要
+  void setWaitingSpec(TaskId id, bool urgent) {waiting_spec_ = id; spec_urgent_ = urgent;}
 
   // 正式指派：請 BT 接受時呼叫，回傳新版本（已知的最新版本 + 1，狀態「待接受」）
   std::uint64_t beginAssignment(TaskId id);
@@ -356,13 +374,14 @@ public:
   wire::CbbaStateBody cbbaStateBody(double now) const;   // 分批之前的完整內容（不含摘要）
   // 壓縮摘要（版本 3）：建立者 → 最小、最大流水號、知道幾個、已結束幾個、CRC
   std::map<DigestKey, wire::DigestEntry> digestMap() const;
-  std::size_t repairQueued() const {return repair_open_.size() + repair_closed_.size();}
+  std::size_t repairQueued() const {return repair_open_.size() + repair_spec_.size() + repair_closed_.size();}
 
 private:
   struct PendingTask
   {
     Task task;
     double queued{0.0};
+    std::string spec;
   };
   struct PendingCompletion
   {
@@ -409,7 +428,33 @@ private:
 
   // 任務
   wire::TaskAnnounceBody announceBody(TaskId id) const;
-  bool assign(const Task & task, double now);
+  bool assign(const Task & task, double now, const std::string & spec = std::string());
+
+  // TaskSpec（版本 4）
+  struct SpecStore
+  {
+    std::uint16_t revision{0};
+    std::uint8_t encoding{wire::kSpecEncodingJson};
+    std::uint8_t part_count{0};                    // 0 = 還沒有任何一段
+    std::vector<std::vector<std::uint8_t>> data;   // 每段的資料
+    std::vector<wire::RelayHeader> origin;         // 每段原本的 origin（補發沿用）
+    std::vector<bool> have;
+    bool complete{false};                          // 收齊、長度與 CRC 都對（對照任務定義）
+    std::string json;
+  };
+  void onTaskSpec(const Bytes & bytes, double now);
+  void applySpecPart(const wire::TaskSpecBody & b);
+  void completeSpec(TaskId id);
+  void pullSpecs(double now);
+  void forgetSpecs(double now);
+  void queueSpecRepair(TaskId id);
+  wire::TaskSpecBody specPartBody(TaskId id, std::uint8_t part) const;
+  std::map<TaskId, SpecStore> specs_;
+  std::set<std::pair<TaskId, std::uint8_t>> repair_spec_;   // 補發佇列：TaskSpec 的段（進行中任務的定義之後送）
+  std::map<TaskId, double> last_spec_pull_;
+  std::size_t spec_pull_cursor_{0};
+  TaskId waiting_spec_{0};
+  bool spec_urgent_{false};
   bool addTask(const wire::RelayHeader & origin, const Task & task, double now);
   void resendTask(TaskId id, double now);
   void resendClose(TaskId id, double now);

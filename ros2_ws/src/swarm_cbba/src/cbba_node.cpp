@@ -151,6 +151,7 @@ TaskMsg toMsg(const Task & t)
   m.duration_sec = static_cast<float>(t.duration_sec);
   m.status = static_cast<std::uint8_t>(t.status);
   m.status_stamp = toRosTime(t.status_stamp);
+  m.revision = t.revision;
   return m;
 }
 
@@ -308,6 +309,9 @@ public:
       declare_parameter<int>("max_queued_fires", static_cast<int>(assign.max_queued_fires)));
     assign.max_queue_wait = declare_parameter<double>("max_queue_wait", assign.max_queue_wait);
     assign.overrun_margin = declare_parameter<double>("overrun_margin", assign.overrun_margin);
+    // WAITING_SPEC（協定版本 4）：排第一但 TaskSpec 還沒收齊超過這麼久 → 向每個鄰居要、告警（task_spec_missing），不算失敗
+    assign.spec_wait = declare_parameter<double>("spec_wait", assign.spec_wait);
+    spec_wait_ = assign.spec_wait;
     const int tick_ms = declare_parameter<int>("tick_ms", 10);
 
     state_ = s;
@@ -336,6 +340,8 @@ public:
           rclcpp::QoS(256).reliable().transient_local());
     }
     orphan_pub_ = create_publisher<TaskMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
+    // 排第一卻等 TaskSpec 超過 spec_wait（協定版本 4，2026-11-12）：每 spec_wait 發一次，給閘道重送、改版或取消
+    spec_missing_pub_ = create_publisher<TaskMsg>(topic("task_spec_missing"), rclcpp::QoS(20).reliable());
     // 路徑（2026-10-27）：只要最新的一份，晚訂閱的也拿得到
     // 同機號衝突（協定版本 4，2026-11-11）：衝突的機號，每次新的衝突發一次（給閘道、地面站）
     conflict_pub_ = create_publisher<std_msgs::msg::UInt16>(topic("agent_conflict"), rclcpp::QoS(10).reliable());
@@ -519,9 +525,11 @@ private:
     t.value = msg.value;
     t.duration_sec = msg.duration_sec;
     t.status_stamp = t.created;
-    if (comm_->addLocalTask(t, now)) {
-      RCLCPP_INFO(get_logger(), "新任務 %s (%.1f, %.1f, %.1f) value %.0f，期限 %.0f s",
-        taskName(t.id).c_str(), t.position.x, t.position.y, t.position.z, t.value, t.deadline_sec);
+    // TaskSpec（協定版本 4）：new_task 帶 spec 的話一起送給全隊（閘道注入在第 4 步；這裡給測試、整合用）
+    if (comm_->addLocalTask(t, now, msg.spec)) {
+      RCLCPP_INFO(get_logger(), "新任務 %s (%.1f, %.1f, %.1f) value %.0f，期限 %.0f s%s",
+        taskName(t.id).c_str(), t.position.x, t.position.y, t.position.z, t.value, t.deadline_sec,
+        msg.spec.empty() ? "" : ("，TaskSpec " + std::to_string(msg.spec.size()) + " B").c_str());
     } else {
       RCLCPP_WARN(get_logger(),
         "新任務 %s 沒有加入：task_id 要是 %u × 65536 + 流水號，而且不能和已知的任務重複",
@@ -659,6 +667,7 @@ private:
     assignments_->step(now);
     assignments_->takeRequests();              // 不握手：沒有要送給 BT 的請求
     publishOutputs(now);
+    checkSpecWait(now);
     report(now);
     logStats(now);
     publishTx(now);
@@ -716,6 +725,29 @@ private:
     stats_last_ = now;
   }
 
+  // WAITING_SPEC 超過 spec_wait：告警（log＋task_spec_missing），之後每 spec_wait 再一次。補發由 CbbaComm 加強
+  void checkSpecWait(double now)
+  {
+    const auto & w = assignments_->waitingSpec();
+    if (!w || now - w->since < spec_wait_) {
+      spec_warned_task_ = 0;
+      return;
+    }
+    if (w->task == spec_warned_task_ && now - spec_warned_at_ < spec_wait_) {
+      return;
+    }
+    spec_warned_task_ = w->task;
+    spec_warned_at_ = now;
+    const auto it = comm_->agent().tasks().find(w->task);
+    if (it == comm_->agent().tasks().end()) {
+      return;
+    }
+    RCLCPP_WARN(get_logger(), "任務 %s 排第一，但 TaskSpec（revision %u）等了 %.1f s 還沒收齊：向每個鄰居要，"
+      "不發 current_task（不算失敗）", taskName(w->task).c_str(), static_cast<unsigned>(it->second.revision),
+      now - w->since);
+    spec_missing_pub_->publish(toMsg(it->second));
+  }
+
   void publishOutputs(double now)
   {
     if (assignments_->takeAssignedChanged()) {
@@ -724,6 +756,8 @@ private:
       if (active && comm_->agent().tasks().count(active->task) > 0) {
         const Task & t = comm_->agent().tasks().at(active->task);
         msg = toMsg(t);
+        // TaskSpec（協定版本 4）：正式指派只在收齊後才建立（WAITING_SPEC），這裡一定有
+        msg.spec = comm_->taskSpec(t.id).value_or(std::string());
         RCLCPP_INFO(get_logger(), "指派給 BT：%s (%.1f, %.1f, %.1f)", taskName(t.id).c_str(),
           t.position.x, t.position.y, t.position.z);
       } else {
@@ -931,6 +965,10 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 預設只有無人機（publish_announced）
   rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
+  rclcpp::Publisher<TaskMsg>::SharedPtr spec_missing_pub_;
+  double spec_wait_{5.0};
+  TaskId spec_warned_task_{0};
+  double spec_warned_at_{-1e9};
   rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr path_pub_;
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;

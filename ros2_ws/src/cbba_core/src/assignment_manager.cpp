@@ -176,6 +176,7 @@ void AssignmentManager::step(double now)
 
   const bool stable = head != 0 && now - candidate_since_ >= config_.assign_hold;
   const TaskId active_task = active_ ? active_->task : 0;
+  TaskId waiting = 0;
   if (!pending_ && stable && head != active_task) {
     if (reserved_ && head == reserved_->task && !active_) {
       // 保留的排到第一：核心已經重新檢查過可行性（期限、電量），轉成執行中，不再問 BT
@@ -189,11 +190,14 @@ void AssignmentManager::step(double now)
         warn("保留的 " + name(r.task, r.version) + " 已被取代，不執行");
         reserved_.reset();
       }
+    } else if (!comm_.specReady(head)) {
+      waiting = head;   // WAITING_SPEC：TaskSpec 收齊前不建立正式指派、不發 current_task
     } else {
       // 新的、或搶占（核心只在可以安全中斷、優先級較高時才把它排到執行中任務的前面）
       startRequest(RequestKind::ACTIVATE, head, active_.has_value(), candidate_since_, now);
     }
   }
+  setWaiting(waiting, now);
 
   // 排隊：執行中任務之後的第一個火警（核心已檢查數量與期限），一樣經過接受，變成保留
   TaskId queued = 0;
@@ -212,7 +216,7 @@ void AssignmentManager::step(double now)
     queue_since_ = now;
   }
   if (!pending_ && active_ && !reserved_ && queued != 0 &&
-    now - queue_since_ >= config_.assign_hold)
+    now - queue_since_ >= config_.assign_hold && comm_.specReady(queued))
   {
     startRequest(RequestKind::RESERVE, queued, false, queue_since_, now);
   }
@@ -227,6 +231,23 @@ void AssignmentManager::step(double now)
   }
 
   updateConstraints(now);
+}
+
+void AssignmentManager::setWaiting(TaskId task, double now)
+{
+  if (task == 0) {
+    if (waiting_spec_) {
+      info("TaskSpec 收齊或不再排第一：結束等待 " + taskName(waiting_spec_->task));
+    }
+    waiting_spec_.reset();
+    comm_.setWaitingSpec(0, false);
+    return;
+  }
+  if (!waiting_spec_ || waiting_spec_->task != task) {
+    waiting_spec_ = WaitingSpec{task, now};
+    info("排第一但還沒收齊 TaskSpec：" + taskName(task) + " 進入 WAITING_SPEC（不發 current_task）");
+  }
+  comm_.setWaitingSpec(task, now - waiting_spec_->since >= config_.spec_wait);
 }
 
 // 持有的指派還有效嗎：任務結束、回報完成、被更新的版本取代 → 不再持有

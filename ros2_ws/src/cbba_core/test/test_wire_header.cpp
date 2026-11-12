@@ -86,6 +86,8 @@ TEST(WireHeader, RejectsInvalid)
   bad[3] = 8;
   EXPECT_TRUE(parseHeader(bad));                       // SYNC_BATCH（版本 3）
   bad[3] = 9;
+  EXPECT_TRUE(parseHeader(bad));                       // TASK_SPEC（版本 4）
+  bad[3] = 10;
   EXPECT_FALSE(parseHeader(bad));                      // 不認得的種類
   EXPECT_FALSE(parseHeader(packet(makeHeader(PacketType::AGENT_STATE, 0))));        // 0 = 無人
   EXPECT_FALSE(parseHeader(packet(makeHeader(PacketType::AGENT_STATE, 0xFFFF))));   // 保留
@@ -108,6 +110,7 @@ TEST(WireHeader, RelayBlock)
   EXPECT_TRUE(isRelayed(PacketType::TASK_CLOSE));
   EXPECT_FALSE(isRelayed(PacketType::GAP_REQUEST));   // 版本 3 的補發只在直接鄰居之間
   EXPECT_FALSE(isRelayed(PacketType::SYNC_BATCH));
+  EXPECT_TRUE(isRelayed(PacketType::TASK_SPEC));
 
   std::vector<std::uint8_t> bytes;
   appendHeader(bytes, makeHeader(PacketType::TASK_ANNOUNCE));

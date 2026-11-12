@@ -31,7 +31,7 @@
 // 取代版本 1 的「seq 區塊預約」（seq_file）：重開機換新的 session，(origin_id, origin_session, origin_seq)
 // 不會和開機前的撞在一起，不需要把 seq 存在非揮發性儲存，也不受時鐘往回跳影響。
 //
-// 轉送區塊（TASK_ANNOUNCE、COMPLETION、COMPLETION_ACK、TASK_CLOSE 才有，接在表頭之後、算在 payload 裡）：14 B
+// 轉送區塊（TASK_ANNOUNCE、COMPLETION、COMPLETION_ACK、TASK_CLOSE、TASK_SPEC 才有，接在表頭之後、算在 payload 裡）：14 B
 //   origin_id 2 | origin_session 8 | origin_seq 4
 //
 //   轉送 = 換上自己的表頭（sender_id、session_id、sequence），payload（含轉送區塊）原封不動。
@@ -63,7 +63,8 @@ enum class PacketType : std::uint8_t
   COMPLETION_ACK = 5,  // 完成確認，轉送（只在需要時）
   TASK_CLOSE = 6,      // 任務結束（完成證明或取消），轉送
   GAP_REQUEST = 7,     // 缺口請求（版本 3）：「這個建立者的這段流水號，我的狀態是這張點陣圖」，不轉送
-  SYNC_BATCH = 8,      // 分批回覆（版本 3）：多筆任務定義、結束紀錄，限速，不轉送
+  SYNC_BATCH = 8,      // 分批回覆（版本 3）：多筆任務定義、結束紀錄、TaskSpec 段，限速，不轉送
+  TASK_SPEC = 9,       // TaskSpec 的一段（版本 4，2026-11-12）：執行要的 steps 等，轉送
 };
 
 constexpr std::uint16_t kMagic = 0x4342;

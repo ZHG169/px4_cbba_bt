@@ -125,10 +125,12 @@ TEST(WireGapRequest, RejectsInvalid)
   bad_body.creator = 0;
   EXPECT_THROW(encodeGapRequest(makeHeader(), bad_body), std::invalid_argument);
 
-  // 解碼：點陣圖的值 3、沒用到的位元不是 0、長度不符
+  // 解碼：值 3 是「缺 TaskSpec」（版本 4）；沒用到的位元不是 0、長度不符
   auto bad = good;
   bad[kHeaderSize + 12] = 0xC0;   // 第一格 = 3
-  EXPECT_FALSE(decodeGapRequest(bad));
+  const auto no_spec = decodeGapRequest(bad);
+  ASSERT_TRUE(no_spec);
+  EXPECT_EQ(no_spec->states[0], SeqState::OPEN_NO_SPEC);
   bad = good;
   bad[kHeaderSize + 12] = 0x41;   // 第一格 1，第四格（沒用到）= 1
   EXPECT_FALSE(decodeGapRequest(bad));

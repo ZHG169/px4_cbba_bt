@@ -55,6 +55,15 @@ public:
   void cut(AgentId a, AgentId b) {cut_.insert({a, b}); cut_.insert({b, a});}
   // from 送給 to 的下一則 type 封包會掉
   void dropNext(AgentId from, AgentId to, PacketType type) {drop_.insert({from, to, type});}
+  // from 送給 to 的 type 封包一直掉，直到 block(..., false)（2026-11-12，TaskSpec 測試：同時擋 TASK_SPEC 和補發的 SYNC_BATCH）
+  void block(AgentId from, AgentId to, PacketType type, bool on = true)
+  {
+    if (on) {
+      block_.insert({from, to, type});
+    } else {
+      block_.erase({from, to, type});
+    }
+  }
   // 錄下 from 送出的封包（之後可以拿來重放）
   void record(AgentId from) {record_from_ = from;}
   // 每個模擬步驟最後呼叫（節點層的事：指派流程、假的 BT）
@@ -93,7 +102,7 @@ public:
             if (b == a || cut_.count({from, to}) > 0 || unit(rng_) < loss_) {
               continue;
             }
-            if (drop_.erase({from, to, type}) > 0) {
+            if (drop_.erase({from, to, type}) > 0 || block_.count({from, to, type}) > 0) {
               continue;
             }
             flight_.push_back(InFlight{now_ + delay(rng_), b, bytes});
@@ -182,6 +191,7 @@ private:
   std::vector<bool> online_;
   std::set<std::pair<AgentId, AgentId>> cut_;
   std::set<std::tuple<AgentId, AgentId, PacketType>> drop_;
+  std::set<std::tuple<AgentId, AgentId, PacketType>> block_;
   std::vector<InFlight> flight_;
   std::size_t bytes_{0};
   AgentId record_from_{0};

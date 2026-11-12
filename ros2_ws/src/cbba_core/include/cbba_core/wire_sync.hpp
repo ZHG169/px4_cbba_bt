@@ -7,15 +7,17 @@
 //   creator、epoch  （建立者, 世代），和 CBBA_STATE 的摘要同一個鍵；舊型 ID 的世代是 0
 //   first_seq   點陣圖第一格的流水號（types.hpp 的 taskSeq），count 格（1～kMaxGapSeqs），流水號不繞回
 //               （世代 0 不超過 0xFFFF，其他不超過 0xFFFFFFFF）
-//   bitmap      每個流水號 2 bit，高位在前：0 不認得、1 進行中、2 已結束（3 保留，拒收）；最後一個位元組沒用到的位元填 0
+//   bitmap      每個流水號 2 bit，高位在前：0 不認得、1 進行中、2 已結束、3 進行中但缺 TaskSpec（版本 4）；
+//               最後一個位元組沒用到的位元填 0
 //
-//   回答的一方逐一比對：我知道、對方不認得 → 任務定義；我已結束、對方不認得或進行中 → 結束紀錄。
+//   回答的一方逐一比對：我知道、對方不認得 → 任務定義；我已結束、對方不認得或進行中 → 結束紀錄；
+//   對方缺 TaskSpec（或不認得）、我有完整的 → TaskSpec 的每一段（版本 4）。
 //   沒有可補的就不回。
 //
 // SYNC_BATCH（種類 8，分批回覆）：20 + 1 + Σ(3 + length) B，不超過 max_packet
 //   表頭 20 | item_count 1 | (type 1 + length 2 + 內容 length) × M
 //
-//   type      只能是 TASK_ANNOUNCE（3）或 TASK_CLOSE（6）
+//   type      只能是 TASK_ANNOUNCE（3）、TASK_CLOSE（6）或 TASK_SPEC（9，版本 4）
 //   內容      那種封包表頭之後的全部（轉送區塊＋欄位，origin 是原本的）。解碼時補一個表頭，交給原本的解碼函式，
 //             驗證、權限檢查都和收到那種封包一樣
 //
@@ -39,7 +41,8 @@ constexpr std::size_t kSyncBatchBaseSize = kHeaderSize + 1;
 constexpr std::size_t kSyncItemOverhead = 3;         // type 1 + length 2
 
 // 點陣圖裡每個流水號的狀態
-enum class SeqState : std::uint8_t { UNKNOWN = 0, OPEN = 1, CLOSED = 2 };
+// OPEN_NO_SPEC（版本 4）：認得、進行中，但這個 revision 的 TaskSpec 還沒收齊
+enum class SeqState : std::uint8_t { UNKNOWN = 0, OPEN = 1, CLOSED = 2, OPEN_NO_SPEC = 3 };
 
 constexpr std::size_t gapRequestSize(std::size_t count)
 {
@@ -67,7 +70,7 @@ inline std::optional<GapRequestBody> decodeGapRequest(const std::vector<std::uin
 
 struct SyncItem
 {
-  PacketType type{PacketType::TASK_ANNOUNCE};   // TASK_ANNOUNCE 或 TASK_CLOSE
+  PacketType type{PacketType::TASK_ANNOUNCE};   // TASK_ANNOUNCE、TASK_CLOSE 或 TASK_SPEC
   std::vector<std::uint8_t> payload;            // 那種封包表頭之後的全部
 };
 

@@ -667,3 +667,31 @@ TEST(Assignment, OverrunningActiveStopsQueueingButStillPreemptable)
   team.swarm.run(2.0);
   EXPECT_TRUE(activeIs(team.mgr(50), makeTaskId(1, 3)));
 }
+
+TEST(Assignment, WaitingSpecHoldsCurrentTaskUntilSpecArrives)
+{
+  // 狗排第一但 TaskSpec 掉了：WAITING_SPEC，不建立正式指派、不發 current_task（不算失敗）；補齊後立刻開始
+  AssignmentConfig cfg;
+  cfg.assign_hold = 0.2;
+  Team team(cfg);
+  team.addUav(1, {0, 0, 5});
+  team.addDog(50, {6, 0, 0}, 100.0, false);
+  team.swarm.run(2.0);
+  // TaskSpec 一直到不了：直接的段、補發的 SYNC_BATCH 都擋（只擋下一則時，摘要比對會從補發一起送來）
+  team.swarm.block(1, 50, PacketType::TASK_SPEC);
+  team.swarm.block(1, 50, PacketType::SYNC_BATCH);
+  const Task fire = groundTask(1, 1, 6, 1, team.swarm.now());
+  ASSERT_TRUE(team.swarm.node(1).addLocalTask(fire, team.swarm.now(), "{\"steps\":[{\"action\":\"inspect\"}]}"));
+  team.swarm.run(1.0);
+  ASSERT_TRUE(team.mgr(50).waitingSpec());
+  EXPECT_EQ(team.mgr(50).waitingSpec()->task, fire.id);
+  EXPECT_FALSE(team.mgr(50).active());
+  EXPECT_EQ(team.swarm.node(50).assignment(fire.id).state, AssignState::NONE);
+  EXPECT_TRUE(team.swarm.node(50).agentStateBody(team.swarm.now()).waiting_spec);
+  team.swarm.block(1, 50, PacketType::TASK_SPEC, false);
+  team.swarm.block(1, 50, PacketType::SYNC_BATCH, false);
+  team.swarm.run(2.5);
+  EXPECT_FALSE(team.mgr(50).waitingSpec());
+  ASSERT_TRUE(activeIs(team.mgr(50), fire.id));
+  EXPECT_FALSE(team.swarm.node(50).agentStateBody(team.swarm.now()).waiting_spec);
+}

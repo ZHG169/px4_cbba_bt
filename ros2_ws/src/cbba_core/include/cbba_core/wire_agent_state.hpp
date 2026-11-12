@@ -16,7 +16,8 @@
 //   progress         執行進度 0～1（固定 0，等 BT）
 //   execution_state  BT 的執行狀態（swarm_interfaces/ExecState：0 閒置、1 前往、2 處置中、3 不可中斷、4 停止中、5 故障）
 //   exec_flags       bit 0 有 BT 的執行狀態（沒有時 execution_state、remaining_time 沒有意義）、
-//                    bit 1 可以安全中斷、bit 2 有執行中的任務、bit 3 有保留（排隊）的任務
+//                    bit 1 可以安全中斷、bit 2 有執行中的任務、bit 3 有保留（排隊）的任務、
+//                    bit 4 WAITING_SPEC（排第一但還沒收齊 TaskSpec，版本 4）
 //   remaining_time   目前任務的預估剩餘時間（秒）；負值 = 不知道
 //   active_*         目前正式指派、執行中的任務與版本（bit 2 為 0 時沒有意義）
 //   queued_*         已接受、排隊中（保留）的任務與版本（bit 3 為 0 時沒有意義）
@@ -67,6 +68,7 @@ struct AgentStateBody
   bool exec_known{false};
   std::uint8_t execution_state{0};
   bool preemptible{false};
+  bool waiting_spec{false};
   float remaining_time{-1.0f};
   bool has_active{false};
   std::uint64_t active_task{0};
