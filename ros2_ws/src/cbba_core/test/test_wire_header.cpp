@@ -37,7 +37,7 @@ TEST(WireHeader, LayoutIsBigEndian)
   const auto out = packet(makeHeader(PacketType::CBBA_STATE), 3);
   const std::vector<std::uint8_t> expected = {
     0x43, 0x42,                                      // magic "CB"
-    0x03,                                            // version
+    0x04,                                            // version
     0x02,                                            // type = CBBA_STATE
     0x01, 0x02,                                      // sender_id
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,  // session_id
@@ -76,6 +76,8 @@ TEST(WireHeader, RejectsInvalid)
   EXPECT_FALSE(parseHeader(bad));                      // 版本 1（規格書的格式）
   bad[2] = 2;
   EXPECT_FALSE(parseHeader(bad));                      // 版本 2（2026-10-28 前；補發的方式不同，不互通）
+  bad[2] = 3;
+  EXPECT_FALSE(parseHeader(bad));                      // 版本 3（2026-11-11 前；task_id 32 位元，不互通）
   bad = good;
   bad[3] = 0;
   EXPECT_FALSE(parseHeader(bad));                      // 種類 0

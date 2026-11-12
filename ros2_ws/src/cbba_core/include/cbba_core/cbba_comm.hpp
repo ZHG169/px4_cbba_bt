@@ -172,6 +172,9 @@ struct VehicleStatus
   bool landed{false};
 };
 
+// 摘要的鍵（版本 4）：（建立者, 世代）；舊型 ID 的世代是 0
+using DigestKey = std::pair<AgentId, Epoch>;
+
 struct NeighborInfo
 {
   double last_heard{0.0};
@@ -187,7 +190,7 @@ struct NeighborInfo
   // 摘要（版本 3）：digest_key 是帶摘要那一則的 round_key；它最新的 round_key 等於 digest_key 時摘要才是最新的
   bool has_digest{false};
   std::uint32_t digest_key{0};
-  std::map<std::uint16_t, wire::DigestEntry> digest;   // 建立者 → 摘要
+  std::map<DigestKey, wire::DigestEntry> digest;   // （建立者, 世代）→ 摘要
   std::uint16_t pending_snapshot{0};
   std::uint8_t pending_count{0};
   std::set<std::uint8_t> pending_parts;
@@ -197,6 +200,7 @@ struct NeighborInfo
   std::uint32_t status_seq{0};
   wire::StateFlags flags;
   AgentType vehicle_type{AgentType::UAV};
+  Capabilities capabilities{0};      // 它目前可用的能力（版本 4 的 AGENT_STATE）
   Vec3 position{};
   double battery{0.0};
   bool exec_known{false};           // 它的 BT 有在回報執行狀態
@@ -265,7 +269,7 @@ public:
   void setParticipating(bool participating, double now);
   bool participating() const {return agent_.active();}
 
-  // BT 發現的新任務。task.id 的建立者必須是自己（task_id >> 16 == 機號）。
+  // BT 發現的新任務。task.id 的建立者必須是自己（taskCreator(task_id) == 機號）。
   // task_id 已知、建立者不對時回傳 false。還沒和鄰居同步時先排隊（回傳 true），同步後才發現重複的
   // 記在 stats().rejected_local_tasks。
   bool addLocalTask(const Task & task, double now);
@@ -327,7 +331,7 @@ public:
   wire::AgentStateBody agentStateBody(double now) const;
   wire::CbbaStateBody cbbaStateBody(double now) const;   // 分批之前的完整內容（不含摘要）
   // 壓縮摘要（版本 3）：建立者 → 最小、最大流水號、知道幾個、已結束幾個、CRC
-  std::map<std::uint16_t, wire::DigestEntry> digestMap() const;
+  std::map<DigestKey, wire::DigestEntry> digestMap() const;
   std::size_t repairQueued() const {return repair_open_.size() + repair_closed_.size();}
 
 private:
@@ -367,7 +371,7 @@ private:
   // 補發（版本 3）
   bool wantDigest(double now) const;
   void compareDigest(AgentId neighbor, const NeighborInfo & n, double now);
-  void sendGapRequest(AgentId target, std::uint16_t creator, std::uint16_t lo, std::uint16_t hi, double now);
+  void sendGapRequest(AgentId target, DigestKey stream, std::uint32_t lo, std::uint32_t hi, double now);
   void onGapRequest(const Bytes & bytes);
   void onSyncBatch(const wire::Header & h, const Bytes & bytes, double now);
   struct RepairNeed
@@ -425,8 +429,8 @@ private:
   // 補發（版本 3）
   std::map<TaskId, double> added_at_;    // 本機知道這個任務的時刻（直接推送用）
   std::map<TaskId, double> closed_at_;   // 本機知道這個任務結束的時刻
-  std::map<std::pair<AgentId, std::uint16_t>, double> last_gap_request_;   // (鄰居, 建立者) → 上次請求
-  std::map<std::pair<AgentId, std::uint16_t>, std::uint32_t> gap_cursor_;  // 範圍太大時下次從哪個流水號問
+  std::map<std::pair<AgentId, DigestKey>, double> last_gap_request_;   // (鄰居, (建立者, 世代)) → 上次請求
+  std::map<std::pair<AgentId, DigestKey>, std::uint64_t> gap_cursor_;  // 範圍太大時下次從哪個流水號問
   std::map<TaskId, RepairNeed> repair_open_;     // 補發佇列：進行中的任務（先送）
   std::map<TaskId, RepairNeed> repair_closed_;   // 已結束的
   double repair_tokens_{0.0};

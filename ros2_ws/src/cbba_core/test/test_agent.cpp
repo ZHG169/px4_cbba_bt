@@ -510,7 +510,7 @@ TEST(Agent, BidForReportsOwnBidAndReason)
   EXPECT_STREQ(lost.why, "bid");
   EXPECT_GT(lost.bid, 0.0);
   EXPECT_LT(lost.bid, near.score(101));   // 遠的那台出價較低，所以沒贏
-  EXPECT_STREQ(near.bidFor(102, 1.0).why, "infeasible");   // 無人機不做地面任務
+  EXPECT_STREQ(near.bidFor(102, 1.0).why, "platform");   // 無人機不做地面任務（2026-11-11 起原因分成 platform／capability）
   EXPECT_DOUBLE_EQ(near.bidFor(102, 1.0).bid, 0.0);
   EXPECT_STREQ(near.bidFor(999, 1.0).why, "unknown");
 

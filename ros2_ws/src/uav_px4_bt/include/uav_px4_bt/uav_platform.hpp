@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <vector>
@@ -11,6 +12,23 @@
 
 namespace uav_px4_bt
 {
+
+// task_id（2026-11-11，協定版本 4）：64 位元。舊型 ID（上半 32 位元是 0）＝ 機號 × 65536 + 流水號，數值同以前；
+// 版本 4 ID（建立者 16 ｜ 世代 16 ｜ 流水號 32）只由 cbba_node／閘道產生。BT 只接收、保存、比較、回傳，不拆欄位
+using TaskId = std::uint64_t;
+
+// log 用：舊型照以前印 8 位十六進位；版本 4 印 建立者.世代.流水號（和 cbba_core 的 taskName 相同）
+inline std::string taskHex(TaskId id)
+{
+  char b[32];   // 每段最多 8 位，留足空間（不觸發 -Wformat-truncation）
+  if ((id >> 32) == 0) {
+    std::snprintf(b, sizeof(b), "%08X", static_cast<unsigned>(id));
+  } else {
+    std::snprintf(b, sizeof(b), "%04X.%04X.%08X", static_cast<unsigned>(id >> 48),
+      static_cast<unsigned>((id >> 32) & 0xFFFFu), static_cast<unsigned>(id & 0xFFFFFFFFu));
+  }
+  return b;
+}
 
 // 自己的狀態（map ENU）
 struct VehicleState
@@ -32,7 +50,7 @@ struct VehicleState
 // cbba_node 的 current_task（task_id = 0 表示沒有任務）。version 2026-10-12 起固定 0（介面不帶指派版本）
 struct AssignedTask
 {
-  std::uint32_t task_id{0};
+  TaskId task_id{0};
   std::uint8_t type{0};
   Vec3 position;
   double duration{0.0};
@@ -55,7 +73,7 @@ struct FireObservation
 // 全隊已知的地面處置任務（cbba_node 的 task_announced，2026-10-14）：火點去重複要算進別台報過的
 struct KnownGroundTask
 {
-  std::uint32_t task_id{0};
+  TaskId task_id{0};
   Vec3 position;              // 火點（map ENU，z = 0）
 };
 
@@ -67,7 +85,7 @@ struct ExecStatus
   ExecMode mode{ExecMode::IDLE};
   bool preemptible{true};
   double remaining{-1.0};
-  std::uint32_t active_task{0};    // 0 = 沒有
+  TaskId active_task{0};    // 0 = 沒有
   std::uint64_t active_version{0};
 };
 
@@ -95,11 +113,11 @@ public:
 
   virtual void reportResult(const AssignedTask & task, bool success, const std::string & detail) = 0;
   // 建立任務（ReportFireEvent）：回傳 task_id
-  virtual std::uint32_t createTask(std::uint8_t type, const Vec3 & position, double value,
+  virtual TaskId createTask(std::uint8_t type, const Vec3 & position, double value,
     double duration, double deadline) = 0;
   virtual void setExecStatus(const ExecStatus & status) = 0;
   // 任務已經結束（cbba_node 的 task_closed：完成或取消）。2026-10-13：火警懸停監控等地面處置完成用
-  virtual bool taskClosed(std::uint32_t /*task_id*/) const {return false;}
+  virtual bool taskClosed(TaskId /*task_id*/) const {return false;}
   // 全隊已知的地面處置任務（含別台建立的）。2026-10-14：別台報過的火不再發布、不轉向
   virtual std::vector<KnownGroundTask> groundTasks() const {return {};}
   virtual void log(const std::string & text) = 0;

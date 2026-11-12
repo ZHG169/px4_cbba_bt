@@ -1,11 +1,12 @@
 // 補發（anti-entropy）的兩種封包，都不轉送（協定版本 3，2026-10-28；整體說明見 doc/protocol_v3_sync.md）
 //
-// GAP_REQUEST（種類 7，缺口請求）：20 + 8 + ⌈count / 4⌉ B
-//   表頭 20 | target_id 2 | creator 2 | first_seq 2 | count 2 | bitmap ⌈count / 4⌉
+// GAP_REQUEST（種類 7，缺口請求）：20 + 12 + ⌈count / 4⌉ B（版本 4：加 epoch、first_seq 4 B）
+//   表頭 20 | target_id 2 | creator 2 | epoch 2 | first_seq 4 | count 2 | bitmap ⌈count / 4⌉
 //
 //   target_id   要回答的鄰居（只有它回答；multicast，其他人收到就丟）
-//   creator     建立者機號（task_id 的高 16 位元）
-//   first_seq   點陣圖第一格的流水號（task_id 的低 16 位元），count 格（1～kMaxGapSeqs），流水號不繞回
+//   creator、epoch  （建立者, 世代），和 CBBA_STATE 的摘要同一個鍵；舊型 ID 的世代是 0
+//   first_seq   點陣圖第一格的流水號（types.hpp 的 taskSeq），count 格（1～kMaxGapSeqs），流水號不繞回
+//               （世代 0 不超過 0xFFFF，其他不超過 0xFFFFFFFF）
 //   bitmap      每個流水號 2 bit，高位在前：0 不認得、1 進行中、2 已結束（3 保留，拒收）；最後一個位元組沒用到的位元填 0
 //
 //   回答的一方逐一比對：我知道、對方不認得 → 任務定義；我已結束、對方不認得或進行中 → 結束紀錄。
@@ -32,7 +33,7 @@
 namespace cbba_core::wire
 {
 
-constexpr std::size_t kGapRequestBaseSize = kHeaderSize + 8;
+constexpr std::size_t kGapRequestBaseSize = kHeaderSize + 12;
 constexpr std::size_t kMaxGapSeqs = 4000;            // 點陣圖 1000 B
 constexpr std::size_t kSyncBatchBaseSize = kHeaderSize + 1;
 constexpr std::size_t kSyncItemOverhead = 3;         // type 1 + length 2
@@ -49,12 +50,13 @@ struct GapRequestBody
 {
   std::uint16_t target_id{0};
   std::uint16_t creator{0};
-  std::uint16_t first_seq{0};
+  std::uint16_t epoch{0};
+  std::uint32_t first_seq{0};
   std::vector<SeqState> states;   // states[i] 是流水號 first_seq + i 的狀態
 };
 
 // 編碼成完整封包；header.type 會設成 GAP_REQUEST。target、creator 不合法、states 是空的或超過 kMaxGapSeqs、
-// first_seq + count 超過 65536 時丟出 std::invalid_argument。
+// first_seq + count 超過那個世代的流水號範圍時丟出 std::invalid_argument。
 std::vector<std::uint8_t> encodeGapRequest(Header header, const GapRequestBody & body);
 // 解碼完整封包。表頭不合法、種類不符、長度不符、欄位不合法（含點陣圖的值 3）時回傳 nullopt
 std::optional<GapRequestBody> decodeGapRequest(const std::uint8_t * data, std::size_t size);

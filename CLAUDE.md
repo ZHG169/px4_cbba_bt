@@ -268,7 +268,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | 項目 | 定案 |
 |---|---|
 | 協定 | 版本 4（和版本 3 互相拒收，全隊一起重新編譯）。M0 只定合約，實作從 M1 起 |
-| task_id | **uint64 = 建立者 16 ｜ 世代 16 ｜ 流水號 32**；世代每次啟動 + 1 並存檔（閘道讀不到就拒絕啟動；機器人讀不到用隨機世代＋警告）；同一機號同時兩個 session → 告警、拒收較晚的。group_id 同格式。log 印 `creator.epoch.seq`。`swarm_interfaces` 的 Task／TaskResult／Bid 的 task_id 改 uint64（伯宇的 task_manager 約 12 處要改） |
+| task_id | **uint64 = 建立者 16 ｜ 世代 16 ｜ 流水號 32**；**舊型 ID 相容模式**：上半 32 位元 = 0 的是舊型（`機號 × 65536 + 流水號`，數值同版本 3，epoch = 0，BT 自己算，保留到 M3）；版本 4 ID 只由 cbba_node／閘道產生（不加 `cbba_epoch` 話題）；**狗端通訊由使用者統一負責**：第 2 步時狗和無人機的 current_task、BT 內部任務識別、task_result 一起改成 uint64（BT 流程不動）；摘要每筆固定 24 B（known、closed 為 uint32，逐欄序列化）；世代每次啟動 + 1 並存檔（閘道讀不到就拒絕啟動；機器人讀不到用隨機世代＋警告）；同一機號同時兩個 session → 告警、拒收較晚的。group_id 同格式。log 印 `creator.epoch.seq`。`swarm_interfaces` 的 Task／TaskResult／Bid 的 task_id 改 uint64（伯宇的 task_manager 約 12 處要改） |
 | 誰建任務 | **統一由閘道（GCS）建**：閘道跑不出價的 cbba_node（`participate: never`，機號暫定 200，列進全隊 `cancel_authorities`），`inject_task` service，冪等鍵 (incident_id, role, revision)。機器人的偵測（無人機看到火等）送 DETECTION 給閘道，不自己建任務；舊型 `new_task`（TaskType）保留到 M3 |
 | 閘道斷線 | 機器人**不自己展開任務**（也不展開 fallback）：已知任務照常競標、執行；新的偵測暫存在 cbba_node，恢復後送出。斷線判定 `gateway_timeout` 3 s。fallback_template 只在閘道在線時由閘道重建較簡化的任務組；CBBA 不自己刪減角色。代價：斷網中看到的新火警要等閘道恢復才有任務 |
 | 能力過濾 | 可出價 ⇔ task.platform ∈ {ANY, agent.platform} ∧ required_caps ⊆ available_caps；取代 `isCompatible`。能力 uint64 位元遮罩、平台 uint8（0 ANY、1 uav、2 quadruped），位元位置寫在註冊表 `tools.yaml`／`platforms.yaml`、只增不改；載具能力從 `fleet.yaml`；E_HW 拿掉故障的能力；AGENT_STATE 廣播 platform、available_caps。舊 TaskType 自動對應（AIR_RECON → uav＋mobility_air、rgb_camera；GROUND_INTERVENTION／PATROL → quadruped＋mobility_ground） |
@@ -392,7 +392,14 @@ itest `--dogs`／斷網情境／`dog_patrol.py`／`plot_blackout.py`、cbba_core
 ### 還沒做的（依建議順序）
 
 0. **commit 11/05～11/10 的工作**（見上面）。
-1. **2-1b 的 M0（11/20）**：CBBA 合約已定（11/11，`cbba_m0_contract.md`）→ 給伯宇的介面變更清單（task_id uint64、Task／TaskResult 加欄位、`current_task.spec`、WAITING_SPEC）→ 註冊表裡 CBBA 用的 tools、platforms、fleet 三份 → 之後才是無人機（uav_adapter，SITL 後端用 `Px4Platform`）。見「下一階段：2-1b」。
+1. **2-1b 的 M0（11/20）實作進度**：第 1 步能力過濾＋P0～P3（`capabilities.hpp`，11/11，使用者驗證過）；**第 2a 步協定版本 4 的封包與協定層**
+   （task_id 64 位元＋舊型 ID 相容、CBBA_STATE 27 B／摘要 24 B、TASK_ANNOUNCE 123 B 帶 A 層、AGENT_STATE 帶能力、GAP_REQUEST 帶世代；
+   11/11 單元測試全過）；**第 2b 步**（11/12 寫完；**2a＋2b 11/12 整合測試通過**：itest comm --dogs 3 C0～C9、uav）：`swarm_interfaces` 的 Task／TaskResult／Bid 的 task_id 改 uint64、`cbba_path` 改
+   UInt64MultiArray；無人機 BT（`TaskId`、`taskHex`，骨架副本、`uav_task_manager_node`、`px4_platform`、備用 BT、測試）、`task_executor`、
+   伯宇狗 BT 的介接層（直接改 handoff，patch 存在 `docker/dog/task_manager_uint64.patch`，原檔備份 `docs/handoff_uav_2026-10-12/task_manager.orig_20261112`）、
+   itest 的 `config.json`；Python（fake_dog、itest）不用改；
+   2c：世代存檔＋同機號偵測；3 TASK_SPEC；4 閘道；5 DETECTION。
+   原規劃：CBBA 合約已定（11/11，`cbba_m0_contract.md`）→ 給伯宇的介面變更清單（task_id uint64、Task／TaskResult 加欄位、`current_task.spec`、WAITING_SPEC）→ 註冊表裡 CBBA 用的 tools、platforms、fleet 三份 → 之後才是無人機（uav_adapter，SITL 後端用 `Px4Platform`）。見「下一階段：2-1b」。
 2. 第 5 週收尾（選做）：
    - 重跑 `demo --scenario blackout`，讓報告的 B1～B3 是修正後的量法；斷網 8 s vs 20 s 的對照；C9 重複 5～10 次。
    - 追 `20261109_173015_loss` 70% 第 5 次的重複認領（哪個任務、哪兩台）。

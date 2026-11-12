@@ -13,11 +13,9 @@ namespace uav_px4_bt
 
 namespace
 {
-std::string taskName(std::uint32_t id)
+std::string taskName(TaskId id)
 {
-  char buf[9];
-  std::snprintf(buf, sizeof(buf), "%08X", id);
-  return buf;
+  return taskHex(id);
 }
 
 std::string fmt(const char * f, double a, double b, double c)
@@ -81,7 +79,7 @@ bool UavContext::fireReported(const Vec3 & p) const
   return fireTaskNear(p).has_value();
 }
 
-bool UavContext::ownFireTask(std::uint32_t task_id) const
+bool UavContext::ownFireTask(TaskId task_id) const
 {
   return std::find(fire_tasks.begin(), fire_tasks.end(), task_id) != fire_tasks.end();
 }
@@ -100,10 +98,10 @@ std::optional<FireObservation> UavContext::newFire(unsigned tag, double min_conf
   return std::nullopt;
 }
 
-std::uint32_t UavContext::reportFire(const Vec3 & p)
+TaskId UavContext::reportFire(const Vec3 & p)
 {
   // 地面處置任務：地面上的點（z = 0），無人機不出價、機器狗接
-  const std::uint32_t id = platform.createTask(kTaskGroundIntervention, {p.x, p.y, 0.0},
+  const TaskId id = platform.createTask(kTaskGroundIntervention, {p.x, p.y, 0.0},
       config.fire_task_value, config.fire_task_duration, config.fire_task_deadline);
   reported_fires.push_back(p);
   fire_tasks.push_back(id);
@@ -111,7 +109,7 @@ std::uint32_t UavContext::reportFire(const Vec3 & p)
   return id;
 }
 
-std::optional<std::uint32_t> UavContext::fireTaskNear(const Vec3 & p) const
+std::optional<TaskId> UavContext::fireTaskNear(const Vec3 & p) const
 {
   for (std::size_t i = 0; i < reported_fires.size() && i < fire_tasks.size(); ++i) {
     if (std::hypot(reported_fires[i].x - p.x, reported_fires[i].y - p.y) <= config.fire_dedup_radius) {
@@ -471,7 +469,7 @@ private:
       if (!ctx.config.fire_divert_on_sight) {
         continue;   // 繼續飛自己的任務
       }
-      const std::uint32_t monitor = ctx.platform.createTask(kTaskAirRecon, {o.position.x, o.position.y, 0.0},
+      const TaskId monitor = ctx.platform.createTask(kTaskAirRecon, {o.position.x, o.position.y, 0.0},
           ctx.config.fire_monitor_value, ctx.config.fire_monitor_sec, ctx.config.fire_task_deadline);
       ctx.platform.log("建立火點監控任務 " + taskName(monitor) + fmt("（停留 %.0f s）；放下 ", ctx.config.fire_monitor_sec, 0, 0) +
         taskName(task_.task_id) + "，交回 CBBA");

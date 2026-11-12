@@ -33,7 +33,7 @@ using uav_px4_bt::test::FakePlatform;
 
 struct Reported
 {
-  std::uint32_t task_id;
+  std::uint64_t task_id;
   bool success;
   std::string detail;
   std::uint8_t reason;
@@ -46,7 +46,7 @@ protected:
   {
     rcutils_logging_set_default_logger_level(RCUTILS_LOG_SEVERITY_ERROR);   // say() 靜音
     g_ctx = task_manager::Ctx{};
-    g_ctx.task_result_pub = [this](std::uint32_t id, bool ok, const std::string & detail) {
+    g_ctx.task_result_pub = [this](std::uint64_t id, bool ok, const std::string & detail) {
         reported.push_back({id, ok, detail, task_manager::failureReason(ok, detail)});
       };
     // 已經在 5 m 懸停（起飛另外測）
@@ -63,8 +63,8 @@ protected:
     waypoints = std::make_shared<std::deque<Waypoint>>();
     bb = BT::Blackboard::create();
     bb->set("waypoints", waypoints);
-    bb->set("current_task_id", std::uint32_t{0});
-    bb->set("active_task_id", std::uint32_t{0});
+    bb->set("current_task_id", std::uint64_t{0});
+    bb->set("active_task_id", std::uint64_t{0});
     bb->set<UavContext *>("uav_ctx", ctx.get());
     bb->set<double>("altitude", 5.0);
     bb->set<double>("fire_monitor_timeout", 30.0);
@@ -121,9 +121,9 @@ protected:
   }
 
   // node 層的 onCurrentTask
-  void dispatch(std::uint32_t id, double x, double y, double duration, const char * prefix = "cbba_")
+  void dispatch(std::uint64_t id, double x, double y, double duration, const char * prefix = "cbba_")
   {
-    std::uint32_t cur = bb->get<std::uint32_t>("current_task_id");
+    std::uint64_t cur = bb->get<std::uint64_t>("current_task_id");
     if (id == 0) {
       Waypoint buf;
       const Waypoint * active = in_hand ? &(buf = *in_hand) : nullptr;
@@ -194,8 +194,8 @@ TEST_F(SkeletonTest, CbbaTaskFliesHoversAndReportsOnce)
   EXPECT_FALSE(running);
   EXPECT_EQ(finished, 1);
   EXPECT_EQ(reported.size(), 1u);
-  EXPECT_EQ(bb->get<std::uint32_t>("current_task_id"), 0u);
-  EXPECT_EQ(bb->get<std::uint32_t>("active_task_id"), 0u);
+  EXPECT_EQ(bb->get<std::uint64_t>("current_task_id"), 0u);
+  EXPECT_EQ(bb->get<std::uint64_t>("active_task_id"), 0u);
   EXPECT_TRUE(platform.created.empty());
 }
 
@@ -209,6 +209,19 @@ TEST_F(SkeletonTest, HoverLastsDurationAfterArrival)
   EXPECT_NEAR(platform.t - arrived, 4.0, 0.2);
 }
 
+TEST_F(SkeletonTest, V4TaskIdIsReportedUnchanged)
+{
+  // 協定版本 4 的 task_id（64 位元，建立者 200、世代 3、流水號 0x11）：外部點名稱、哨兵、回報都不截斷（2026-11-11）
+  const std::uint64_t id = 0x00C8000300000011ULL;
+  dispatch(id, 10, 0, 1.0);
+  EXPECT_EQ(bb->get<std::uint64_t>("active_task_id"), id);
+  ASSERT_TRUE(runUntil([&] {return !reported.empty();}, 20.0));
+  ASSERT_EQ(reported.size(), 1u);
+  EXPECT_EQ(reported[0].task_id, id);
+  EXPECT_TRUE(reported[0].success);
+  EXPECT_EQ(task_manager::externalTaskId("cbba_" + std::to_string(id)), id);
+}
+
 TEST_F(SkeletonTest, NewTaskPreemptsWithinOneTickAndOldIsNotReported)
 {
   // 飛往 A 途中換成 B：哨兵在 kick 的那一拍 halt NavigateTo，接著做 B；A 不回報（CBBA 自己換掉的）
@@ -218,7 +231,7 @@ TEST_F(SkeletonTest, NewTaskPreemptsWithinOneTickAndOldIsNotReported)
   dispatch(0x00010002, 0, 10, 2.0);
   EXPECT_EQ(g_ctx.tick, halts_before + 1);
   EXPECT_FALSE(g_ctx.preempt_t0.has_value());   // NavigateTo::onHalted 印了中斷延遲
-  EXPECT_EQ(bb->get<std::uint32_t>("active_task_id"), 0x00010002u);
+  EXPECT_EQ(bb->get<std::uint64_t>("active_task_id"), 0x00010002u);
   ASSERT_TRUE(runUntil([&] {return !reported.empty();}, 20.0));
   ASSERT_EQ(reported.size(), 1u);
   EXPECT_EQ(reported[0].task_id, 0x00010002u);
@@ -259,7 +272,7 @@ TEST_F(SkeletonTest, CancelWhileFlyingHaltsWithoutReport)
   run(0.5);
   EXPECT_FALSE(running);
   EXPECT_TRUE(reported.empty());
-  EXPECT_EQ(bb->get<std::uint32_t>("current_task_id"), 0u);
+  EXPECT_EQ(bb->get<std::uint64_t>("current_task_id"), 0u);
 }
 
 TEST_F(SkeletonTest, CancelAfterReportIsIgnored)
@@ -267,7 +280,7 @@ TEST_F(SkeletonTest, CancelAfterReportIsIgnored)
   // 回報之後 cbba_node 才送 task_id 0：已經不在手上，不當成取消
   dispatch(0x00010001, 5, 0, 1.0);
   ASSERT_TRUE(runUntil([&] {return !reported.empty();}, 15.0));
-  std::uint32_t cur = bb->get<std::uint32_t>("current_task_id");
+  std::uint64_t cur = bb->get<std::uint64_t>("current_task_id");
   Waypoint buf;
   const Waypoint * active = in_hand ? &(buf = *in_hand) : nullptr;
   EXPECT_FALSE(task_manager::cancelExternal(*waypoints, active, "cbba_", cur));
@@ -283,7 +296,7 @@ TEST_F(SkeletonTest, FireSeenEnRouteDivertsHoversThenResumes)
   EXPECT_EQ(platform.created[0].type, kTaskGroundIntervention);
   EXPECT_NEAR(platform.created[0].position.x, 8.0, 1e-9);
   EXPECT_DOUBLE_EQ(platform.created[0].position.z, 0.0);
-  const std::uint32_t ground = platform.created[0].task_id;
+  const std::uint64_t ground = platform.created[0].task_id;
   ASSERT_TRUE(runUntil([&] {return std::hypot(platform.v.position.x - 8.0, platform.v.position.y - 3.0) < 0.5;},
     15.0));
   run(5.0);   // 懸停監控中：不離開、不回報
@@ -322,7 +335,7 @@ TEST_F(SkeletonTest, FireAtPatrolPointHoversUntilGroundTaskClosed)
   const double arrived = platform.t;
   ASSERT_TRUE(runUntil([&] {return !platform.created.empty();}, 3.0));
   EXPECT_GE(platform.t - arrived, 1.0 - 1e-9);
-  const std::uint32_t ground = platform.created[0].task_id;
+  const std::uint64_t ground = platform.created[0].task_id;
   EXPECT_EQ(platform.created[0].type, kTaskGroundIntervention);
   run(10.0);   // 停留 3 s 早就到了：還在監控
   EXPECT_TRUE(reported.empty());
@@ -405,7 +418,7 @@ TEST_F(SkeletonTest, FireSeenEnRouteToItsPointIsMonitoredNotRepublished)
   platform.fires.push_back(fire({16.5, 0.0, 0.2}));
   dispatch(0x00010001, 20, 0, 1.0);
   ASSERT_TRUE(runUntil([&] {return !platform.created.empty();}, 15.0));
-  const std::uint32_t ground = platform.created[0].task_id;
+  const std::uint64_t ground = platform.created[0].task_id;
   ASSERT_TRUE(runUntil([&] {return platform.exec.mode == ExecMode::EXECUTING;}, 15.0));
   run(5.0);
   EXPECT_EQ(platform.created.size(), 1u);

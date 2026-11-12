@@ -56,7 +56,7 @@
     "robot_state": {"name": "/{ns}/robot_state",   "type": "swarm_interfaces/msg/RobotState", "reliable": true,  "transient_local": false},
     "closed":      {"name": "/{ns}/task_closed",   "type": "swarm_interfaces/msg/Task",       "reliable": true,  "transient_local": true},
     "announced":   {"name": "/{ns}/task_announced", "type": "swarm_interfaces/msg/Task",      "reliable": true,  "transient_local": true, "depth": 256},
-    "path":        {"name": "/{ns}/cbba_path",     "type": "std_msgs/msg/UInt32MultiArray",   "reliable": true,  "transient_local": true},
+    "path":        {"name": "/{ns}/cbba_path",     "type": "std_msgs/msg/UInt64MultiArray",   "reliable": true,  "transient_local": true},
     "tx":          {"name": "/{ns}/cbba_tx",       "type": "std_msgs/msg/UInt64MultiArray",   "reliable": true,  "transient_local": false},
     "px4_position": {"name": "/{ns}/fmu/out/vehicle_local_position_v1", "type": "px4_msgs/msg/VehicleLocalPosition", "reliable": false, "transient_local": false},
     "px4_status":   {"name": "/{ns}/fmu/out/vehicle_status_v1",         "type": "px4_msgs/msg/VehicleStatus",        "reliable": false, "transient_local": false},

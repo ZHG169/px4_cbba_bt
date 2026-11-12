@@ -2,7 +2,7 @@
 # BT 端在任務結束時發一次。CBBA node 收到後：
 #   success = true  → completeTask()，並在 /swarm/tasks 發布 status = DONE
 #   success = false → 從本機 bundle / path 釋放該任務，讓它回到競標池（不可標 DONE）
-uint32 task_id
+uint64 task_id                  # 2026-11-11 起 uint64（協定版本 4，同 Task.task_id）
 bool success
 string detail                   # 失敗原因，例如 "NAV2_ABORTED"、"TIMEOUT"、"PTZ_HW_ERROR"、"PREEMPTED_BY_MANUAL"；成功時可留空
 # v1.2：失敗分類，給 CBBA 決定這隻還能不能再出價（spec 2.3 規則 3）。detail 留給人看

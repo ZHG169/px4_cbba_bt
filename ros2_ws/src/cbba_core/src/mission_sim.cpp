@@ -89,7 +89,7 @@ MissionResult runMission(const std::vector<MissionAgent> & agents, const std::ve
   std::vector<bool> inserted(tasks.size(), false);
   std::map<TaskId, std::size_t> task_index;
   for (std::size_t k = 0; k < tasks.size(); ++k) {
-    const AgentId creator = static_cast<AgentId>(tasks[k].task.id >> 16);
+    const AgentId creator = taskCreator(tasks[k].task.id);
     if (index.count(creator) == 0) {
       throw std::invalid_argument("task " + taskName(tasks[k].task.id) + ": creator is not an agent");
     }
@@ -123,7 +123,7 @@ MissionResult runMission(const std::vector<MissionAgent> & agents, const std::ve
       task.created = now;
       task.status = TaskStatus::OPEN;
       task.status_stamp = now;
-      fleet[index.at(static_cast<AgentId>(task.id >> 16))].comm->addLocalTask(task, now);
+      fleet[index.at(taskCreator(task.id))].comm->addLocalTask(task, now);
       result.tasks[k].inserted = t;
       inserted[k] = true;
     }

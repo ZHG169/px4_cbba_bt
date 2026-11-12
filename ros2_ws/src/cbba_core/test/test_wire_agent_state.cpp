@@ -1,4 +1,4 @@
-// AGENT_STATE（協定版本 2）：大小、位元組排列、來回編解碼、flags、執行狀態、拒絕不合法的封包
+// AGENT_STATE（協定版本 4）：大小、位元組排列、來回編解碼、flags、執行狀態、能力、64 位元 task_id、拒絕不合法的封包
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -29,6 +29,7 @@ AgentStateBody sample()
   b.flags.armed = true;
   b.flags.offboard = true;
   b.vehicle_type = 2;
+  b.capabilities = 0x51;   // mobility_ground、rgb_camera、thermal_camera
   b.x = 1.5f;
   b.y = -2.0f;
   b.z = 5.0f;
@@ -41,9 +42,9 @@ AgentStateBody sample()
   b.active_task = 0x00320003;
   b.active_version = 0x0000000100000004ULL;
   b.has_queued = true;
-  b.queued_task = 0x00010007;
+  b.queued_task = 0x00C8000300000007ULL;   // 版本 4 ID：建立者 200、世代 3、流水號 7
   b.queued_version = 9;
-  b.path = {0x00320003, 0x00010007};
+  b.path = {0x00320003, 0x00C8000300000007ULL};
   b.neighbors = {1, 3, 50};
   return b;
 }
@@ -51,20 +52,21 @@ AgentStateBody sample()
 
 TEST(WireAgentState, Size)
 {
-  EXPECT_EQ(agentStateSize(0, 0), 74u);
-  EXPECT_EQ(encodeAgentState(makeHeader(), AgentStateBody{}).size(), 74u);
+  EXPECT_EQ(agentStateSize(0, 0), 90u);
+  EXPECT_EQ(encodeAgentState(makeHeader(), AgentStateBody{}).size(), 90u);
   EXPECT_EQ(encodeAgentState(makeHeader(), sample()).size(), agentStateSize(2, 3));
-  EXPECT_EQ(agentStateSize(2, 3), 74u + 8u + 6u);
+  EXPECT_EQ(agentStateSize(2, 3), 90u + 16u + 6u);
 }
 
 TEST(WireAgentState, Layout)
 {
-  // 表頭之後依序：flags、vehicle_type、x、y、z、battery、progress、execution_state、exec_flags、
+  // 表頭之後依序：flags、vehicle_type、capabilities、x、y、z、battery、progress、execution_state、exec_flags、
   // remaining_time、active_task、active_version、queued_task、queued_version、path、neighbors
   AgentStateBody b;
   b.flags.participating = true;
   b.flags.armed = true;
   b.vehicle_type = 2;
+  b.capabilities = 0x0102030405060708ULL;
   b.x = 1.0f;                // 0x3F800000
   b.exec_known = true;
   b.execution_state = 1;
@@ -81,6 +83,7 @@ TEST(WireAgentState, Layout)
   const std::vector<std::uint8_t> expected = {
     0x09,                    // bit 0 參與、bit 3 armed
     0x02,                    // 地面載具
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,   // capabilities（uint64）
     0x3F, 0x80, 0x00, 0x00,  // x
     0, 0, 0, 0,  0, 0, 0, 0,  // y、z
     0, 0, 0, 0,              // battery
@@ -88,11 +91,11 @@ TEST(WireAgentState, Layout)
     0x01,                    // execution_state：前往
     0x07,                    // exec_flags：有執行狀態、可以中斷、有執行中的任務（沒有保留）
     0x40, 0x00, 0x00, 0x00,  // remaining_time
-    0x00, 0x32, 0x00, 0x01,  // active_task
+    0, 0, 0, 0, 0x00, 0x32, 0x00, 0x01,   // active_task（uint64，舊型 ID）
     0, 0, 0, 0, 0, 0, 0, 0x07,   // active_version（uint64）
-    0, 0, 0, 0,              // queued_task
+    0, 0, 0, 0, 0, 0, 0, 0,  // queued_task
     0, 0, 0, 0, 0, 0, 0, 0,  // queued_version
-    0x01, 0x00, 0x32, 0x00, 0x01,   // path
+    0x01, 0, 0, 0, 0, 0x00, 0x32, 0x00, 0x01,   // path
     0x01, 0x01, 0x02,        // neighbors
   };
   EXPECT_EQ(body, expected);
@@ -109,6 +112,7 @@ TEST(WireAgentState, RoundTrip)
   EXPECT_TRUE(d->flags.offboard);
   EXPECT_FALSE(d->flags.landed);
   EXPECT_EQ(d->vehicle_type, 2);
+  EXPECT_EQ(d->capabilities, 0x51u);
   EXPECT_FLOAT_EQ(d->y, -2.0f);
   EXPECT_FLOAT_EQ(d->battery, 87.5f);
   EXPECT_TRUE(d->exec_known);
@@ -119,9 +123,9 @@ TEST(WireAgentState, RoundTrip)
   EXPECT_EQ(d->active_task, 0x00320003u);
   EXPECT_EQ(d->active_version, 0x0000000100000004ULL);   // 超過 32 位元也不會截斷
   EXPECT_TRUE(d->has_queued);
-  EXPECT_EQ(d->queued_task, 0x00010007u);
+  EXPECT_EQ(d->queued_task, 0x00C8000300000007ULL);   // 版本 4 ID 不會截斷
   EXPECT_EQ(d->queued_version, 9u);
-  EXPECT_EQ(d->path, (std::vector<std::uint32_t>{0x00320003, 0x00010007}));
+  EXPECT_EQ(d->path, (std::vector<std::uint64_t>{0x00320003, 0x00C8000300000007ULL}));
   EXPECT_EQ(d->neighbors, (std::vector<std::uint16_t>{1, 3, 50}));
 }
 
@@ -159,7 +163,7 @@ TEST(WireAgentState, RejectsInvalid)
   bad[kHeaderSize + 1] = 3;                          // vehicle_type
   EXPECT_FALSE(decodeAgentState(bad));
   bad = good;
-  bad[kHeaderSize + 22] = 6;                         // execution_state 超過 5
+  bad[kHeaderSize + 30] = 6;                         // execution_state 超過 5
   EXPECT_FALSE(decodeAgentState(bad));
   bad = good;
   bad.pop_back();

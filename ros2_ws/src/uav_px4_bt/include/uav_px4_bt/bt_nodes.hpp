@@ -93,23 +93,23 @@ public:
   Vec3 waypoint;                      // 目前任務的航點
   double arrival{-1.0};               // 到達目前任務的時刻；< 0 還沒到
   std::vector<Vec3> reported_fires;   // 已回報的火點（map ENU）
-  std::vector<std::uint32_t> fire_tasks;   // 和 reported_fires 對應的地面處置任務
+  std::vector<TaskId> fire_tasks;   // 和 reported_fires 對應的地面處置任務
 
   // 這個位置的火已經有地面處置任務（自己報的，或 cbba_node 轉來的別台報的；離 fire_dedup_radius 以內）
   bool fireReported(const Vec3 & p) const;
   // 這個地面處置任務是自己建立的（不是別台報的）
-  bool ownFireTask(std::uint32_t task_id) const;
+  bool ownFireTask(TaskId task_id) const;
   // 符合火警條件（tag、confidence ≥ min_conf、張數 ≥ min_frames、max_age 秒內）、還沒回報過的火點；沒有就 nullopt
   std::optional<FireObservation> newFire(unsigned tag, double min_conf, int min_frames, double max_age) const;
   // 建立地面處置任務（地面的點，z = 0），記下火點和任務；回傳 task_id
-  std::uint32_t reportFire(const Vec3 & p);
+  TaskId reportFire(const Vec3 & p);
   // 離 p fire_dedup_radius 以內的地面處置任務：先找自己建立的，再找別台的（task_announced）；沒有就 nullopt
-  std::optional<std::uint32_t> fireTaskNear(const Vec3 & p) const;
+  std::optional<TaskId> fireTaskNear(const Vec3 & p) const;
 
 private:
   void logAvoidEvents(const std::vector<AvoidEvent> & events);
 
-  std::set<std::pair<std::uint32_t, std::uint64_t>> reported_;
+  std::set<std::pair<TaskId, std::uint64_t>> reported_;
   double encounter_min_{-1.0};       // 這次接近的最近距離；< 0 沒有在接近
   MotionShaper motion_;              // CBF 的速度 → 平順的位置＋速度 setpoint
   CollisionAvoider avoider_;         // 避碰：每台鄰機的交會狀態（誰讓、往哪邊）

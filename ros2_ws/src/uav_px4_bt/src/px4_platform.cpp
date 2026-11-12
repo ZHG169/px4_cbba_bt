@@ -271,7 +271,7 @@ void Px4Platform::reportResult(const AssignedTask & task, bool success, const st
   publishResult(task.task_id, success, detail, reason);
 }
 
-void Px4Platform::publishResult(std::uint32_t task_id, bool success, const std::string & detail, std::uint8_t reason)
+void Px4Platform::publishResult(TaskId task_id, bool success, const std::string & detail, std::uint8_t reason)
 {
   TaskResultMsg msg;
   msg.task_id = task_id;
@@ -281,11 +281,11 @@ void Px4Platform::publishResult(std::uint32_t task_id, bool success, const std::
   result_pub_->publish(msg);
 }
 
-std::uint32_t Px4Platform::createTask(std::uint8_t type, const Vec3 & p, double value, double duration,
+TaskId Px4Platform::createTask(std::uint8_t type, const Vec3 & p, double value, double duration,
   double deadline)
 {
   TaskMsg msg;
-  msg.task_id = static_cast<std::uint32_t>(agent_id_) * 65536u + next_seq_;
+  msg.task_id = static_cast<TaskId>(agent_id_) * 65536u + next_seq_;   // 舊型 ID（保留到 M3）
   next_seq_ = next_seq_ >= 0xFFFFu ? 0x8000u : next_seq_ + 1;
   msg.type = type;
   msg.position.x = p.x;

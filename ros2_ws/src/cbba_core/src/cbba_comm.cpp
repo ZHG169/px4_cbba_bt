@@ -1,5 +1,7 @@
 #include "cbba_core/cbba_comm.hpp"
 
+#include "cbba_core/capabilities.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -54,8 +56,14 @@ std::vector<std::uint16_t> toIds(const std::set<AgentId> & ids)
 // ===========================================================================
 std::string taskName(TaskId id)
 {
-  char buf[9];
-  std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(id));
+  // 舊型照版本 3（8 位十六進位，itest、e2e 的 grep 照舊）；版本 4 是 建立者.世代.流水號（十六進位）
+  char buf[32];
+  if (isLegacyTaskId(id)) {
+    std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(id));
+  } else {
+    std::snprintf(buf, sizeof(buf), "%04X.%04X.%08X", static_cast<unsigned>(taskCreator(id)),
+      static_cast<unsigned>(taskEpoch(id)), static_cast<unsigned>(taskSeq(id)));
+  }
   return buf;
 }
 
@@ -97,7 +105,7 @@ void CbbaComm::setParticipating(bool participating, double now)
 
 bool CbbaComm::addLocalTask(const Task & task, double now)
 {
-  if ((task.id >> 16) != id() || origins_.count(task.id) > 0 ||
+  if (!validTaskId(task.id) || taskCreator(task.id) != id() || origins_.count(task.id) > 0 ||
     std::any_of(queued_.begin(), queued_.end(),
     [&task](const PendingTask & p) {return p.task.id == task.id;}))
   {
@@ -207,7 +215,8 @@ std::vector<std::pair<TaskId, AgentId>> CbbaComm::lockedByLostAgents(double now)
 double CbbaComm::takeoverLimit(TaskId task_id) const
 {
   const auto task = agent_.tasks().find(task_id);
-  const bool fire = task != agent_.tasks().end() && task->second.type == TaskType::GROUND_INTERVENTION;
+  // 火警（P0，2026-11-11 起看優先級；舊型的 GROUND_INTERVENTION 就是 P0）。依優先級分級的時限是之後的 takeover_by_priority
+  const bool fire = task != agent_.tasks().end() && taskPriority(task->second) >= kPriorityFire;
   return fire ? config_.takeover_fire : config_.takeover_patrol;
 }
 
@@ -319,7 +328,7 @@ ReportCheck CbbaComm::reportResult(TaskId task_id, bool success, std::uint64_t v
 
 bool CbbaComm::canCancel(AgentId actor, TaskId task_id) const
 {
-  return actor == static_cast<AgentId>(task_id >> 16) ||
+  return actor == taskCreator(task_id) ||
          std::find(config_.cancel_authorities.begin(), config_.cancel_authorities.end(), actor) !=
          config_.cancel_authorities.end();
 }
@@ -536,6 +545,7 @@ wire::AgentStateBody CbbaComm::agentStateBody(double now) const
     b.flags.landed = status_.landed;
   }
   b.vehicle_type = static_cast<std::uint8_t>(s.type);
+  b.capabilities = availableCaps(s);
   b.x = static_cast<float>(s.position.x);
   b.y = static_cast<float>(s.position.y);
   b.z = static_cast<float>(s.position.z);
@@ -604,6 +614,7 @@ void CbbaComm::onAgentState(const wire::Header & h, const Bytes & bytes)
   n.has_status = true;
   n.flags = b->flags;
   n.vehicle_type = static_cast<AgentType>(b->vehicle_type);
+  n.capabilities = b->capabilities;
   n.position = {b->x, b->y, b->z};
   n.battery = b->battery;
   n.exec_known = b->exec_known;
@@ -663,7 +674,7 @@ wire::CbbaStateBody CbbaComm::cbbaStateBody(double now) const
   }
   for (const auto & [task_id, winner] : winnerMap()) {
     const Assignment a = assignment(task_id);
-    b.records.push_back(wire::Record{task_id, winner,
+    b.records.push_back(wire::Record{task_id, agent_.tasks().at(task_id).revision, winner,
         static_cast<float>(std::max(agent_.score(task_id), 0.0)), a.version, a.assignee,
         static_cast<std::uint8_t>(a.state)});
   }
@@ -716,7 +727,7 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
     n.digest_key = b->round_key;
     n.digest.clear();
     for (const wire::DigestEntry & d : b->digest) {
-      n.digest[d.creator] = d;
+      n.digest[DigestKey{d.creator, d.epoch}] = d;
     }
   }
 
@@ -770,6 +781,12 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
     if (w != neighbors_.end() && w->second.has_snapshot && !w->second.participating) {
       continue;
     }
+    // 任務定義的版本不同（版本 4）：出價是照不同內容算的，不交給規則。對方較新時等新的 TASK_ANNOUNCE（補發會帶來）；
+    // 較舊時等它更新。正式指派和任務定義的版本無關，上面照常合併
+    const auto known = agent_.tasks().find(r.task_id);
+    if (known != agent_.tasks().end() && known->second.revision != r.revision) {
+      continue;
+    }
     msg.bids.push_back(Bid{r.task_id, r.winning_bid, r.winner_id});
   }
   for (const wire::Stamp & s : b->stamps) {
@@ -783,28 +800,31 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
 // ===========================================================================
 // 補發（版本 3，2026-10-28，doc/protocol_v3_sync.md）：壓縮摘要 → 缺口請求 → 受限分批回覆
 // ===========================================================================
-std::map<std::uint16_t, wire::DigestEntry> CbbaComm::digestMap() const
+std::map<DigestKey, wire::DigestEntry> CbbaComm::digestMap() const
 {
-  // origins_ 依 task_id 排序：同一個建立者的任務連在一起、流水號由小到大
-  std::map<std::uint16_t, wire::DigestEntry> out;
+  // origins_ 依 task_id 排序：同一個（建立者, 世代）的任務連在一起、流水號由小到大
+  //（舊型 ID 是 建立者 << 16 | 流水號，版本 4 是 建立者 << 48 | 世代 << 32 | 流水號，兩種各自連續）
+  std::map<DigestKey, wire::DigestEntry> out;
   for (const auto & [task_id, origin] : origins_) {
-    const auto creator = static_cast<std::uint16_t>(task_id >> 16);
-    const auto seq = static_cast<std::uint16_t>(task_id & 0xFFFFu);
+    const DigestKey key{taskCreator(task_id), taskEpoch(task_id)};
+    const std::uint32_t seq = taskSeq(task_id);
     const bool closed = !isOpen(task_id);
-    wire::DigestEntry & d = out[creator];
+    wire::DigestEntry & d = out[key];
     if (d.known == 0) {
-      d.creator = creator;
+      d.creator = key.first;
+      d.epoch = key.second;
       d.min_seq = seq;
       d.crc = 0xFFFFFFFFu;
     }
     d.max_seq = seq;
     ++d.known;
-    d.closed = static_cast<std::uint16_t>(d.closed + (closed ? 1 : 0));
-    d.crc = crc32Update(d.crc, static_cast<std::uint8_t>(seq >> 8));
-    d.crc = crc32Update(d.crc, static_cast<std::uint8_t>(seq));
+    d.closed += closed ? 1 : 0;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+      d.crc = crc32Update(d.crc, static_cast<std::uint8_t>(seq >> shift));
+    }
     d.crc = crc32Update(d.crc, closed ? 1 : 0);
   }
-  for (auto & [creator, d] : out) {
+  for (auto & [key, d] : out) {
     d.crc = ~d.crc;
   }
   return out;
@@ -844,14 +864,14 @@ void CbbaComm::compareDigest(AgentId neighbor, const NeighborInfo & n, double no
     return;
   }
   const auto mine = digestMap();
-  std::set<std::uint16_t> creators;
+  std::set<DigestKey> streams;
   for (const auto & [c, d] : mine) {
-    creators.insert(c);
+    streams.insert(c);
   }
   for (const auto & [c, d] : n.digest) {
-    creators.insert(c);
+    streams.insert(c);
   }
-  for (std::uint16_t c : creators) {
+  for (const DigestKey & c : streams) {
     const auto m = mine.find(c);
     const auto t = n.digest.find(c);
     const bool have_m = m != mine.end();
@@ -860,13 +880,15 @@ void CbbaComm::compareDigest(AgentId neighbor, const NeighborInfo & n, double no
       continue;
     }
     if (have_t) {
-      const std::uint16_t lo = have_m ? std::min(m->second.min_seq, t->second.min_seq) : t->second.min_seq;
-      const std::uint16_t hi = have_m ? std::max(m->second.max_seq, t->second.max_seq) : t->second.max_seq;
+      const std::uint32_t lo = have_m ? std::min(m->second.min_seq, t->second.min_seq) : t->second.min_seq;
+      const std::uint32_t hi = have_m ? std::max(m->second.max_seq, t->second.max_seq) : t->second.max_seq;
       sendGapRequest(neighbor, c, lo, hi, now);
     }
     if (have_m) {
-      const TaskId first = static_cast<TaskId>(c) << 16;
-      for (auto it = origins_.lower_bound(first); it != origins_.end() && (it->first >> 16) == c; ++it) {
+      const TaskId first = makeTaskId(c.first, c.second, 0);
+      for (auto it = origins_.lower_bound(first);
+        it != origins_.end() && taskCreator(it->first) == c.first && taskEpoch(it->first) == c.second; ++it)
+      {
         const TaskId id = it->first;
         const auto added = added_at_.find(id);
         const auto closed = closed_at_.find(id);
@@ -888,30 +910,33 @@ void CbbaComm::compareDigest(AgentId neighbor, const NeighborInfo & n, double no
 }
 
 // 缺口請求：建立者 c、流水號 lo～hi 我的狀態。超過 kMaxGapSeqs 時分段，下次從上次問到的地方接著問
-void CbbaComm::sendGapRequest(AgentId target, std::uint16_t creator, std::uint16_t lo, std::uint16_t hi,
+void CbbaComm::sendGapRequest(AgentId target, DigestKey stream, std::uint32_t lo, std::uint32_t hi,
   double now)
 {
-  const auto key = std::make_pair(target, creator);
+  const auto key = std::make_pair(target, stream);
   double & last = last_gap_request_.try_emplace(key, -1e9).first->second;
   if (now - last < config_.gap_request_gap) {
     return;
   }
   last = now;
-  std::uint32_t first = lo;
+  // 64 位元算：版本 4 的流水號到 0xFFFFFFFF，first + count 不能在 32 位元繞回
+  std::uint64_t first = lo;
   const auto cursor = gap_cursor_.find(key);
   if (cursor != gap_cursor_.end() && cursor->second > lo && cursor->second <= hi) {
     first = cursor->second;
   }
-  const std::uint32_t count = std::min<std::uint32_t>(hi - first + 1, wire::kMaxGapSeqs);
+  const std::uint64_t count = std::min<std::uint64_t>(std::uint64_t{hi} - first + 1, wire::kMaxGapSeqs);
   gap_cursor_[key] = first + count > hi ? lo : first + count;
 
   wire::GapRequestBody b;
   b.target_id = target;
-  b.creator = creator;
-  b.first_seq = static_cast<std::uint16_t>(first);
+  b.creator = stream.first;
+  b.epoch = stream.second;
+  b.first_seq = static_cast<std::uint32_t>(first);
   b.states.reserve(count);
-  for (std::uint32_t k = 0; k < count; ++k) {
-    b.states.push_back(seqState((static_cast<TaskId>(creator) << 16) | (first + k)));
+  for (std::uint64_t k = 0; k < count; ++k) {
+    const auto seq = static_cast<std::uint32_t>(first + k);
+    b.states.push_back(seqState(makeTaskId(stream.first, stream.second, seq)));
   }
   send(wire::encodeGapRequest(newHeader(PacketType::GAP_REQUEST), b), PacketType::GAP_REQUEST,
     TxKind::RETRY);
@@ -931,7 +956,7 @@ void CbbaComm::onGapRequest(const Bytes & bytes)
   }
   bool any = false;
   for (std::size_t k = 0; k < b->states.size(); ++k) {
-    const TaskId task_id = (static_cast<TaskId>(b->creator) << 16) | (b->first_seq + k);
+    const TaskId task_id = makeTaskId(b->creator, b->epoch, static_cast<std::uint32_t>(b->first_seq + k));
     const wire::SeqState mine = seqState(task_id);
     const wire::SeqState theirs = b->states[k];
     if (mine == wire::SeqState::UNKNOWN) {
@@ -1157,7 +1182,7 @@ std::uint32_t CbbaComm::roundKey() const
   // 已知任務與狀態的摘要：兩台知道的任務或結束狀態有任何不同，數字就不同
   std::uint32_t crc = 0xFFFFFFFFu;
   for (const auto & [task_id, origin] : origins_) {
-    for (int shift = 24; shift >= 0; shift -= 8) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
       crc = crc32Update(crc, static_cast<std::uint8_t>(task_id >> shift));
     }
     crc = crc32Update(crc, isOpen(task_id) ? 0 : 1);
@@ -1211,7 +1236,11 @@ wire::TaskAnnounceBody CbbaComm::announceBody(TaskId task_id) const
   wire::TaskAnnounceBody b;
   b.relay = origins_.at(task_id);
   b.task_id = task_id;
+  b.revision = t.revision;
   b.task_type = static_cast<std::uint8_t>(t.type);
+  b.platform = t.platform;
+  b.required_caps = t.required_caps;
+  b.priority = t.priority;
   b.x = static_cast<float>(t.position.x);
   b.y = static_cast<float>(t.position.y);
   b.z = static_cast<float>(t.position.z);
@@ -1219,6 +1248,28 @@ wire::TaskAnnounceBody CbbaComm::announceBody(TaskId task_id) const
   b.created_ms = toStampMs(t.created);
   b.deadline_ms = t.explicit_deadline ? wire::toDeadlineMs(t.created + t.deadline_sec) : 0;
   b.duration_sec = clampU16(t.duration_sec);
+  const TaskExt & e = t.ext;
+  b.deadline_hard = e.deadline_hard;
+  b.optional = e.optional;
+  b.all_or_nothing = e.all_or_nothing;
+  b.skip_satisfies = e.skip_satisfies;
+  b.floor = e.floor;
+  b.release_ms = e.release > 0.0 ? wire::toDeadlineMs(e.release) : 0;
+  b.expires_ms = e.expires > 0.0 ? wire::toDeadlineMs(e.expires) : 0;
+  b.half_life_s = e.half_life_s;
+  b.can_preempt = e.can_preempt;
+  b.preempt_margin_pct = e.preempt_margin_pct;
+  b.commit_radius_dm = clampU16(e.commit_radius * 10.0);
+  b.min_battery_reserve = e.min_battery_reserve;
+  b.group_id = e.group_id;
+  b.role_index = e.role_index;
+  b.role_count = e.role_count;
+  b.precedence = e.precedence;
+  b.sync_window_s = e.sync_window_s;
+  b.optional_no_capable_s = e.optional_no_capable_s;
+  b.optional_unassigned_s = e.optional_unassigned_s;
+  b.spec_length = e.spec_length;
+  b.spec_crc = e.spec_crc;
   return b;
 }
 
@@ -1306,6 +1357,32 @@ void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
   t.status_stamp = now;
   t.explicit_deadline = b.deadline_ms != 0;
   t.deadline_sec = t.explicit_deadline ? wire::fromDeadlineMs(b.deadline_ms, now) - t.created : 300.0;
+  t.revision = b.revision;
+  t.platform = b.platform;
+  t.required_caps = b.required_caps;
+  t.priority = b.priority;
+  TaskExt & e = t.ext;
+  e.deadline_hard = b.deadline_hard;
+  e.optional = b.optional;
+  e.all_or_nothing = b.all_or_nothing;
+  e.skip_satisfies = b.skip_satisfies;
+  e.floor = b.floor;
+  e.release = b.release_ms != 0 ? wire::fromDeadlineMs(b.release_ms, now) : 0.0;
+  e.expires = b.expires_ms != 0 ? wire::fromDeadlineMs(b.expires_ms, now) : 0.0;
+  e.half_life_s = b.half_life_s;
+  e.can_preempt = b.can_preempt;
+  e.preempt_margin_pct = b.preempt_margin_pct;
+  e.commit_radius = b.commit_radius_dm / 10.0;
+  e.min_battery_reserve = b.min_battery_reserve;
+  e.group_id = b.group_id;
+  e.role_index = b.role_index;
+  e.role_count = b.role_count;
+  e.precedence = b.precedence;
+  e.sync_window_s = b.sync_window_s;
+  e.optional_no_capable_s = b.optional_no_capable_s;
+  e.optional_unassigned_s = b.optional_unassigned_s;
+  e.spec_length = b.spec_length;
+  e.spec_crc = b.spec_crc;
   addTask(b.relay, t, now);
 }
 

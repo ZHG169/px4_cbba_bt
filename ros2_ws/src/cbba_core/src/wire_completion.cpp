@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "cbba_core/types.hpp"
 #include "cbba_core/wire_io.hpp"
 
 namespace cbba_core::wire
@@ -22,10 +23,10 @@ bool validIds(const std::vector<std::uint16_t> & ids)
   return true;
 }
 
-bool validCommon(std::uint32_t task_id, std::uint16_t executor, const RelayHeader & relay,
+bool validCommon(std::uint64_t task_id, std::uint16_t executor, const RelayHeader & relay,
   const std::vector<std::uint16_t> & view)
 {
-  return (task_id >> 16) != 0 && validAgentId(executor) && validAgentId(relay.origin_id) &&
+  return cbba_core::validTaskId(task_id) && validAgentId(executor) && validAgentId(relay.origin_id) &&
          validIds(view);
 }
 
@@ -91,7 +92,7 @@ std::vector<std::uint8_t> encodeCompletion(Header header, const CompletionBody &
   }
   auto out = begin(header, PacketType::COMPLETION, b.relay);
   ByteWriter w(out);
-  w.u32(b.task_id);
+  w.u64(b.task_id);
   w.u16(b.executor_id);
   w.u32(b.round_key);
   w.u64(b.assign_version);
@@ -107,7 +108,7 @@ std::vector<std::uint8_t> encodeCompletionAck(Header header, const CompletionAck
   }
   auto out = begin(header, PacketType::COMPLETION_ACK, b.relay);
   ByteWriter w(out);
-  w.u32(b.task_id);
+  w.u64(b.task_id);
   w.u16(b.executor_id);
   w.u32(b.round_key);
   w.u64(b.assign_version);
@@ -126,7 +127,7 @@ std::vector<std::uint8_t> encodeTaskClose(Header header, const TaskCloseBody & b
   }
   auto out = begin(header, PacketType::TASK_CLOSE, b.relay);
   ByteWriter w(out);
-  w.u32(b.task_id);
+  w.u64(b.task_id);
   w.u8(b.reason);
   w.u16(b.actor_id);
   w.u32(b.round_key);
@@ -150,7 +151,7 @@ std::optional<CompletionBody> decodeCompletion(const std::uint8_t * data, std::s
   ByteReader & r = opened->second;
   CompletionBody b;
   b.relay = opened->first;
-  b.task_id = r.u32();
+  b.task_id = r.u64();
   b.executor_id = r.u16();
   b.round_key = r.u32();
   b.assign_version = r.u64();
@@ -170,7 +171,7 @@ std::optional<CompletionAckBody> decodeCompletionAck(const std::uint8_t * data, 
   ByteReader & r = opened->second;
   CompletionAckBody b;
   b.relay = opened->first;
-  b.task_id = r.u32();
+  b.task_id = r.u64();
   b.executor_id = r.u16();
   b.round_key = r.u32();
   b.assign_version = r.u64();
@@ -193,7 +194,7 @@ std::optional<TaskCloseBody> decodeTaskClose(const std::uint8_t * data, std::siz
   ByteReader & r = opened->second;
   TaskCloseBody b;
   b.relay = opened->first;
-  b.task_id = r.u32();
+  b.task_id = r.u64();
   b.reason = r.u8();
   b.actor_id = r.u16();
   b.round_key = r.u32();

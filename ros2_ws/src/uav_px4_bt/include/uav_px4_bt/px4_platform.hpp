@@ -76,15 +76,15 @@ public:
   void requestReturnToLaunch() override;
   void stopOffboard() override {offboard_ = false;}
   void reportResult(const AssignedTask & task, bool success, const std::string & detail) override;
-  std::uint32_t createTask(std::uint8_t type, const Vec3 & p, double value, double duration,
+  TaskId createTask(std::uint8_t type, const Vec3 & p, double value, double duration,
     double deadline) override;
   void setExecStatus(const ExecStatus & s) override {exec_ = s;}
-  bool taskClosed(std::uint32_t task_id) const override {return closed_.count(task_id) > 0;}
+  bool taskClosed(TaskId task_id) const override {return closed_.count(task_id) > 0;}
   std::vector<KnownGroundTask> groundTasks() const override {return ground_;}
   void log(const std::string & text) override;
 
   // task_result（失敗分類用 reason，見 cpp）
-  void publishResult(std::uint32_t task_id, bool success, const std::string & detail, std::uint8_t reason);
+  void publishResult(TaskId task_id, bool success, const std::string & detail, std::uint8_t reason);
 
 private:
   void publishSetpoint();
@@ -120,7 +120,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_sub_;
   rclcpp::Subscription<swarm_interfaces::msg::FireDetection>::SharedPtr fire_sub_;
   rclcpp::Subscription<swarm_interfaces::msg::Task>::SharedPtr closed_sub_;
-  std::set<std::uint32_t> closed_;
+  std::set<TaskId> closed_;
   rclcpp::Subscription<swarm_interfaces::msg::Task>::SharedPtr announced_sub_;
   std::vector<KnownGroundTask> ground_;
 

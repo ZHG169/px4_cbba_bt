@@ -50,10 +50,10 @@ std::string envOr(const char * name, const std::string & fallback)
   return v != nullptr && *v != '\0' ? v : fallback;
 }
 
-std::string taskName(std::uint32_t id)
+std::string taskName(std::uint64_t id)   // 2026-11-11 起 task_id 是 64 位元（舊型照以前印 8 位）
 {
-  char buf[9];
-  std::snprintf(buf, sizeof(buf), "%08X", id);
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "%08llX", static_cast<unsigned long long>(id));
   return buf;
 }
 }  // namespace
@@ -354,9 +354,9 @@ private:
 
   TaskMsg assigned_{};
   bool have_assigned_{false};
-  std::uint32_t active_{0};
+  std::uint64_t active_{0};
   float active_duration_{0.0f};
-  std::set<std::uint32_t> done_;
+  std::set<std::uint64_t> done_;
 
   Phase phase_{Phase::WAIT_READY};
   int phase_ticks_{0};

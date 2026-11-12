@@ -7,6 +7,8 @@
 //   - printReport 的結束原因（2026-10-17）：原本沒列出的原因一律印「逾時中止」；改成 MISSION_TIMEOUT 才印「逾時中止」，
 //     其他印「中止（原因）」（無人機的 PREEMPTED_BY_MANUAL、PX4_FAILSAFE、BATTERY_RTL、NOT_AIRBORNE 會被當成逾時）
 //   - 這段註解
+//   - task_id 的型別 uint32_t → uint64_t（2026-11-11，協定版本 4：task_result_pub、externalTaskId〔stoul → stoull〕、
+//     哨兵與 HandleWaypointFailure、ReportTaskResult 的 current／active 埠）。狗端的介接層照同一份清單改（使用者統一負責狗端通訊）
 // 其餘（Task、Waypoint、Ctx、哨兵 IsTaskValidAndUnchanged、IsEmergency、HandleWaypointFailure、LoadTasks、SplitTask、
 // HandleTaskFailure、ReportTaskResult、MarkMissionAborted、UnknownTask、printReport 的其他部分、tickOrAbort、registerAll）一字未改。
 #pragma once
@@ -64,7 +66,7 @@ struct Ctx {
   std::string end_reason;
   bool   manual_active = false;                             // tablet override in force (spec 2.3 rule 2); cleared by ReportTaskResult / abortNow
   size_t wp_results_begin = 0;                              // results.size() when LoadTasks ran; ReportTaskResult judges only this waypoint's attempt
-  std::function<void(uint32_t task_id, bool success, const std::string& detail)> task_result_pub;   // the node wires /<ns>/task_result here
+  std::function<void(uint64_t task_id, bool success, const std::string& detail)> task_result_pub;   // the node wires /<ns>/task_result here
   std::optional<std::chrono::steady_clock::time_point> preempt_t0;   // spec §3.7 t0: the callback wrote {current_task_id}; consumed by the next halt
 
 
@@ -89,8 +91,8 @@ inline Ctx g_ctx;
 // External (CBBA / tablet) waypoints are named "<prefix><task_id>"; everything else came from the yaml
 inline bool hasPrefix(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 inline bool isExternal(const std::string& id) { return hasPrefix(id, "cbba_") || hasPrefix(id, "manual_"); }
-inline uint32_t externalTaskId(const std::string& id) {
-  try { return static_cast<uint32_t>(std::stoul(id.substr(id.find('_') + 1))); } catch (...) { return 0; }
+inline uint64_t externalTaskId(const std::string& id) {
+  try { return static_cast<uint64_t>(std::stoull(id.substr(id.find('_') + 1))); } catch (...) { return 0; }
 }
 
 // spec §3.7 t1: the halt that sends the cancel. Prints the latency once per external dispatch
@@ -113,11 +115,11 @@ class IsTaskValidAndUnchanged : public BT::ConditionNode {
 public:
   IsTaskValidAndUnchanged(const std::string& n, const BT::NodeConfig& c) : ConditionNode(n, c) {}
   static BT::PortsList providedPorts() {
-    return { BT::InputPort<uint32_t>("current"), BT::BidirectionalPort<uint32_t>("active") };
+    return { BT::InputPort<uint64_t>("current"), BT::BidirectionalPort<uint64_t>("active") };
   }
   BT::NodeStatus tick() override {
-    const uint32_t cur = getInput<uint32_t>("current").value_or(0);   // no key yet = no external task (tree_step / tree_dump set none)
-    const uint32_t act = getInput<uint32_t>("active").value_or(0);
+    const uint64_t cur = getInput<uint64_t>("current").value_or(0);   // no key yet = no external task (tree_step / tree_dump set none)
+    const uint64_t act = getInput<uint64_t>("active").value_or(0);
     if (cur == act) return BT::NodeStatus::SUCCESS;
     setOutput("active", cur);
     say("TaskSentinel", "★ 任務換了 " + std::to_string(act) + " → " + std::to_string(cur) + "，halt 手上的點");
@@ -140,7 +142,7 @@ public:
   HandleWaypointFailure(const std::string& n, const BT::NodeConfig& c) : SyncActionNode(n, c) {}
   static BT::PortsList providedPorts() {
     return { BT::InputPort<Waypoint>("waypoint"),
-             BT::OutputPort<uint32_t>("current"), BT::OutputPort<uint32_t>("active") };   // cleared when an external point fails
+             BT::OutputPort<uint64_t>("current"), BT::OutputPort<uint64_t>("active") };   // cleared when an external point fails
   }
   BT::NodeStatus tick() override {
     auto in = getInput<Waypoint>("waypoint");
@@ -187,8 +189,8 @@ private:
     } else {
       g_ctx.manual_active = false;
     }
-    setOutput("current", uint32_t{0});
-    setOutput("active",  uint32_t{0});
+    setOutput("current", uint64_t{0});
+    setOutput("active",  uint64_t{0});
   }
 };
 
@@ -272,14 +274,14 @@ public:
   ReportTaskResult(const std::string& n, const BT::NodeConfig& c) : SyncActionNode(n, c) {}
   static BT::PortsList providedPorts() {
     return { BT::InputPort<Task>("task"),
-             BT::BidirectionalPort<uint32_t>("current"), BT::BidirectionalPort<uint32_t>("active") };
+             BT::BidirectionalPort<uint64_t>("current"), BT::BidirectionalPort<uint64_t>("active") };
   }
   BT::NodeStatus tick() override {
     auto in = getInput<Task>("task");
     if (!in) return BT::NodeStatus::FAILURE;
     const std::string wp = g_ctx.current_waypoint;
-    uint32_t id = 0;
-    try { id = static_cast<uint32_t>(std::stoul(in.value().get("task_id"))); } catch (...) {}
+    uint64_t id = 0;
+    try { id = static_cast<uint64_t>(std::stoull(in.value().get("task_id"))); } catch (...) {}
 
     // this attempt's records only (results are kept for the whole mission): one non-OK line fails the task
     bool ok = true; std::string detail;
@@ -296,8 +298,8 @@ public:
     }
     g_ctx.results.push_back({wp, "report_result", "OK", ok ? "success" : "failed: " + detail});
     // the point is closed: let the sentinel pass again. A newer id written meanwhile is left alone
-    if (getInput<uint32_t>("current").value_or(0) == id) setOutput("current", uint32_t{0});
-    if (getInput<uint32_t>("active").value_or(0)  == id) setOutput("active",  uint32_t{0});
+    if (getInput<uint64_t>("current").value_or(0) == id) setOutput("current", uint64_t{0});
+    if (getInput<uint64_t>("active").value_or(0)  == id) setOutput("active",  uint64_t{0});
     return BT::NodeStatus::SUCCESS;
   }
 };

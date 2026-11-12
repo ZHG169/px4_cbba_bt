@@ -60,7 +60,7 @@ protected:
     return done();
   }
 
-  static AssignedTask task(std::uint32_t id, double x, double y, double duration, std::uint64_t version)
+  static AssignedTask task(std::uint64_t id, double x, double y, double duration, std::uint64_t version)
   {
     AssignedTask t;
     t.task_id = id;

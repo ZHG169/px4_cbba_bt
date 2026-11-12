@@ -111,7 +111,7 @@ public:
     task_manager::registerAll(factory_);
     registerUavLeaves(factory_);
 
-    g_ctx.task_result_pub = [this](uint32_t id, bool ok, const std::string & detail) {
+    g_ctx.task_result_pub = [this](uint64_t id, bool ok, const std::string & detail) {
         platform_->publishResult(id, ok, detail, task_manager::failureReason(ok, detail));
       };
     manual_srv_ = create_service<ManualOverride>("/" + platform_->ns() + "/manual_override",
@@ -141,8 +141,8 @@ public:
     auto bb = BT::Blackboard::create();
     waypoints_ = std::make_shared<std::deque<Waypoint>>();
     bb->set("waypoints", waypoints_);
-    bb->set("current_task_id", uint32_t{0});   // 哨兵的兩個 key（spec §3.3）
-    bb->set("active_task_id", uint32_t{0});
+    bb->set("current_task_id", uint64_t{0});   // 哨兵的兩個 key（spec §3.3）
+    bb->set("active_task_id", uint64_t{0});
     bb->set<UavContext *>("uav_ctx", ctx_.get());
     bb->set<double>("altitude", platform_->altitude());
     bb->set<double>("fire_monitor_timeout", fire_monitor_timeout_);
@@ -298,7 +298,7 @@ private:
       return;
     }
     auto bb = tree_->rootBlackboard();
-    uint32_t cur = bb->get<uint32_t>("current_task_id");
+    uint64_t cur = bb->get<uint64_t>("current_task_id");
     Waypoint buf;
     const Waypoint * active = activeWaypoint(buf);
     if (t.task_id == 0) {   // 取消
@@ -317,21 +317,21 @@ private:
     }
     if (g_ctx.emergency) {
       g_ctx.task_result_pub(t.task_id, false, "EMERGENCY");
-      RCLCPP_WARN(get_logger(), "急停中收到 CBBA 任務 %u → 回 EMERGENCY 交還", t.task_id);
+      RCLCPP_WARN(get_logger(), "急停中收到 CBBA 任務 %llu → 回 EMERGENCY 交還", static_cast<unsigned long long>(t.task_id));
       return;
     }
     if (g_ctx.manual_active) {   // 人工指派中：照伯宇的 BT 忽略（mode MANUAL 送到之前派下來的；CBBA 收到 MANUAL 會撤回）
-      RCLCPP_WARN(get_logger(), "人工指派中，忽略 CBBA 任務 %u", t.task_id);
+      RCLCPP_WARN(get_logger(), "人工指派中，忽略 CBBA 任務 %llu", static_cast<unsigned long long>(t.task_id));
       return;
     }
     if (flight_->phase() == FlightPhase::RTL) {
       g_ctx.task_result_pub(t.task_id, false, "BATTERY_RTL");
-      RCLCPP_WARN(get_logger(), "返航中收到 CBBA 任務 %u → 回 BATTERY_RTL 交還", t.task_id);
+      RCLCPP_WARN(get_logger(), "返航中收到 CBBA 任務 %llu → 回 BATTERY_RTL 交還", static_cast<unsigned long long>(t.task_id));
       return;
     }
     if (flight_->phase() == FlightPhase::OVERRIDE) {   // mode MANUAL 送到之前派下來的
       g_ctx.task_result_pub(t.task_id, false, flight_->overrideReason());
-      RCLCPP_WARN(get_logger(), "被接管中收到 CBBA 任務 %u → 回 %s 交還", t.task_id, flight_->overrideReason());
+      RCLCPP_WARN(get_logger(), "被接管中收到 CBBA 任務 %llu → 回 %s 交還", static_cast<unsigned long long>(t.task_id), flight_->overrideReason());
       return;
     }
     // 手上另一個 cbba 點直接換掉：CBBA 知道
@@ -359,7 +359,7 @@ private:
       return;
     }
     auto bb = tree_->rootBlackboard();
-    uint32_t cur = bb->get<uint32_t>("current_task_id");
+    uint64_t cur = bb->get<uint64_t>("current_task_id");
     Waypoint buf;
     const Waypoint * active = activeWaypoint(buf);
     if (q.clear) {
@@ -414,21 +414,21 @@ private:
     }
     auto bb = tree_->rootBlackboard();
     // 兩個 id 都是 0 = ReportTaskResult／HandleWaypointFailure 已經回報過這個點，{wp} 只是殘值
-    if (bb->get<uint32_t>("current_task_id") == 0 && bb->get<uint32_t>("active_task_id") == 0) {
+    if (bb->get<uint64_t>("current_task_id") == 0 && bb->get<uint64_t>("active_task_id") == 0) {
       g_ctx.manual_active = false;
       return;
     }
     Waypoint buf;
     const Waypoint * active = activeWaypoint(buf);
     const std::string cbba = task_manager::externalInHand(*waypoints_, active, "cbba_",
-        bb->get<uint32_t>("current_task_id"));
+        bb->get<uint64_t>("current_task_id"));
     if (!cbba.empty()) {
       g_ctx.task_result_pub(task_manager::externalTaskId(cbba), false, detail);
       RCLCPP_WARN(get_logger(), "任務結束，%s 交還 CBBA：%s", cbba.c_str(), detail.c_str());
     }
     g_ctx.manual_active = false;
-    bb->set("current_task_id", uint32_t{0});
-    bb->set("active_task_id", uint32_t{0});
+    bb->set("current_task_id", uint64_t{0});
+    bb->set("active_task_id", uint64_t{0});
   }
 
   // 樹沒在跑時佇列裡等著的點（還沒起飛完成就收到的）：返航了不會做，交還 CBBA

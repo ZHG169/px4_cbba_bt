@@ -8,7 +8,8 @@ uint8 OPEN = 0
 uint8 DONE = 1
 uint8 CANCELLED = 2
 
-uint32 task_id                        # 建立者編號 * 65536 + 流水號
+uint64 task_id                        # 協定版本 4（2026-11-11）：64 位元。舊型 = 建立者編號 * 65536 + 流水號（上半 32 位元是 0）；
+                                      # 版本 4 = 建立者 16 ｜ 世代 16 ｜ 流水號 32，只由 cbba_node／閘道產生
 uint8 type
 geometry_msgs/Point position          # map 座標系 (ENU)，公尺
 builtin_interfaces/Time created       # 發現或建立的時間

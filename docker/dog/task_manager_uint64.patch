@@ -1,0 +1,470 @@
+伯宇 task_manager（docs/handoff_uav_2026-10-12/bt/task_manager）的介接層：task_id uint32_t → uint64_t（2026-11-11，協定版本 4）。
+使用者統一負責狗端通訊，直接比照無人機改：current_task、BT 內部的任務識別（externalTaskId〔stoul → stoull〕、current／active 埠、
+外部點名稱）、task_result；MissionTree、SplitTask、Switch、Action 流程不動。他更新 handoff 時照這份重套：
+  cd docs/handoff_uav_2026-10-12/bt && patch -p1 -d task_manager < ../../../docker/dog/task_manager_uint64.patch
+（原檔備份在 docs/handoff_uav_2026-10-12/task_manager.orig_20261112，不能放在 bt/ 底下，否則 colcon 會看到兩個同名套件）
+
+diff -ru task_manager.orig_20261112/include/task_manager/bt_nodes.hpp task_manager/include/task_manager/bt_nodes.hpp
+--- task_manager.orig_20261112/include/task_manager/bt_nodes.hpp	2026-10-12 14:26:15.000000000 +0800
++++ task_manager/include/task_manager/bt_nodes.hpp	2026-11-12 02:42:36.403931082 +0800
+@@ -56,7 +56,7 @@
+   std::string end_reason;
+   bool   manual_active = false;                             // tablet override in force (spec 2.3 rule 2); cleared by ReportTaskResult / abortNow
+   size_t wp_results_begin = 0;                              // results.size() when LoadTasks ran; ReportTaskResult judges only this waypoint's attempt
+-  std::function<void(uint32_t task_id, bool success, const std::string& detail)> task_result_pub;   // the node wires /<ns>/task_result here
++  std::function<void(uint64_t task_id, bool success, const std::string& detail)> task_result_pub;   // the node wires /<ns>/task_result here
+   std::optional<std::chrono::steady_clock::time_point> preempt_t0;   // spec §3.7 t0: the callback wrote {current_task_id}; consumed by the next halt
+ 
+ 
+@@ -81,8 +81,8 @@
+ // External (CBBA / tablet) waypoints are named "<prefix><task_id>"; everything else came from the yaml
+ inline bool hasPrefix(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+ inline bool isExternal(const std::string& id) { return hasPrefix(id, "cbba_") || hasPrefix(id, "manual_"); }
+-inline uint32_t externalTaskId(const std::string& id) {
+-  try { return static_cast<uint32_t>(std::stoul(id.substr(id.find('_') + 1))); } catch (...) { return 0; }
++inline uint64_t externalTaskId(const std::string& id) {
++  try { return static_cast<uint64_t>(std::stoull(id.substr(id.find('_') + 1))); } catch (...) { return 0; }
+ }
+ 
+ // spec §3.7 t1: the halt that sends the cancel. Prints the latency once per external dispatch
+@@ -320,11 +320,11 @@
+ public:
+   IsTaskValidAndUnchanged(const std::string& n, const BT::NodeConfig& c) : ConditionNode(n, c) {}
+   static BT::PortsList providedPorts() {
+-    return { BT::InputPort<uint32_t>("current"), BT::BidirectionalPort<uint32_t>("active") };
++    return { BT::InputPort<uint64_t>("current"), BT::BidirectionalPort<uint64_t>("active") };
+   }
+   BT::NodeStatus tick() override {
+-    const uint32_t cur = getInput<uint32_t>("current").value_or(0);   // no key yet = no external task (tree_step / tree_dump set none)
+-    const uint32_t act = getInput<uint32_t>("active").value_or(0);
++    const uint64_t cur = getInput<uint64_t>("current").value_or(0);   // no key yet = no external task (tree_step / tree_dump set none)
++    const uint64_t act = getInput<uint64_t>("active").value_or(0);
+     if (cur == act) return BT::NodeStatus::SUCCESS;
+     setOutput("active", cur);
+     say("TaskSentinel", "★ 任務換了 " + std::to_string(act) + " → " + std::to_string(cur) + "，halt 手上的點");
+@@ -347,7 +347,7 @@
+   HandleWaypointFailure(const std::string& n, const BT::NodeConfig& c) : SyncActionNode(n, c) {}
+   static BT::PortsList providedPorts() {
+     return { BT::InputPort<Waypoint>("waypoint"),
+-             BT::OutputPort<uint32_t>("current"), BT::OutputPort<uint32_t>("active") };   // cleared when an external point fails
++             BT::OutputPort<uint64_t>("current"), BT::OutputPort<uint64_t>("active") };   // cleared when an external point fails
+   }
+   BT::NodeStatus tick() override {
+     auto in = getInput<Waypoint>("waypoint");
+@@ -394,8 +394,8 @@
+     } else {
+       g_ctx.manual_active = false;
+     }
+-    setOutput("current", uint32_t{0});
+-    setOutput("active",  uint32_t{0});
++    setOutput("current", uint64_t{0});
++    setOutput("active",  uint64_t{0});
+   }
+ };
+ 
+@@ -479,14 +479,14 @@
+   ReportTaskResult(const std::string& n, const BT::NodeConfig& c) : SyncActionNode(n, c) {}
+   static BT::PortsList providedPorts() {
+     return { BT::InputPort<Task>("task"),
+-             BT::BidirectionalPort<uint32_t>("current"), BT::BidirectionalPort<uint32_t>("active") };
++             BT::BidirectionalPort<uint64_t>("current"), BT::BidirectionalPort<uint64_t>("active") };
+   }
+   BT::NodeStatus tick() override {
+     auto in = getInput<Task>("task");
+     if (!in) return BT::NodeStatus::FAILURE;
+     const std::string wp = g_ctx.current_waypoint;
+-    uint32_t id = 0;
+-    try { id = static_cast<uint32_t>(std::stoul(in.value().get("task_id"))); } catch (...) {}
++    uint64_t id = 0;
++    try { id = static_cast<uint64_t>(std::stoull(in.value().get("task_id"))); } catch (...) {}
+ 
+     // this attempt's records only (results are kept for the whole mission): one non-OK line fails the task
+     bool ok = true; std::string detail;
+@@ -503,8 +503,8 @@
+     }
+     g_ctx.results.push_back({wp, "report_result", "OK", ok ? "success" : "failed: " + detail});
+     // the point is closed: let the sentinel pass again. A newer id written meanwhile is left alone
+-    if (getInput<uint32_t>("current").value_or(0) == id) setOutput("current", uint32_t{0});
+-    if (getInput<uint32_t>("active").value_or(0)  == id) setOutput("active",  uint32_t{0});
++    if (getInput<uint64_t>("current").value_or(0) == id) setOutput("current", uint64_t{0});
++    if (getInput<uint64_t>("active").value_or(0)  == id) setOutput("active",  uint64_t{0});
+     return BT::NodeStatus::SUCCESS;
+   }
+ };
+diff -ru task_manager.orig_20261112/include/task_manager/external_task.hpp task_manager/include/task_manager/external_task.hpp
+--- task_manager.orig_20261112/include/task_manager/external_task.hpp	2026-10-12 14:35:00.000000000 +0800
++++ task_manager/include/task_manager/external_task.hpp	2026-11-12 02:42:36.402841557 +0800
+@@ -13,7 +13,7 @@
+ 
+ // Spec 3.4.2: the task position is the target object. Stand `standoff` m in front of it facing it; the PTZ looks at it at `target_z`.
+ // Without the robot pose (TF not ready) stand on the target with yaw 0.
+-inline Waypoint makeExternalWaypoint(const char* prefix, uint32_t task_id, double tx, double ty,
++inline Waypoint makeExternalWaypoint(const char* prefix, uint64_t task_id, double tx, double ty,
+                                      std::optional<std::pair<double, double>> p_now, double standoff, double target_z) {
+   Waypoint w;
+   w.id = prefix + std::to_string(task_id);
+@@ -38,7 +38,7 @@
+ // Id of the unreported external point with this prefix in hand: the one being worked on (`active`) or the queue head. "" if none.
+ // current_task_id == 0 means ReportTaskResult / HandleWaypointFailure already reported it: the point is only finishing (LoopTask needs
+ // one more tick), so it is nobody's to hand back, cancel or resend.
+-inline std::string externalInHand(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint32_t current_task_id) {
++inline std::string externalInHand(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint64_t current_task_id) {
+   if (current_task_id == 0) return "";
+   if (active && hasPrefix(active->id, prefix)) return active->id;
+   if (!q.empty() && hasPrefix(q.front().id, prefix)) return q.front().id;
+@@ -47,7 +47,7 @@
+ 
+ // Put `ext` at the head: the sentinel halts what runs now, LoopWaypoint pops `ext` next. Invariant: at most one external point, always at the head.
+ inline void insertExternal(std::deque<Waypoint>& q, const Waypoint* active, const Waypoint& ext,
+-                           uint32_t task_id, uint32_t& current_task_id) {
++                           uint64_t task_id, uint64_t& current_task_id) {
+   const bool head_external = !q.empty() && isExternal(q.front().id);
+   // the interrupted patrol point resumes after the external one; skipped when an earlier insert already put it back (head still external: the sentinel has not halted yet)
+   if (active && !isExternal(active->id) && !head_external) q.push_front(*active);
+@@ -57,7 +57,7 @@
+ }
+ 
+ // Cancel the external point with this prefix. Running: current_task_id = 0 so the sentinel halts it. Queued: drop it. False if none in hand.
+-inline bool cancelExternal(std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint32_t& current_task_id) {
++inline bool cancelExternal(std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint64_t& current_task_id) {
+   if (current_task_id == 0) return false;   // already reported (see externalInHand): a late cancel changes nothing
+   if (active && hasPrefix(active->id, prefix)) { current_task_id = 0; return true; }
+   if (!q.empty() && hasPrefix(q.front().id, prefix)) { q.pop_front(); current_task_id = 0; return true; }   // id cleared too, or a later re-dispatch of the same id reads as a resend
+@@ -86,7 +86,7 @@
+ }
+ 
+ // The tablet sent the task already in hand again (lossy link): same prefix and id, nothing to change
+-inline bool isResend(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint32_t task_id, uint32_t current_task_id) {
++inline bool isResend(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint64_t task_id, uint64_t current_task_id) {
+   return externalInHand(q, active, prefix, current_task_id) == prefix + std::to_string(task_id);
+ }
+ 
+diff -ru task_manager.orig_20261112/src/task_manager_node.cpp task_manager/src/task_manager_node.cpp
+--- task_manager.orig_20261112/src/task_manager_node.cpp	2026-10-12 14:35:00.000000000 +0800
++++ task_manager/src/task_manager_node.cpp	2026-11-12 02:42:36.413085758 +0800
+@@ -120,7 +120,7 @@
+     current_task_sub_ = create_subscription<SwarmTask>("current_task", rclcpp::QoS(1).reliable().transient_local(),
+         [this](SwarmTask::SharedPtr m) { onCurrentTask(*m); });
+     task_result_pub_ = create_publisher<swarm_interfaces::msg::TaskResult>("task_result", rclcpp::QoS(10).reliable());
+-    g_ctx.task_result_pub = [this](uint32_t id, bool ok, const std::string& detail) {
++    g_ctx.task_result_pub = [this](uint64_t id, bool ok, const std::string& detail) {
+       swarm_interfaces::msg::TaskResult r;
+       r.task_id = id; r.success = ok; r.detail = detail; r.reason = failureReason(ok, detail);
+       task_result_pub_->publish(r);
+@@ -148,8 +148,8 @@
+     auto bb = BT::Blackboard::create();
+     waypoints_ = std::make_shared<std::deque<Waypoint>>();
+     bb->set("waypoints", waypoints_);
+-    bb->set("current_task_id", uint32_t{0});   // the sentinel's two keys (spec §3.3)
+-    bb->set("active_task_id",  uint32_t{0});
++    bb->set("current_task_id", uint64_t{0});   // the sentinel's two keys (spec §3.3)
++    bb->set("active_task_id",  uint64_t{0});
+     // ActionClientNode reads these four from the blackboard
+     using ms = std::chrono::milliseconds;
+     bb->set<rclcpp::Node::SharedPtr>("node", shared_from_this());
+@@ -292,7 +292,7 @@
+   }
+ 
+   // Shared tail of callback A / B: queue it at the head, let the sentinel halt what runs, draw it
+-  void dispatchExternal(const char* prefix, uint32_t task_id, double tx, double ty, const Waypoint* active, uint32_t& cur) {
++  void dispatchExternal(const char* prefix, uint64_t task_id, double tx, double ty, const Waypoint* active, uint64_t& cur) {
+     const auto pose = currentPose();
+     const Waypoint wp = makeExternalWaypoint(prefix, task_id, tx, ty, pose, standoff_, target_z_);
+     insertExternal(*waypoints_, active, wp, task_id, cur);
+@@ -308,7 +308,7 @@
+   void onCurrentTask(const SwarmTask& t) {
+     if (!tree_) return;
+     auto bb = tree_->rootBlackboard();
+-    uint32_t cur = bb->get<uint32_t>("current_task_id");
++    uint64_t cur = bb->get<uint64_t>("current_task_id");
+     Waypoint buf; const Waypoint* active = activeWaypoint(buf);
+     if (t.task_id == 0) {   // cancel: honoured under manual override too
+       const bool running = active && hasPrefix(active->id, "cbba_");
+@@ -322,10 +322,10 @@
+     if (t.task_id == cur) return;   // resend / transient_local replay
+     if (g_ctx.emergency) {
+       g_ctx.task_result_pub(t.task_id, false, "EMERGENCY");
+-      RCLCPP_WARN(get_logger(), "急停中收到 CBBA 任務 %u → 回 EMERGENCY 交還", t.task_id);
++      RCLCPP_WARN(get_logger(), "急停中收到 CBBA 任務 %llu → 回 EMERGENCY 交還", static_cast<unsigned long long>(t.task_id));
+       return;
+     }
+-    if (g_ctx.manual_active) { RCLCPP_WARN(get_logger(), "人工接管中，忽略 CBBA 任務 %u", t.task_id); return; }
++    if (g_ctx.manual_active) { RCLCPP_WARN(get_logger(), "人工接管中，忽略 CBBA 任務 %llu", static_cast<unsigned long long>(t.task_id)); return; }
+     last_task_ = t;   // spec §3.4.8: kept for a replay after a rebuild
+     dispatchExternal("cbba_", t.task_id, t.position.x, t.position.y, active, cur);   // another cbba point in hand is simply replaced: CBBA knows
+   }
+@@ -335,7 +335,7 @@
+     if (!tree_) { r.accepted = false; r.message = "行為樹沒建起來"; return; }
+     if (g_ctx.emergency) { r.accepted = false; r.message = "急停中"; return; }
+     auto bb = tree_->rootBlackboard();
+-    uint32_t cur = bb->get<uint32_t>("current_task_id");
++    uint64_t cur = bb->get<uint64_t>("current_task_id");
+     Waypoint buf; const Waypoint* active = activeWaypoint(buf);
+     if (q.clear) {
+       g_ctx.manual_active = false;
+@@ -347,7 +347,7 @@
+     if (q.task.task_id == 0) { r.accepted = false; r.message = "task_id 不可為 0（0 是取消）"; return; }
+     if (isResend(*waypoints_, active, "manual_", q.task.task_id, cur)) {   // lossy tablet link: the same task again, nothing moves
+       r.accepted = true; r.message = "已在做 manual_" + std::to_string(q.task.task_id);
+-      RCLCPP_INFO(get_logger(), "平板重送 manual_%u：已在做，忽略", q.task.task_id);
++      RCLCPP_INFO(get_logger(), "平板重送 manual_%llu：已在做，忽略", static_cast<unsigned long long>(q.task.task_id));
+       return;
+     }
+     const std::string cbba = externalInHand(*waypoints_, active, "cbba_", cur);
+@@ -365,16 +365,16 @@
+     if (!tree_) return;
+     auto bb = tree_->rootBlackboard();
+     // both ids cleared = ReportTaskResult / HandleWaypointFailure already reported this point; {wp} is just its leftover
+-    if (bb->get<uint32_t>("current_task_id") == 0 && bb->get<uint32_t>("active_task_id") == 0) { g_ctx.manual_active = false; return; }
++    if (bb->get<uint64_t>("current_task_id") == 0 && bb->get<uint64_t>("active_task_id") == 0) { g_ctx.manual_active = false; return; }
+     Waypoint buf; const Waypoint* active = activeWaypoint(buf);
+-    const std::string cbba = externalInHand(*waypoints_, active, "cbba_", bb->get<uint32_t>("current_task_id"));
++    const std::string cbba = externalInHand(*waypoints_, active, "cbba_", bb->get<uint64_t>("current_task_id"));
+     if (!cbba.empty()) {
+       g_ctx.task_result_pub(externalTaskId(cbba), false, detail);
+       RCLCPP_WARN(get_logger(), "任務結束，%s 交還 CBBA：%s", cbba.c_str(), detail.c_str());
+     }
+     g_ctx.manual_active = false;
+-    bb->set("current_task_id", uint32_t{0});
+-    bb->set("active_task_id",  uint32_t{0});
++    bb->set("current_task_id", uint64_t{0});
++    bb->set("active_task_id",  uint64_t{0});
+   }
+ 
+   // spec §3.4.8: 2 Hz. Silent until TF gives a pose; CBBA treats silence as "state unknown" (rule 4)
+diff -ru task_manager.orig_20261112/src/tree_step.cpp task_manager/src/tree_step.cpp
+--- task_manager.orig_20261112/src/tree_step.cpp	2026-10-12 14:26:36.000000000 +0800
++++ task_manager/src/tree_step.cpp	2026-11-12 02:42:36.406316995 +0800
+@@ -31,9 +31,9 @@
+ 
+   auto bb = BT::Blackboard::create();
+   bb->set("waypoints", m.waypoints);
+-  bb->set("current_task_id", uint32_t{0});   // the sentinel's two keys, like task_manager_node
+-  bb->set("active_task_id",  uint32_t{0});
+-  g_ctx.task_result_pub = [](uint32_t id, bool ok, const std::string& d) {
++  bb->set("current_task_id", uint64_t{0});   // the sentinel's two keys, like task_manager_node
++  bb->set("active_task_id",  uint64_t{0});
++  g_ctx.task_result_pub = [](uint64_t id, bool ok, const std::string& d) {
+     std::cout << "  ⇒ /task_result  task " << id << (ok ? "  success" : "  FAIL") << "  " << d << "\n"; };
+   auto tree = factory.createTreeFromFile(xml, bb);
+   BT::StdCoutLogger logger(tree);   // 每顆節點的狀態轉換即時印出
+@@ -66,14 +66,14 @@
+       // Same path as the node's callback A: `active` = the point LoopWaypoint's child is working on, then insertExternal / cancelExternal
+       const std::optional<Waypoint> hand = waypointInHand(tree);
+       const Waypoint* active = hand ? &*hand : nullptr;
+-      uint32_t cur = bb->get<uint32_t>("current_task_id");
++      uint64_t cur = bb->get<uint64_t>("current_task_id");
+       if (line == "x") {
+         bool had = cancelExternal(*m.waypoints, active, "cbba_", cur);
+         bb->set("current_task_id", cur);
+         std::cout << (had ? "CBBA 取消 → {current_task_id}=0，哨兵下一拍回 FAILURE、halt 正在跑的 cbba 點" : "手上沒有 cbba 點，不理") << "\n";
+         continue;
+       }
+-      std::istringstream is(line.substr(2)); uint32_t id = 0; double x = 0, y = 0;
++      std::istringstream is(line.substr(2)); uint64_t id = 0; double x = 0, y = 0;
+       if (!(is >> id >> x >> y) || id == 0) { std::cout << "格式：c <task_id> <x> <y>\n"; continue; }
+       const Waypoint wp = makeExternalWaypoint("cbba_", id, x, y, std::nullopt, 1.5, 0.5);   // no TF here: stand on the target
+       insertExternal(*m.waypoints, active, wp, id, cur);
+diff -ru task_manager.orig_20261112/test/test_tree.cpp task_manager/test/test_tree.cpp
+--- task_manager.orig_20261112/test/test_tree.cpp	2026-10-12 14:35:00.000000000 +0800
++++ task_manager/test/test_tree.cpp	2026-11-12 02:42:36.407219346 +0800
+@@ -55,8 +55,8 @@
+     g_ctx.on_task_fail = m.on_task_fail;
+     auto bb = BT::Blackboard::create();
+     bb->set("waypoints", m.waypoints);
+-    bb->set("current_task_id", uint32_t{0});   // the sentinel's two keys; the node sets them once in its constructor
+-    bb->set("active_task_id",  uint32_t{0});
++    bb->set("current_task_id", uint64_t{0});   // the sentinel's two keys; the node sets them once in its constructor
++    bb->set("active_task_id",  uint64_t{0});
+     tree_ = std::make_unique<BT::Tree>(factory_.createTreeFromFile(xml, bb));
+     obs_  = std::make_unique<BT::TreeObserver>(*tree_);
+   }
+@@ -128,19 +128,19 @@
+   }
+ 
+   // 樹閒置時派一個外部點（spec 3.4.4，沒東西要放回）；哨兵第一拍抄 id 回 FAILURE、沒東西可 halt
+-  uint32_t dispatchIdle(const char* prefix, uint32_t task_id) {
++  uint64_t dispatchIdle(const char* prefix, uint64_t task_id) {
+     auto bb = tree_->rootBlackboard();
+     auto q  = bb->get<std::shared_ptr<std::deque<Waypoint>>>("waypoints");
+-    uint32_t cur = 0;
++    uint64_t cur = 0;
+     insertExternal(*q, nullptr, makeExternalWaypoint(prefix, task_id, 9, 9, std::nullopt, 1.5, 1.0), task_id, cur);
+     bb->set("current_task_id", cur);
+     EXPECT_EQ(tree_->tickOnce(), BT::NodeStatus::FAILURE);
+     return cur;
+   }
+-  struct Report { uint32_t id; bool ok; std::string detail; };
++  struct Report { uint64_t id; bool ok; std::string detail; };
+   std::vector<Report> reports_;
+   void captureReports() {
+-    g_ctx.task_result_pub = [this](uint32_t id, bool ok, const std::string& d) { reports_.push_back({id, ok, d}); };
++    g_ctx.task_result_pub = [this](uint64_t id, bool ok, const std::string& d) { reports_.push_back({id, ok, d}); };
+   }
+ 
+   int ticks_run_ = 0;
+@@ -653,9 +653,9 @@
+ TEST_F(TreeTest, ExternalQueueRulesTable) {
+   struct Case {
+     const char* name;
+-    std::vector<std::string> q; const char* active; uint32_t start_id;
++    std::vector<std::string> q; const char* active; uint64_t start_id;
+     const char* op;
+-    std::vector<std::string> want_q; uint32_t want_id; bool want_hit; const char* want_hand;
++    std::vector<std::string> want_q; uint64_t want_id; bool want_hit; const char* want_hand;
+   };
+   const Case cases[] = {
+     {"W2 跑中插 cbba",             {"W3", "W4"},           "W2",       0, "+cbba_1",   {"cbba_1", "W2", "W3", "W4"}, 1, true,  ""},
+@@ -679,13 +679,13 @@
+     for (const auto& id : c.q) q.push_back(extWp(id));
+     Waypoint active_wp; const Waypoint* active = nullptr;
+     if (c.active) { active_wp = extWp(c.active); active = &active_wp; }
+-    uint32_t cur = c.start_id;
++    uint64_t cur = c.start_id;
+     EXPECT_EQ(externalInHand(q, active, "cbba_", cur), c.want_hand);
+     bool hit = true;
+     const std::string op = c.op;
+     if (op[0] == '+') {
+       const std::string id = op.substr(1);
+-      insertExternal(q, active, extWp(id), static_cast<uint32_t>(std::stoul(id.substr(id.find('_') + 1))), cur);
++      insertExternal(q, active, extWp(id), static_cast<uint64_t>(std::stoull(id.substr(id.find('_') + 1))), cur);
+     } else {
+       hit = cancelExternal(q, active, op.c_str() + 1, cur);
+     }
+@@ -738,7 +738,7 @@
+   EXPECT_EQ(bb->get<Waypoint>("wp").id, "B");                              // the leftover the old code trusted
+   ASSERT_FALSE(q->empty()); EXPECT_EQ(q->front().id, "C");                 // C not popped yet: this is the seam
+   // a CBBA task arriving now: nothing to put back
+-  uint32_t cur = 0;
++  uint64_t cur = 0;
+   std::optional<Waypoint> active = waypointInHand(*tree_);
+   insertExternal(*q, active ? &*active : nullptr, makeExternalWaypoint("cbba_", 1, 9, 9, std::nullopt, 1.5, 1.0), 1, cur);
+   bb->set("current_task_id", cur);
+@@ -777,14 +777,14 @@
+   auto bb = tree_->rootBlackboard();
+   auto q  = bb->get<std::shared_ptr<std::deque<Waypoint>>>("waypoints");
+   std::optional<Waypoint> active = waypointInHand(*tree_);
+-  uint32_t cur = 0;
++  uint64_t cur = 0;
+   insertExternal(*q, active ? &*active : nullptr, makeExternalWaypoint("cbba_", 1, 9, 9, std::nullopt, 1.5, 1.0), 1, cur);
+   bb->set("current_task_id", cur);
+   EXPECT_EQ(tree_->tickOnce(), BT::NodeStatus::FAILURE);                  // sentinel halts GoTo B
+   ASSERT_TRUE(tickUntil([&] { return has("cbba_1/report_result/OK"); }));  // the tick ReportTaskResult published
+   ASSERT_EQ(reports_.size(), 1u); EXPECT_EQ(reports_[0].id, 1u); EXPECT_TRUE(reports_[0].ok);
+-  cur = bb->get<uint32_t>("current_task_id");
+-  EXPECT_EQ(cur, 0u); EXPECT_EQ(bb->get<uint32_t>("active_task_id"), 0u);  // reported: ids cleared
++  cur = bb->get<uint64_t>("current_task_id");
++  EXPECT_EQ(cur, 0u); EXPECT_EQ(bb->get<uint64_t>("active_task_id"), 0u);  // reported: ids cleared
+   active = waypointInHand(*tree_);
+   EXPECT_TRUE(active && active->id == "cbba_1");                           // but the tree is still finishing it (LoopTask)
+   const Waypoint* a = active ? &*active : nullptr;
+@@ -812,14 +812,14 @@
+   auto q  = bb->get<std::shared_ptr<std::deque<Waypoint>>>("waypoints");
+   Waypoint active = bb->get<Waypoint>("wp");
+   ASSERT_EQ(active.id, "B");                       // {wp} is reachable from the root blackboard through _autoremap
+-  uint32_t cur = bb->get<uint32_t>("current_task_id");
++  uint64_t cur = bb->get<uint64_t>("current_task_id");
+   insertExternal(*q, &active, makeExternalWaypoint("cbba_", 1, 9, 9, std::nullopt, 1.5, 1.0), 1, cur);
+   bb->set("current_task_id", cur);
+ 
+   mock::halt_count = 0;
+   EXPECT_NO_THROW({ EXPECT_EQ(tree_->tickOnce(), BT::NodeStatus::FAILURE); });   // sentinel halts the subtree
+   EXPECT_EQ(mock::halt_count, 1);                                                  // GoTo B got onHalted
+-  EXPECT_EQ(bb->get<uint32_t>("active_task_id"), 1u);
++  EXPECT_EQ(bb->get<uint64_t>("active_task_id"), 1u);
+   ASSERT_NE(stat("GoTo"), nullptr);
+   EXPECT_NE(stat("GoTo")->current_status, BT::NodeStatus::RUNNING);
+ 
+@@ -840,7 +840,7 @@
+   build();
+   auto bb = tree_->rootBlackboard();
+   auto q  = bb->get<std::shared_ptr<std::deque<Waypoint>>>("waypoints");
+-  uint32_t cur = dispatchIdle("cbba_", 1);
++  uint64_t cur = dispatchIdle("cbba_", 1);
+   ASSERT_TRUE(tickUntil([this] {
+     auto* s = stat("GoTo");
+     return s && s->current_status == BT::NodeStatus::RUNNING && g_ctx.current_waypoint == "cbba_1";
+@@ -906,8 +906,8 @@
+   ASSERT_EQ(reports_.size(), 1u);
+   EXPECT_EQ(reports_[0].id, 1u); EXPECT_TRUE(reports_[0].ok); EXPECT_EQ(reports_[0].detail, "");
+   auto bb = tree_->rootBlackboard();
+-  EXPECT_EQ(bb->get<uint32_t>("current_task_id"), 0u);
+-  EXPECT_EQ(bb->get<uint32_t>("active_task_id"), 0u);
++  EXPECT_EQ(bb->get<uint64_t>("current_task_id"), 0u);
++  EXPECT_EQ(bb->get<uint64_t>("active_task_id"), 0u);
+   EXPECT_EQ(outcomes()[0], "cbba_1/goto/OK");
+   EXPECT_EQ(outcomes()[1], "cbba_1/ptz_inspect/OK");
+   EXPECT_EQ(outcomes()[2], "cbba_1/report_result/OK");
+@@ -925,7 +925,7 @@
+   EXPECT_EQ(reports_[0].id, 1u);
+   EXPECT_FALSE(reports_[0].ok);
+   EXPECT_NE(reports_[0].detail.find("MODULE_FAILED"), std::string::npos) << reports_[0].detail;
+-  EXPECT_EQ(tree_->rootBlackboard()->get<uint32_t>("current_task_id"), 0u);
++  EXPECT_EQ(tree_->rootBlackboard()->get<uint64_t>("current_task_id"), 0u);
+ }
+ 
+ // 同一個 task_id 之前失敗過的紀錄還在 results 裡：這次成功就回 true（wp_results_begin）
+@@ -946,8 +946,8 @@
+   EXPECT_EQ(runToEnd(), BT::NodeStatus::SUCCESS);
+   EXPECT_TRUE(reports_.empty());
+   EXPECT_FALSE(g_ctx.manual_active);
+-  EXPECT_EQ(tree_->rootBlackboard()->get<uint32_t>("current_task_id"), 0u);
+-  EXPECT_EQ(tree_->rootBlackboard()->get<uint32_t>("active_task_id"), 0u);
++  EXPECT_EQ(tree_->rootBlackboard()->get<uint64_t>("current_task_id"), 0u);
++  EXPECT_EQ(tree_->rootBlackboard()->get<uint64_t>("active_task_id"), 0u);
+   EXPECT_EQ(outcomes()[2], "manual_7/report_result/OK");
+ }
+ 
+@@ -961,8 +961,8 @@
+   captureReports();
+   auto bb = BT::Blackboard::create();
+   bb->set("wp", makeExternalWaypoint("cbba_", 1, 9, 9, std::nullopt, 1.5, 1.0));
+-  bb->set("current_task_id", uint32_t{1});
+-  bb->set("active_task_id",  uint32_t{1});
++  bb->set("current_task_id", uint64_t{1});
++  bb->set("active_task_id",  uint64_t{1});
+   auto mini = factory_.createTreeFromText(kWpFailExtXml, bb);
+   g_ctx.current_waypoint = "cbba_1";
+   g_ctx.last_error = "NAV_NO_ACK";
+@@ -971,8 +971,8 @@
+   EXPECT_EQ(reports_[0].id, 1u);
+   EXPECT_FALSE(reports_[0].ok);
+   EXPECT_EQ(reports_[0].detail, "NAV_NO_ACK");             // the real reason, not the mission's end reason
+-  EXPECT_EQ(bb->get<uint32_t>("current_task_id"), 0u);    // reported: abortNow must not hand it back a second time
+-  EXPECT_EQ(bb->get<uint32_t>("active_task_id"), 0u);
++  EXPECT_EQ(bb->get<uint64_t>("current_task_id"), 0u);    // reported: abortNow must not hand it back a second time
++  EXPECT_EQ(bb->get<uint64_t>("active_task_id"), 0u);
+   ASSERT_EQ(g_ctx.results.size(), 1u);
+   EXPECT_EQ(g_ctx.results[0].detail, "NAV_NO_ACK");
+ }
+@@ -982,8 +982,8 @@
+   captureReports();
+   auto bb = BT::Blackboard::create();
+   bb->set("wp", makeExternalWaypoint("manual_", 7, 9, 9, std::nullopt, 1.5, 1.0));
+-  bb->set("current_task_id", uint32_t{7});
+-  bb->set("active_task_id",  uint32_t{7});
++  bb->set("current_task_id", uint64_t{7});
++  bb->set("active_task_id",  uint64_t{7});
+   auto mini = factory_.createTreeFromText(kWpFailExtXml, bb);
+   g_ctx.current_waypoint = "manual_7";
+   g_ctx.manual_active = true;
+@@ -991,7 +991,7 @@
+   EXPECT_EQ(mini.tickOnce(), BT::NodeStatus::FAILURE);
+   EXPECT_TRUE(reports_.empty());
+   EXPECT_FALSE(g_ctx.manual_active);
+-  EXPECT_EQ(bb->get<uint32_t>("current_task_id"), 0u);
++  EXPECT_EQ(bb->get<uint64_t>("current_task_id"), 0u);
+ }
+ 
+ // cbba 點去不了：HandleWaypointFailure 交還 TaskResult(1, false, NAV_FAILED)、id 清 0、巡檢照走
+@@ -1004,8 +1004,8 @@
+   EXPECT_EQ(reports_[0].id, 1u);
+   EXPECT_FALSE(reports_[0].ok);
+   EXPECT_EQ(reports_[0].detail, "NAV_FAILED");
+-  EXPECT_EQ(tree_->rootBlackboard()->get<uint32_t>("current_task_id"), 0u);
+-  EXPECT_EQ(tree_->rootBlackboard()->get<uint32_t>("active_task_id"), 0u);
++  EXPECT_EQ(tree_->rootBlackboard()->get<uint64_t>("current_task_id"), 0u);
++  EXPECT_EQ(tree_->rootBlackboard()->get<uint64_t>("active_task_id"), 0u);
+   EXPECT_EQ(outcomes(), (std::vector<std::string>{
+       "cbba_1/goto/FAILED", "A/goto/OK", "B/goto/OK", "B/ptz_inspect/OK", "C/goto/OK", "D/goto/OK", "D/ptz_inspect/OK"}));
+   ASSERT_NE(stat("ReportTaskResult"), nullptr);

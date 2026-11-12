@@ -13,7 +13,7 @@ namespace uav_px4_bt::test
 {
 struct Result
 {
-  std::uint32_t task_id;
+  std::uint64_t task_id;
   std::uint64_t version;
   bool success;
   std::string detail;
@@ -24,7 +24,7 @@ struct Created
   std::uint8_t type;
   Vec3 position;
   double duration;
-  std::uint32_t task_id;
+  std::uint64_t task_id;
 };
 
 class FakePlatform : public UavPlatform
@@ -44,14 +44,14 @@ public:
   {
     results.push_back({task.task_id, task.version, success, detail});
   }
-  std::uint32_t createTask(std::uint8_t type, const Vec3 & p, double, double duration, double) override
+  std::uint64_t createTask(std::uint8_t type, const Vec3 & p, double, double duration, double) override
   {
-    const std::uint32_t id = 0x00018001u + static_cast<std::uint32_t>(created.size());
+    const std::uint64_t id = 0x00018001u + static_cast<std::uint64_t>(created.size());
     created.push_back({type, p, duration, id});
     return id;
   }
   void setExecStatus(const ExecStatus & s) override {exec = s;}
-  bool taskClosed(std::uint32_t id) const override {return closed.count(id) > 0;}
+  bool taskClosed(std::uint64_t id) const override {return closed.count(id) > 0;}
   std::vector<KnownGroundTask> groundTasks() const override {return ground;}
   void log(const std::string & text) override {logs.push_back(text);}
 
@@ -78,7 +78,7 @@ public:
   std::vector<Result> results;
   std::vector<Created> created;
   ExecStatus exec;
-  std::set<std::uint32_t> closed;   // cbba_node 的 task_closed
+  std::set<std::uint64_t> closed;   // cbba_node 的 task_closed
   std::vector<KnownGroundTask> ground;   // cbba_node 的 task_announced（地面處置任務）
   std::vector<std::string> logs;
 };

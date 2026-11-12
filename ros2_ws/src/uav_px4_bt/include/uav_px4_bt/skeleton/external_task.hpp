@@ -4,6 +4,7 @@
 //   - makeExternalWaypoint（狗：站在目標前 1.5 m、雲台；無人機：目標正上方、air_recon）
 //   - failureReason 加無人機的停止原因 BATTERY_RTL（低電量返航）、NOT_AIRBORNE（降落、上鎖）→ STOPPED（UAV_BT_GUIDE §2.1）
 //     、PX4_FAILSAFE（PX4 自己的失效保護，2026-10-17）。被人接管照狗用 PREEMPTED_BY_MANUAL（原本就是 PREEMPTED）
+//   - task_id 的型別 uint32_t → uint64_t（2026-11-11，協定版本 4）
 #pragma once
 // Queue rules for external (CBBA / manual) waypoints. Pure: no ROS, no blackboard. Spec 3.4.3-3.4.6.
 #include "uav_px4_bt/skeleton/bt_nodes.hpp"
@@ -20,7 +21,7 @@ namespace task_manager {
 
 // 無人機版（伯宇 UAV_BT_GUIDE §4.1）：狗站在目標前 1.5 m 面向它、雲台盯目標；無人機飛到目標正上方
 // z = max(altitude, 目標 z)，tasks = [air_recon（target、duration_sec）, report_result（task_id）]。id 一樣是 <prefix><task_id>
-inline Waypoint makeExternalWaypoint(const char* prefix, uint32_t task_id, double tx, double ty, double tz,
+inline Waypoint makeExternalWaypoint(const char* prefix, uint64_t task_id, double tx, double ty, double tz,
                                      double altitude, double duration_sec) {
   Waypoint w;
   w.id = prefix + std::to_string(task_id);
@@ -38,7 +39,7 @@ inline Waypoint makeExternalWaypoint(const char* prefix, uint32_t task_id, doubl
 // Id of the unreported external point with this prefix in hand: the one being worked on (`active`) or the queue head. "" if none.
 // current_task_id == 0 means ReportTaskResult / HandleWaypointFailure already reported it: the point is only finishing (LoopTask needs
 // one more tick), so it is nobody's to hand back, cancel or resend.
-inline std::string externalInHand(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint32_t current_task_id) {
+inline std::string externalInHand(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint64_t current_task_id) {
   if (current_task_id == 0) return "";
   if (active && hasPrefix(active->id, prefix)) return active->id;
   if (!q.empty() && hasPrefix(q.front().id, prefix)) return q.front().id;
@@ -47,7 +48,7 @@ inline std::string externalInHand(const std::deque<Waypoint>& q, const Waypoint*
 
 // Put `ext` at the head: the sentinel halts what runs now, LoopWaypoint pops `ext` next. Invariant: at most one external point, always at the head.
 inline void insertExternal(std::deque<Waypoint>& q, const Waypoint* active, const Waypoint& ext,
-                           uint32_t task_id, uint32_t& current_task_id) {
+                           uint64_t task_id, uint64_t& current_task_id) {
   const bool head_external = !q.empty() && isExternal(q.front().id);
   // the interrupted patrol point resumes after the external one; skipped when an earlier insert already put it back (head still external: the sentinel has not halted yet)
   if (active && !isExternal(active->id) && !head_external) q.push_front(*active);
@@ -57,7 +58,7 @@ inline void insertExternal(std::deque<Waypoint>& q, const Waypoint* active, cons
 }
 
 // Cancel the external point with this prefix. Running: current_task_id = 0 so the sentinel halts it. Queued: drop it. False if none in hand.
-inline bool cancelExternal(std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint32_t& current_task_id) {
+inline bool cancelExternal(std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint64_t& current_task_id) {
   if (current_task_id == 0) return false;   // already reported (see externalInHand): a late cancel changes nothing
   if (active && hasPrefix(active->id, prefix)) { current_task_id = 0; return true; }
   if (!q.empty() && hasPrefix(q.front().id, prefix)) { q.pop_front(); current_task_id = 0; return true; }   // id cleared too, or a later re-dispatch of the same id reads as a resend
@@ -86,7 +87,7 @@ inline std::optional<Waypoint> waypointInHand(BT::Tree& tree) {
 }
 
 // The tablet sent the task already in hand again (lossy link): same prefix and id, nothing to change
-inline bool isResend(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint32_t task_id, uint32_t current_task_id) {
+inline bool isResend(const std::deque<Waypoint>& q, const Waypoint* active, const char* prefix, uint64_t task_id, uint64_t current_task_id) {
   return externalInHand(q, active, prefix, current_task_id) == prefix + std::to_string(task_id);
 }
 

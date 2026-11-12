@@ -169,12 +169,7 @@ public:
 private:
   enum class FirePhase { NONE, TO_FIRE, MONITOR };
 
-  static std::string hexId(std::uint32_t id)
-  {
-    char b[16];
-    std::snprintf(b, sizeof(b), "%08X", id);
-    return b;
-  }
+  static std::string hexId(TaskId id) {return taskHex(id);}
 
   // 待命時看到新火點 → 發布地面處置任務、飛到火點上空監控（參數照 NavigateTo 的預設：confidence 0.85、5 張、0.5 s 內）。
   // 回傳 true = 這個 tick 由火點監控控制（不做一般的待命）
@@ -365,7 +360,7 @@ private:
   double fire_timeout_{120.0};
   FirePhase fire_phase_{FirePhase::NONE};
   Vec3 fire_goal_;
-  std::uint32_t fire_task_{0};
+  TaskId fire_task_{0};
   double fire_monitor_start_{0.0};
 
   int rtl_sent_{0};

@@ -66,6 +66,7 @@ std::vector<std::uint8_t> encodeAgentState(Header header, const AgentStateBody &
   ByteWriter w(out);
   w.u8(packFlags(b.flags));
   w.u8(b.vehicle_type);
+  w.u64(b.capabilities);
   w.f32(b.x);
   w.f32(b.y);
   w.f32(b.z);
@@ -75,13 +76,13 @@ std::vector<std::uint8_t> encodeAgentState(Header header, const AgentStateBody &
   w.u8(static_cast<std::uint8_t>((b.exec_known ? kExecKnown : 0) | (b.preemptible ? kPreemptible : 0) |
     (b.has_active ? kHasActive : 0) | (b.has_queued ? kHasQueued : 0)));
   w.f32(b.remaining_time);
-  w.u32(b.active_task);
+  w.u64(b.active_task);
   w.u64(b.active_version);
-  w.u32(b.queued_task);
+  w.u64(b.queued_task);
   w.u64(b.queued_version);
   w.u8(static_cast<std::uint8_t>(b.path.size()));
-  for (std::uint32_t t : b.path) {
-    w.u32(t);
+  for (std::uint64_t t : b.path) {
+    w.u64(t);
   }
   w.u8(static_cast<std::uint8_t>(b.neighbors.size()));
   for (std::uint16_t n : b.neighbors) {
@@ -101,6 +102,7 @@ std::optional<AgentStateBody> decodeAgentState(const std::uint8_t * data, std::s
   AgentStateBody b;
   b.flags = unpackFlags(r.u8());
   b.vehicle_type = r.u8();
+  b.capabilities = r.u64();
   b.x = r.f32();
   b.y = r.f32();
   b.z = r.f32();
@@ -113,13 +115,13 @@ std::optional<AgentStateBody> decodeAgentState(const std::uint8_t * data, std::s
   b.has_active = (exec_flags & kHasActive) != 0;
   b.has_queued = (exec_flags & kHasQueued) != 0;
   b.remaining_time = r.f32();
-  b.active_task = r.u32();
+  b.active_task = r.u64();
   b.active_version = r.u64();
-  b.queued_task = r.u32();
+  b.queued_task = r.u64();
   b.queued_version = r.u64();
   b.path.resize(r.u8());
   for (auto & t : b.path) {
-    t = r.u32();
+    t = r.u64();
   }
   b.neighbors.resize(r.u8());
   for (auto & n : b.neighbors) {

@@ -1,15 +1,15 @@
-// 任務完成的三種封包，都會轉送（協定版本 2，見 wire_header.hpp）
+// 任務完成的三種封包，都會轉送（協定版本 2 起；版本 4 的 task_id 是 8 B，見 wire_header.hpp）
 //
-// COMPLETION（種類 4，完成宣告）：20 + 33 + 2V B
-//   表頭 20 | 轉送區塊 14 | task_id 4 | executor_id 2 | round_key 4 | assign_version 8 |
+// COMPLETION（種類 4，完成宣告）：20 + 37 + 2V B
+//   表頭 20 | 轉送區塊 14 | task_id 8 | executor_id 2 | round_key 4 | assign_version 8 |
 //   view_count 1 | view_id 2 × V
 //
-// COMPLETION_ACK（種類 5，完成確認）：20 + 34 + 2V B
-//   表頭 20 | 轉送區塊 14 | task_id 4 | executor_id 2 | round_key 4 | assign_version 8 | status 1 |
+// COMPLETION_ACK（種類 5，完成確認）：20 + 38 + 2V B
+//   表頭 20 | 轉送區塊 14 | task_id 8 | executor_id 2 | round_key 4 | assign_version 8 | status 1 |
 //   view_count 1 | view_id 2 × V
 //
-// TASK_CLOSE（種類 6，任務結束）：20 + 35 + 2V + 6K B
-//   表頭 20 | 轉送區塊 14 | task_id 4 | reason 1 | actor_id 2 | round_key 4 | assign_version 8 |
+// TASK_CLOSE（種類 6，任務結束）：20 + 39 + 2V + 6K B
+//   表頭 20 | 轉送區塊 14 | task_id 8 | reason 1 | actor_id 2 | round_key 4 | assign_version 8 |
 //   view_count 1 | view_id 2 × V | ack_count 1 | (確認者 2 + ack_seq 4) × K
 //
 //   executor_id     執行（宣告完成）的機號
@@ -24,7 +24,7 @@
 //
 // 權限（收到 TASK_CLOSE 的節點檢查，不合格就不結束、記數）：
 //   完成：actor 是執行者，assign_version 不比自己知道的最新正式指派舊。
-//   取消：actor 是任務的建立者（task_id 的高 16 位元），或在 cancel_authorities（授權的管理端）裡。
+//   取消：actor 是任務的建立者（types.hpp 的 taskCreator），或在 cancel_authorities（授權的管理端）裡。
 //   執行失敗不送 TASK_CLOSE：任務保留，由 CBBA 重新分配。
 //
 // 流程：執行機送 COMPLETION → 各機回 COMPLETION_ACK → 收齊後送 TASK_CLOSE，全隊收到 TASK_CLOSE 才標為結束。
@@ -56,15 +56,15 @@ constexpr std::uint8_t kCloseCancelled = 2;
 
 constexpr std::size_t completionSize(std::size_t view)
 {
-  return kHeaderSize + kRelaySize + 19 + 2 * view;
+  return kHeaderSize + kRelaySize + 23 + 2 * view;
 }
 constexpr std::size_t completionAckSize(std::size_t view)
 {
-  return kHeaderSize + kRelaySize + 20 + 2 * view;
+  return kHeaderSize + kRelaySize + 24 + 2 * view;
 }
 constexpr std::size_t taskCloseSize(std::size_t view, std::size_t acks)
 {
-  return kHeaderSize + kRelaySize + 21 + 2 * view + 6 * acks;
+  return kHeaderSize + kRelaySize + 25 + 2 * view + 6 * acks;
 }
 
 struct AckRef
@@ -76,7 +76,7 @@ struct AckRef
 struct CompletionBody
 {
   RelayHeader relay;
-  std::uint32_t task_id{0};
+  std::uint64_t task_id{0};
   std::uint16_t executor_id{0};
   std::uint32_t round_key{0};
   std::uint64_t assign_version{0};
@@ -90,7 +90,7 @@ constexpr std::uint8_t kAckStaleAssignment = 2;
 struct CompletionAckBody
 {
   RelayHeader relay;
-  std::uint32_t task_id{0};
+  std::uint64_t task_id{0};
   std::uint16_t executor_id{0};
   std::uint32_t round_key{0};
   std::uint64_t assign_version{0};
@@ -101,7 +101,7 @@ struct CompletionAckBody
 struct TaskCloseBody
 {
   RelayHeader relay;
-  std::uint32_t task_id{0};
+  std::uint64_t task_id{0};
   std::uint8_t reason{kCloseDone};
   std::uint16_t actor_id{0};
   std::uint32_t round_key{0};
@@ -111,7 +111,7 @@ struct TaskCloseBody
 };
 
 // 編碼成完整封包；header.type 會設成對應的種類。內容不合法時丟出 std::invalid_argument：
-// task_id 的建立者是 0、機號不合法、reason 不是 1 或 2、status 不是 0～2、清單超過 255 筆。
+// task_id 不合法、機號不合法、reason 不是 1 或 2、status 不是 0～2、清單超過 255 筆。
 std::vector<std::uint8_t> encodeCompletion(Header header, const CompletionBody & body);
 std::vector<std::uint8_t> encodeCompletionAck(Header header, const CompletionAckBody & body);
 std::vector<std::uint8_t> encodeTaskClose(Header header, const TaskCloseBody & body);

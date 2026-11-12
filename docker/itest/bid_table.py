@@ -28,6 +28,8 @@ AIR = 1   # 空中任務只有無人機做得了，其他（地面處置、巡�
 WHY = {
     "in_bundle": "得標",
     "bid": "有出價、沒贏",
+    "platform": "平台不符",
+    "capability": "缺能力",
     "infeasible": "不能做",
     "excluded": "失敗後排除中",
     "locked": "別台已接受",

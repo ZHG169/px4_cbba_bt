@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "cbba_core/types.hpp"
 #include "cbba_core/wire_io.hpp"
 
 namespace cbba_core::wire
@@ -14,19 +15,17 @@ namespace
 constexpr std::uint8_t kParticipating = 1u << 0;
 constexpr std::uint8_t kHasDigest = 1u << 1;
 
-// task_id 的高 16 位元是建立者機號，不能是 0
-bool validTaskId(std::uint32_t id) {return (id >> 16) != 0;}
-
 bool validRecord(const Record & r)
 {
-  return validTaskId(r.task_id) && std::isfinite(r.winning_bid) && r.winning_bid >= 0.0f &&
+  return cbba_core::validTaskId(r.task_id) && std::isfinite(r.winning_bid) && r.winning_bid >= 0.0f &&
          r.winner_id != 0xFFFF && r.assignee_id != 0xFFFF && r.assign_state <= 3 &&
          (r.assign_state == 0 || r.assignee_id != 0);
 }
 
 bool validDigest(const DigestEntry & d)
 {
-  return validAgentId(d.creator) && d.known >= 1 && d.closed <= d.known && d.min_seq <= d.max_seq;
+  return validAgentId(d.creator) && d.known >= 1 && d.closed <= d.known && d.min_seq <= d.max_seq &&
+         (d.epoch != 0 || d.max_seq <= 0xFFFFu);
 }
 }  // namespace
 
@@ -95,10 +94,11 @@ std::vector<std::uint8_t> encodeCbbaState(Header header, const CbbaStateBody & b
   for (std::size_t i = 0; i < digests; ++i) {
     const DigestEntry & d = b.digest[i];
     w.u16(d.creator);
-    w.u16(d.min_seq);
-    w.u16(d.max_seq);
-    w.u16(d.known);
-    w.u16(d.closed);
+    w.u16(d.epoch);
+    w.u32(d.min_seq);
+    w.u32(d.max_seq);
+    w.u32(d.known);
+    w.u32(d.closed);
     w.u32(d.crc);
   }
   w.u16(static_cast<std::uint16_t>(b.stamps.size()));
@@ -108,7 +108,8 @@ std::vector<std::uint8_t> encodeCbbaState(Header header, const CbbaStateBody & b
   }
   w.u16(static_cast<std::uint16_t>(b.records.size()));
   for (const Record & r : b.records) {
-    w.u32(r.task_id);
+    w.u64(r.task_id);
+    w.u16(r.revision);
     w.u16(r.winner_id);
     w.f32(r.winning_bid);
     w.u64(r.assign_version);
@@ -146,10 +147,11 @@ std::optional<CbbaStateBody> decodeCbbaState(const std::uint8_t * data, std::siz
   b.digest.resize(digests);
   for (DigestEntry & d : b.digest) {
     d.creator = r.u16();
-    d.min_seq = r.u16();
-    d.max_seq = r.u16();
-    d.known = r.u16();
-    d.closed = r.u16();
+    d.epoch = r.u16();
+    d.min_seq = r.u32();
+    d.max_seq = r.u32();
+    d.known = r.u32();
+    d.closed = r.u32();
     d.crc = r.u32();
   }
   const std::size_t stamps = r.u16();
@@ -167,7 +169,8 @@ std::optional<CbbaStateBody> decodeCbbaState(const std::uint8_t * data, std::siz
   }
   b.records.resize(records);
   for (Record & rec : b.records) {
-    rec.task_id = r.u32();
+    rec.task_id = r.u64();
+    rec.revision = r.u16();
     rec.winner_id = r.u16();
     rec.winning_bid = r.f32();
     rec.assign_version = r.u64();

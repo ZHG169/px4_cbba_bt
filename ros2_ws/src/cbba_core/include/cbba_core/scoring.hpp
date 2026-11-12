@@ -94,7 +94,7 @@ struct InsertionLimits
 };
 
 // 嘗試把 task 插入 path 的每個位置（min_position 以後、allow 允許的），回傳邊際成本最小的可行位置。
-// 載具類型不相容、任務不是 OPEN、或沒有可行位置時，feasible 為 false、score 為 0。
+// 平台或能力不符（capabilities.hpp 的 fitness）、任務不是 OPEN、或沒有可行位置時，feasible 為 false、score 為 0。
 Insertion bestInsertion(
   const AgentState & agent, const std::vector<Task> & path, const Task & task, double now,
   const ScoringParams & params, const InsertionLimits & limits = InsertionLimits{});

@@ -225,12 +225,7 @@ private:
     }
   }
 
-  static std::string taskName(std::uint32_t id)
-  {
-    char b[16];
-    std::snprintf(b, sizeof(b), "%08X", id);
-    return b;
-  }
+  static std::string taskName(TaskId id) {return taskHex(id);}
 
   static constexpr double kSlowWarnPeriod = 10.0;
 
@@ -240,7 +235,7 @@ private:
   double deadline_{0.0};
   Phase phase_{Phase::ROUTE};
   Vec3 fire_goal_;
-  std::uint32_t fire_task_{0};
+  TaskId fire_task_{0};
   double monitor_start_{-1.0};
   double divert_start_{-1.0};
 };
@@ -437,12 +432,7 @@ private:
     return BT::NodeStatus::SUCCESS;
   }
 
-  static std::string taskName(std::uint32_t id)
-  {
-    char b[16];
-    std::snprintf(b, sizeof(b), "%08X", id);
-    return b;
-  }
+  static std::string taskName(TaskId id) {return taskHex(id);}
 
   static bool num(const task_manager::Task & t, const std::string & k, double & out)
   {
@@ -460,7 +450,7 @@ private:
   Vec3 target_;                   // 巡檢點（hold_ 可能移到火點上空）
   double duration_{0.0};
   double start_{0.0};
-  std::optional<std::uint32_t> fire_task_;
+  std::optional<TaskId> fire_task_;
   bool others_fire_{false};       // 看到的是別台報的火（只印一次）
   double monitor_start_{-1.0};
   double left_at_{-1.0};          // 為了盯火離開巡檢點的時刻（−1 = 沒離開）

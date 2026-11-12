@@ -1,4 +1,4 @@
-// COMPLETION、COMPLETION_ACK、TASK_CLOSE（協定版本 2）：大小、位元組排列、來回編解碼、拒絕不合法的封包
+// COMPLETION、COMPLETION_ACK、TASK_CLOSE（協定版本 4：task_id 8 B）：大小、位元組排列、來回編解碼、拒絕不合法的封包
 #include <gtest/gtest.h>
 
 #include <vector>
@@ -47,12 +47,12 @@ TaskCloseBody close()
 
 TEST(WireCompletion, Sizes)
 {
-  EXPECT_EQ(completionSize(0), 53u);
-  EXPECT_EQ(completionAckSize(0), 54u);
-  EXPECT_EQ(taskCloseSize(0, 0), 55u);
+  EXPECT_EQ(completionSize(0), 57u);
+  EXPECT_EQ(completionAckSize(0), 58u);
+  EXPECT_EQ(taskCloseSize(0, 0), 59u);
   EXPECT_EQ(encodeCompletion(makeHeader(), announce()).size(), completionSize(4));
   EXPECT_EQ(encodeTaskClose(makeHeader(), close()).size(), taskCloseSize(4, 2));
-  EXPECT_EQ(taskCloseSize(4, 2), 55u + 8u + 12u);
+  EXPECT_EQ(taskCloseSize(4, 2), 59u + 8u + 12u);
 }
 
 TEST(WireCompletion, AnnounceLayoutAndRoundTrip)
@@ -60,7 +60,7 @@ TEST(WireCompletion, AnnounceLayoutAndRoundTrip)
   const auto bytes = encodeCompletion(makeHeader(), announce());
   const std::vector<std::uint8_t> body(bytes.begin() + kHeaderSize + kRelaySize, bytes.end());
   const std::vector<std::uint8_t> expected = {
-    0x00, 0x01, 0x00, 0x02,  // task_id
+    0, 0, 0, 0, 0x00, 0x01, 0x00, 0x02,  // task_id（uint64，舊型 ID）
     0x00, 0x03,              // executor_id
     0x11, 0x22, 0x33, 0x44,  // round_key
     0, 0, 0, 0, 0x00, 0x00, 0x00, 0x09,  // assign_version（uint64）
@@ -94,7 +94,7 @@ TEST(WireCompletion, AckRoundTrip)
   EXPECT_EQ(d->view, (std::vector<std::uint16_t>{3, 50}));
 
   auto bad = bytes;
-  bad[kHeaderSize + kRelaySize + 18] = 3;   // status 只能是 0～2
+  bad[kHeaderSize + kRelaySize + 22] = 3;   // status 只能是 0～2
   EXPECT_FALSE(decodeCompletionAck(bad));
   b.status = 3;
   EXPECT_THROW(encodeCompletionAck(makeHeader(50, 4), b), std::invalid_argument);
@@ -110,6 +110,10 @@ TEST(WireCompletion, CloseRoundTrip)
   ASSERT_EQ(d->acks.size(), 2u);
   EXPECT_EQ(d->acks[1].agent_id, 50);
   EXPECT_EQ(d->acks[1].ack_seq, 200u);
+
+  TaskCloseBody v4 = close();
+  v4.task_id = 0x00C8000300000001ULL;   // 版本 4 ID 不會截斷
+  EXPECT_EQ(decodeTaskClose(encodeTaskClose(makeHeader(), v4))->task_id, 0x00C8000300000001ULL);
 
   TaskCloseBody cancelled = close();
   cancelled.reason = kCloseCancelled;
@@ -130,6 +134,9 @@ TEST(WireCompletion, RejectsInvalid)
   b = close();
   b.acks[0].agent_id = 0;
   EXPECT_THROW(encodeTaskClose(makeHeader(), b), std::invalid_argument);
+  b = close();
+  b.task_id = 0x00C8000000000001ULL;   // 版本 4、世代 0
+  EXPECT_THROW(encodeTaskClose(makeHeader(), b), std::invalid_argument);
   CompletionBody a = announce();
   a.executor_id = 0;
   EXPECT_THROW(encodeCompletion(makeHeader(), a), std::invalid_argument);
@@ -138,7 +145,7 @@ TEST(WireCompletion, RejectsInvalid)
   EXPECT_THROW(encodeCompletion(makeHeader(), a), std::invalid_argument);
 
   auto bad = encodeTaskClose(makeHeader(), close());
-  bad[kHeaderSize + kRelaySize + 4] = 0;   // reason 0
+  bad[kHeaderSize + kRelaySize + 8] = 0;   // reason 0
   EXPECT_FALSE(decodeTaskClose(bad));
   bad = encodeTaskClose(makeHeader(), close());
   bad.pop_back();

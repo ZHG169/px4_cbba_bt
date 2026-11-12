@@ -1,4 +1,9 @@
-// 機間通訊封包的表頭（不依賴 ROS）：協定版本 3（2026-10-28；版本 2 是 2026-10-09）
+// 機間通訊封包的表頭（不依賴 ROS）：協定版本 4（2026-11-11；版本 3 是 2026-10-28、版本 2 是 2026-10-09）
+//
+// 版本 4（2-1b M0 合約，doc/cbba_m0_contract.md）：task_id 改 64 位元（建立者 16 ｜ 世代 16 ｜ 流水號 32；上半 32 位元是 0 的
+// 是舊型 ID，數值同版本 3，世代 0）；CBBA_STATE 每筆紀錄 27 B（加 revision）、摘要每筆 24 B，鍵是（建立者, 世代）；
+// TASK_ANNOUNCE 帶 2-1b 任務定義的 A 層（平台、能力、優先級、revision、任務組、時間、搶占、協同、TaskSpec 長度與 CRC）；
+// AGENT_STATE 帶能力。各封包的 task_id 都是 8 B。版本 3、4 互相拒收，全隊要一起重新編譯。
 //
 // 版本 3 只改補發（anti-entropy）：CBBA_STATE 帶壓縮的任務摘要、新增 GAP_REQUEST（缺口請求）和 SYNC_BATCH
 // （受限分批回覆），拿掉「摘要不同就把所有已結束的任務各補一次」。其他格式和版本 2 相同。見 doc/protocol_v3_sync.md。
@@ -15,7 +20,7 @@
 //   magic 2 | version 1 | type 1 | sender_id 2 | session_id 8 | sequence 4 | payload_length 2
 //
 //   magic           0x4342（"CB"），不是這個值就不是本協定的封包
-//   version         3（版本 2、3 互相拒收）
+//   version         4（和版本 2、3 互相拒收）
 //   type            封包種類（PacketType）
 //   sender_id       直接發送者機號（轉送時為轉送者）。0 保留為「無人」，拒收
 //   session_id      每次節點啟動隨機產生；(sender_id, session_id) 不同就是重開機過
@@ -62,7 +67,7 @@ enum class PacketType : std::uint8_t
 };
 
 constexpr std::uint16_t kMagic = 0x4342;
-constexpr std::uint8_t kVersion = 3;
+constexpr std::uint8_t kVersion = 4;
 constexpr std::size_t kHeaderSize = 20;
 constexpr std::size_t kRelaySize = 14;
 constexpr std::uint16_t kMaxAgentId = 0xFFFE;   // 0xFFFF 保留

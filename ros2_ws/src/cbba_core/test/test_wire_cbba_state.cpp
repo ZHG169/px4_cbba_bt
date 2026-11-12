@@ -1,4 +1,4 @@
-// CBBA_STATE（協定版本 3）：大小、位元組排列、來回編解碼、摘要、分批、拒絕不合法的封包
+// CBBA_STATE（協定版本 4）：大小、位元組排列、來回編解碼、摘要（建立者, 世代）、64 位元 task_id、revision、分批、拒絕不合法的封包
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -30,7 +30,7 @@ CbbaStateBody sample(std::size_t records = 2)
   b.snapshot_id = 77;
   b.stamps = {{1, 1000}, {2, 2000}, {50, 3000}};
   for (std::size_t i = 0; i < records; ++i) {
-    b.records.push_back(Record{0x00010001u + static_cast<std::uint32_t>(i),
+    b.records.push_back(Record{0x00010001u + static_cast<std::uint64_t>(i), static_cast<std::uint16_t>(i),
         static_cast<std::uint16_t>(i % 2 == 0 ? 50 : 0), i % 2 == 0 ? 12.5f : 0.0f,
         static_cast<std::uint64_t>(i), static_cast<std::uint16_t>(i % 2 == 0 ? 50 : 0),
         static_cast<std::uint8_t>(i % 2 == 0 ? 3 : 0)});
@@ -41,19 +41,22 @@ CbbaStateBody sample(std::size_t records = 2)
 
 TEST(WireCbbaState, Size)
 {
-  // 37 + 14D + 6N + 21R（版本 3 多了 digest_count 1 B 和摘要）；不參與出價、沒有摘要時 37 B
+  // 37 + 24D + 6N + 27R（版本 4：摘要 24 B、紀錄 27 B）；不參與出價、沒有摘要時 37 B
+  EXPECT_EQ(kDigestSize, 24u);
+  EXPECT_EQ(kRecordSize, 27u);
   EXPECT_EQ(cbbaStateSize(0, 0), 37u);
-  EXPECT_EQ(cbbaStateSize(3, 2, 4), 37u + 56u + 18u + 42u);
+  EXPECT_EQ(cbbaStateSize(3, 2, 4), 37u + 96u + 18u + 54u);
   EXPECT_EQ(encodeCbbaState(makeHeader(), CbbaStateBody{}).size(), 37u);
-  EXPECT_EQ(encodeCbbaState(makeHeader(), sample()).size(), 37u + 18u + 42u);
+  EXPECT_EQ(encodeCbbaState(makeHeader(), sample()).size(), 37u + 18u + 54u);
   CbbaStateBody b = sample();
   b.has_digest = true;
-  b.digest = {DigestEntry{1, 2, 9, 5, 1, 0xAABBCCDDu}, DigestEntry{50, 1, 1, 1, 0, 7}};
-  EXPECT_EQ(encodeCbbaState(makeHeader(), b).size(), 37u + 28u + 18u + 42u);
+  b.digest = {DigestEntry{1, 0, 2, 9, 5, 1, 0xAABBCCDDu}, DigestEntry{200, 3, 1, 1, 1, 0, 7}};
+  EXPECT_EQ(encodeCbbaState(makeHeader(), b).size(), 37u + 48u + 18u + 54u);
 }
 
 TEST(WireCbbaState, Layout)
 {
+  // 紀錄：task_id 8（版本 4 ID：建立者 0x00C8、世代 3、流水號 1）、revision 2、winner 2、bid 4、版本 8、執行者 2、狀態 1
   CbbaStateBody b;
   b.round_key = 0x01020304;
   b.exchange_step = 0x0506;
@@ -63,7 +66,7 @@ TEST(WireCbbaState, Layout)
   b.part_index = 1;
   b.part_count = 2;
   b.stamps = {{0x0032, 0x0A0B0C0D}};
-  b.records = {{0x00320001, 0x0003, 1.0f, 0x0102030405060708ULL, 0x0003, 2}};
+  b.records = {{0x00C8000300000001ULL, 0x0102, 0x0003, 1.0f, 0x0102030405060708ULL, 0x0003, 2}};
   const auto bytes = encodeCbbaState(makeHeader(), b);
   const std::vector<std::uint8_t> body(bytes.begin() + kHeaderSize, bytes.end());
   const std::vector<std::uint8_t> expected = {
@@ -77,7 +80,8 @@ TEST(WireCbbaState, Layout)
     0x00, 0x01,              // stamp_count
     0x00, 0x32, 0x0A, 0x0B, 0x0C, 0x0D,
     0x00, 0x01,              // record_count
-    0x00, 0x32, 0x00, 0x01,  // task_id
+    0x00, 0xC8, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,  // task_id（uint64）
+    0x01, 0x02,              // revision
     0x00, 0x03,              // winner_id
     0x3F, 0x80, 0x00, 0x00,  // winning_bid
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  // assign_version（uint64）
@@ -85,14 +89,15 @@ TEST(WireCbbaState, Layout)
     0x02,                    // assign_state：保留
   };
   EXPECT_EQ(body, expected);
+  EXPECT_EQ(body.size(), 17u + 6u + 27u);
 }
 
 TEST(WireCbbaState, DigestLayout)
 {
-  // 摘要（版本 3）：flags bit 1、每個建立者 14 B
+  // 摘要（版本 4）：flags bit 1、每個（建立者, 世代）24 B，逐欄大端序
   CbbaStateBody b;
   b.has_digest = true;
-  b.digest = {DigestEntry{0x0032, 0x0001, 0x0102, 0x0003, 0x0001, 0x0A0B0C0Du}};
+  b.digest = {DigestEntry{0x0032, 0x0004, 0x00000001, 0x00010102, 0x00000003, 0x00000001, 0x0A0B0C0Du}};
   const auto bytes = encodeCbbaState(makeHeader(), b);
   const std::vector<std::uint8_t> body(bytes.begin() + kHeaderSize, bytes.end());
   const std::vector<std::uint8_t> expected = {
@@ -104,10 +109,11 @@ TEST(WireCbbaState, DigestLayout)
     0x00, 0x01,              // part_index、part_count
     0x01,                    // digest_count
     0x00, 0x32,              // creator
-    0x00, 0x01,              // min_seq
-    0x01, 0x02,              // max_seq
-    0x00, 0x03,              // known
-    0x00, 0x01,              // closed
+    0x00, 0x04,              // epoch
+    0x00, 0x00, 0x00, 0x01,  // min_seq
+    0x00, 0x01, 0x01, 0x02,  // max_seq
+    0x00, 0x00, 0x00, 0x03,  // known_count
+    0x00, 0x00, 0x00, 0x01,  // closed_count
     0x0A, 0x0B, 0x0C, 0x0D,  // crc
     0x00, 0x00,              // stamp_count
     0x00, 0x00,              // record_count
@@ -120,13 +126,13 @@ TEST(WireCbbaState, DigestRoundTripAndEmptyDigest)
   // 有摘要而 D = 0（一個任務都不知道）和沒有摘要要分得出來
   CbbaStateBody b = sample();
   b.has_digest = true;
-  b.digest = {DigestEntry{1, 2, 9, 5, 1, 0xAABBCCDDu}, DigestEntry{50, 1, 1, 1, 0, 7}};
+  b.digest = {DigestEntry{1, 0, 2, 9, 5, 1, 0xAABBCCDDu}, DigestEntry{200, 3, 70000, 70001, 2, 0, 7}};
   auto d = decodeCbbaState(encodeCbbaState(makeHeader(), b));
   ASSERT_TRUE(d);
   EXPECT_TRUE(d->has_digest);
   ASSERT_EQ(d->digest.size(), 2u);
   EXPECT_EQ(d->digest[0], b.digest[0]);
-  EXPECT_EQ(d->digest[1], b.digest[1]);
+  EXPECT_EQ(d->digest[1], b.digest[1]);   // 世代 ≥ 1 的流水號可以超過 0xFFFF
   EXPECT_EQ(d->records.size(), 2u);
 
   b.digest.clear();
@@ -141,7 +147,9 @@ TEST(WireCbbaState, DigestRoundTripAndEmptyDigest)
 
 TEST(WireCbbaState, RoundTrip)
 {
-  const auto d = decodeCbbaState(encodeCbbaState(makeHeader(), sample()));
+  CbbaStateBody b = sample();
+  b.records[1].task_id = 0x00C8000300000005ULL;   // 版本 4 ID
+  const auto d = decodeCbbaState(encodeCbbaState(makeHeader(), b));
   ASSERT_TRUE(d);
   EXPECT_EQ(d->round_key, 0xDEADBEEFu);
   EXPECT_EQ(d->exchange_step, 12);
@@ -153,8 +161,11 @@ TEST(WireCbbaState, RoundTrip)
   EXPECT_EQ(d->stamps[2].stamp_ms, 3000u);
   ASSERT_EQ(d->records.size(), 2u);
   EXPECT_EQ(d->records[0].task_id, 0x00010001u);
+  EXPECT_EQ(d->records[0].revision, 0);
   EXPECT_EQ(d->records[0].winner_id, 50);
   EXPECT_FLOAT_EQ(d->records[0].winning_bid, 12.5f);
+  EXPECT_EQ(d->records[1].task_id, 0x00C8000300000005ULL);   // 不會截斷
+  EXPECT_EQ(d->records[1].revision, 1);
   EXPECT_EQ(d->records[1].winner_id, 0);   // 認得、沒人得標
   EXPECT_EQ(d->records[0].assign_version, 0u);
   EXPECT_EQ(d->records[0].assignee_id, 50);
@@ -170,7 +181,7 @@ TEST(WireCbbaState, SplitKeepsEveryPartUnderLimitWithFullStamps)
   const CbbaStateBody full = sample(300);
   const auto parts = splitCbbaState(full, 1200);
   ASSERT_GT(parts.size(), 1u);
-  std::set<std::uint32_t> ids;
+  std::set<std::uint64_t> ids;
   for (std::size_t i = 0; i < parts.size(); ++i) {
     const auto bytes = encodeCbbaState(makeHeader(), parts[i]);
     EXPECT_LE(bytes.size(), 1200u);
@@ -183,16 +194,16 @@ TEST(WireCbbaState, SplitKeepsEveryPartUnderLimitWithFullStamps)
     }
   }
   EXPECT_EQ(ids.size(), 300u);
-  // (1200 − 37 − 18) / 21 = 54 筆一批 → 6 批
-  EXPECT_EQ(parts.size(), 6u);
-  // 有摘要時每一批都帶，算在固定大小裡：(1200 − 37 − 140 − 18) / 21 = 47 筆一批 → 7 批
+  // (1200 − 37 − 18) / 27 = 42 筆一批 → 8 批
+  EXPECT_EQ(parts.size(), 8u);
+  // 有摘要時每一批都帶，算在固定大小裡：(1200 − 37 − 240 − 18) / 27 = 33 筆一批 → 10 批
   CbbaStateBody with_digest = full;
   with_digest.has_digest = true;
   for (std::uint16_t c = 1; c <= 10; ++c) {
-    with_digest.digest.push_back(DigestEntry{c, 1, 30, 30, 10, c});
+    with_digest.digest.push_back(DigestEntry{c, 0, 1, 30, 30, 10, c});
   }
   const auto dparts = splitCbbaState(with_digest, 1200);
-  EXPECT_EQ(dparts.size(), 7u);
+  EXPECT_EQ(dparts.size(), 10u);
   for (const auto & p : dparts) {
     EXPECT_LE(encodeCbbaState(makeHeader(), p).size(), 1200u);
     EXPECT_EQ(p.digest.size(), 10u);
@@ -228,7 +239,13 @@ TEST(WireCbbaState, RejectsInvalid)
   EXPECT_FALSE(decodeCbbaState(bad));
 
   b = sample();
-  b.records[0].task_id = 0x0000FFFF;   // 建立者 0
+  b.records[0].task_id = 0x0000FFFF;   // 舊型 ID、建立者 0
+  EXPECT_THROW(encodeCbbaState(makeHeader(), b), std::invalid_argument);
+  b = sample();
+  b.records[0].task_id = 0x00C8000000000001ULL;   // 版本 4 ID、世代 0
+  EXPECT_THROW(encodeCbbaState(makeHeader(), b), std::invalid_argument);
+  b = sample();
+  b.records[0].task_id = 0x0000000300000001ULL;   // 版本 4 ID、建立者 0
   EXPECT_THROW(encodeCbbaState(makeHeader(), b), std::invalid_argument);
   b = sample();
   b.records[0].winning_bid = -1.0f;
@@ -249,9 +266,9 @@ TEST(WireCbbaState, RejectsInvalid)
   b.stamps[0].agent_id = 0;
   EXPECT_THROW(encodeCbbaState(makeHeader(), b), std::invalid_argument);
 
-  // 摘要：建立者 0、known 0、closed > known、min_seq > max_seq 都不合法
-  for (const DigestEntry & d : {DigestEntry{0, 1, 1, 1, 0, 0}, DigestEntry{1, 1, 1, 0, 0, 0},
-      DigestEntry{1, 1, 1, 1, 2, 0}, DigestEntry{1, 5, 4, 1, 0, 0}})
+  // 摘要：建立者 0、known 0、closed > known、min_seq > max_seq、世代 0 而流水號超過 0xFFFF 都不合法
+  for (const DigestEntry & d : {DigestEntry{0, 0, 1, 1, 1, 0, 0}, DigestEntry{1, 0, 1, 1, 0, 0, 0},
+      DigestEntry{1, 0, 1, 1, 1, 2, 0}, DigestEntry{1, 0, 5, 4, 1, 0, 0}, DigestEntry{1, 0, 1, 0x10000, 2, 0, 0}})
   {
     b = sample();
     b.has_digest = true;

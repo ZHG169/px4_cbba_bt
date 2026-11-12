@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "cbba_core/capabilities.hpp"
 #include "cbba_core/mission_sim.hpp"
 #include "cbba_core/network_sim.hpp"
 
@@ -244,7 +245,7 @@ void writeAssignment(
       const Insertion alone = bestInsertion(s, {}, task, 0.0, agent.params());
       const double arrival = alone.feasible ? alone.eval.legs.front().arrival : 0.0;
       const auto it = holder.find(task.id);
-      bids_csv << task.id << "," << int(s.id) << "," << (isCompatible(s.type, task.type) ? 1 : 0)
+      bids_csv << task.id << "," << int(s.id) << "," << (fitness(s, task) == Fitness::OK ? 1 : 0)
                << "," << (with_path.feasible ? 1 : 0) << ","
                << (with_path.feasible ? with_path.marginal_cost : -1.0) << "," << with_path.score
                << "," << (alone.feasible ? 1 : 0) << ","

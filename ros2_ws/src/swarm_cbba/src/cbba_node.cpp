@@ -3,7 +3,8 @@
 // 2026-10-12 起照機器狗端（伯宇，spec v1.1 §2）的套件與介面：launch 給 namespace、話題用相對名稱、
 // params yaml（config/cbba_uav.yaml、cbba_v60.yaml），BT 端不用改。核心與機間協定用 cbba_core（協定版本 2）。
 //
-// 機間（mesh）：UDP multicast，協定版本 2（task_id 識別任務，見 cbba_core/doc/protocol.md）
+// 機間（mesh）：UDP multicast，協定版本 4（2026-11-11；task_id 64 位元，見 cbba_core/doc/protocol.md、cbba_m0_contract.md）。
+// 機內話題的 task_id 也是 uint64（swarm_interfaces，2026-11-11）
 // 機內（DDS），話題在 /<namespace> 底下：
 //   BT → CBBA   robot_state  (swarm_interfaces/RobotState)   位置（map ENU）、電量、mode；約 2 Hz
 //               task_result  (swarm_interfaces/TaskResult)   任務結束時一次；success = false 交回競標池，
@@ -21,7 +22,7 @@
 //               task_orphaned (swarm_interfaces/Task)        孤兒任務（2026-10-17，我們加的）：任務還開著，但 orphan_warn_sec 內
 //                                                            一直沒有人得標、也沒有正式指派。只通知（給地面站），不處理
 //   CBBA → 測試、地面站
-//               cbba_path    (std_msgs/UInt32MultiArray)     這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次
+//               cbba_path    (std_msgs/UInt64MultiArray)     這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次（2026-11-11 起 64 位元）
 //                                                            （2026-10-27，我們加的）：current_task 只有路徑第一個，弱網測試要比對
 //                                                            「每台分到幾個任務」才看得到後面的；BT 不用訂
 //               cbba_tx      (std_msgs/UInt64MultiArray)     送出位元組的累計 [全部, 重傳, 轉送]，每 tx_stats_sec（0.2 s）發一次
@@ -68,13 +69,13 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/u_int32_multi_array.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
 
 #include "cbba_core/assignment_manager.hpp"
+#include "cbba_core/capabilities.hpp"
 #include "cbba_core/cbba_comm.hpp"
 #include "cbba_core/udp_link.hpp"
 
@@ -237,6 +238,16 @@ public:
     s.energy_per_meter = declare_parameter<double>("energy_per_meter", s.energy_per_meter);
     s.hover_energy_per_sec = declare_parameter<double>("hover_energy_per_sec", s.hover_energy_per_sec);
     s.cruise_speed = declare_parameter<double>("cruise_speed", s.cruise_speed);
+    // 能力標籤（2-1b M0 合約第一節，2026-11-11）：之後從 fleet.yaml 讀；空 = 依 agent_type 的預設
+    // （UAV：mobility_air、rgb_camera；UGV：mobility_ground、rgb_camera），和原本的相容表結果相同
+    const auto cap_names = declare_parameter<std::vector<std::string>>(
+        "capabilities", std::vector<std::string>{});
+    std::string bad_cap;
+    const auto caps = parseCapabilities(cap_names, &bad_cap);
+    if (!caps) {
+      throw std::invalid_argument("capabilities: unknown capability \"" + bad_cap + "\"");
+    }
+    s.capabilities = *caps;
 
     // ---------- 出價、協定、UDP ----------
     ScoringParams scoring;
@@ -315,9 +326,9 @@ public:
     }
     orphan_pub_ = create_publisher<TaskMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
     // 路徑（2026-10-27）：只要最新的一份，晚訂閱的也拿得到
-    path_pub_ = create_publisher<std_msgs::msg::UInt32MultiArray>(topic("cbba_path"),
+    path_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>(topic("cbba_path"),
         rclcpp::QoS(1).reliable().transient_local());
-    path_pub_->publish(std_msgs::msg::UInt32MultiArray());
+    path_pub_->publish(std_msgs::msg::UInt64MultiArray());
     // 送出位元組的累計（2026-11-09，第 5 週頻寬圖）：[全部, 重傳, 轉送]，送進 UDP 之前（tc 丟掉的也算），
     // 每 tx_stats_sec 發一次；整合測試用固定的 10 s 區間相減，算每台的 TX、重傳 TX
     tx_stats_sec_ = declare_parameter<double>("tx_stats_sec", tx_stats_sec_);
@@ -351,6 +362,8 @@ public:
       result_sub_->get_topic_name(), new_task_sub_->get_topic_name(),
       participate_ == "always" ? "一律（位置與電量來自參數）" :
       "robot_state 在 state_timeout 內有更新且 mode = AUTO");
+    RCLCPP_INFO(get_logger(), "平台 %s，能力 %s%s", platformName(platformOf(s.type)),
+      capabilitiesToString(availableCaps(s)).c_str(), s.capabilities == 0 ? "（依 agent_type 的預設）" : "");
   }
 
   ~CbbaNode() override
@@ -420,6 +433,11 @@ private:
   void onNewTask(const TaskMsg & msg)
   {
     const double now = wallNow();
+    // 協定版本 3 的 TASK_ANNOUNCE 只帶舊型任務（1～3）；新型任務（type 0，平台／能力／優先級）是協定版本 4、由閘道建立
+    if (msg.type < TaskMsg::AIR_RECON || msg.type > TaskMsg::PATROL) {
+      RCLCPP_WARN(get_logger(), "新任務 %s 沒有加入：type %u 不是 1～3", taskName(msg.task_id).c_str(), msg.type);
+      return;
+    }
     Task t;
     t.id = msg.task_id;
     t.type = static_cast<TaskType>(msg.type);
@@ -693,7 +711,7 @@ private:
       }
       RCLCPP_INFO(get_logger(), "路徑：%s", s.empty() ? "（無）" : s.c_str());
       last_path_ = path;
-      std_msgs::msg::UInt32MultiArray msg;
+      std_msgs::msg::UInt64MultiArray msg;
       msg.data.assign(path.begin(), path.end());
       path_pub_->publish(msg);
     }
@@ -821,7 +839,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 預設只有無人機（publish_announced）
   rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
-  rclcpp::Publisher<std_msgs::msg::UInt32MultiArray>::SharedPtr path_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr path_pub_;
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;

@@ -3,7 +3,7 @@
 #  [uav 容器] 模擬裡跑伯宇的狗 BT（task_manager，2026-10-27），身體用方塊（sim 容器的 fake_nav_body.py）
 #
 #  用法：
-#    dog_bt.sh build                       編譯伯宇的 task_manager、task_manager_interfaces（handoff 原檔，不改）
+#    dog_bt.sh build                       編譯伯宇的 task_manager、task_manager_interfaces（handoff；2026-11-11 起介接層 task_id 改 uint64，見 docker/dog/task_manager_uint64.patch）
 #                                          到 <repo>/dog_ws（overlay 在 ros2_ws/install 上；不碰共用的 ros2_ws/build、install）
 #    dog_bt.sh start <ns> <機號> [任務檔]     啟動一隻狗的 task_manager（前景；itest 用 docker exec -d 開）；
 #                                          任務檔預設 docker/dog/idle_mission.yaml（不巡邏）；itest 給巡邏檔時照伯宇的巡檢線走（2026-11-05）
@@ -41,7 +41,8 @@ case "${1:-}" in
         fi
         mkdir -p "${DOG_WS}"
         cd "${DOG_WS}"
-        # --base-paths 直接指到 handoff，不複製、不改他的檔案；他更新時覆蓋 handoff 再 build 一次
+        # --base-paths 直接指到 handoff，不複製；2026-11-11 起他的介接層 task_id 改 uint64（docker/dog/task_manager_uint64.patch），
+        # 他更新時覆蓋 handoff、照 patch 開頭的說明重套，再 build 一次
         python3 -m colcon build --base-paths "${HANDOFF}" \
             --build-base "${DOG_WS}/build" --install-base "${DOG_WS}/install" \
             --packages-select task_manager_interfaces task_manager --cmake-args -DCMAKE_BUILD_TYPE=Release

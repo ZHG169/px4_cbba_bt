@@ -41,6 +41,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 |---|---|---|
 | `agent_id` | 環境變數 `AGENT_ID`，沒有就 50 | 機號 1～254，全隊不能重複。協定版本 2 以 task_id 識別任務，任何機號都能建立任務（版本 1 只有 1～8 能）。協定本身是 1～65534，節點限制在 254 是因為 `RobotState.agent_id` 是 uint8。狗用 50 |
 | `agent_type` | `UGV` | `UAV` 或 `UGV`（2026-10-12 起取代 `vehicle_type`，照機器狗端）：AGENT_STATE 的載具種類（無人機只接 AIR_RECON，狗只接 GROUND_INTERVENTION、PATROL），以及能量模型的預設值 |
+| `capabilities` | `[]` | 能力標籤（2026-11-11，2-1b M0 合約第一節；名稱見 `capabilities.hpp`，例如 `[mobility_ground, rgb_camera, thermal_camera]`）。空 = 依 `agent_type` 的預設（UAV：mobility_air、rgb_camera；UGV：mobility_ground、rgb_camera），和原本的相容表結果相同。不認得的名稱拒絕啟動。之後改從 `fleet.yaml` 讀 |
 | `ns` | 空字串 | 空＝話題用相對名稱，由 launch 的 namespace（或 `-r __ns:=/uavN`）決定；給了就是 `/<ns>/current_task`… |
 | `mesh_ip` | 環境變數 `MESH_IP` | UDP 只走這張網卡（mesh）。空字串由系統決定，可能會走到 PX4 的線材網路 |
 | `udp_group`、`udp_port` | `239.255.42.99`、`14600` | multicast 群組。**全隊（含機器狗）要一樣** |

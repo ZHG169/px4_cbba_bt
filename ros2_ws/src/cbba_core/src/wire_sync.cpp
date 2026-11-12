@@ -9,6 +9,13 @@ namespace cbba_core::wire
 
 namespace
 {
+// 流水號範圍：世代 0（舊型 ID）16 位元，其他 32 位元
+bool seqRangeOk(std::uint16_t epoch, std::uint32_t first, std::size_t count)
+{
+  const std::uint64_t limit = epoch == 0 ? 0x10000ull : 0x100000000ull;
+  return static_cast<std::uint64_t>(first) + count <= limit;
+}
+
 bool validItemType(std::uint8_t type)
 {
   return type == static_cast<std::uint8_t>(PacketType::TASK_ANNOUNCE) ||
@@ -20,7 +27,7 @@ std::vector<std::uint8_t> encodeGapRequest(Header header, const GapRequestBody &
 {
   const std::size_t count = b.states.size();
   if (!validAgentId(b.target_id) || !validAgentId(b.creator) || count == 0 || count > kMaxGapSeqs ||
-    static_cast<std::size_t>(b.first_seq) + count > 0x10000)
+    !seqRangeOk(b.epoch, b.first_seq, count))
   {
     throw std::invalid_argument("invalid GAP_REQUEST body");
   }
@@ -31,7 +38,8 @@ std::vector<std::uint8_t> encodeGapRequest(Header header, const GapRequestBody &
   ByteWriter w(out);
   w.u16(b.target_id);
   w.u16(b.creator);
-  w.u16(b.first_seq);
+  w.u16(b.epoch);
+  w.u32(b.first_seq);
   w.u16(static_cast<std::uint16_t>(count));
   for (std::size_t i = 0; i < count; i += 4) {
     std::uint8_t byte = 0;
@@ -58,11 +66,11 @@ std::optional<GapRequestBody> decodeGapRequest(const std::uint8_t * data, std::s
   GapRequestBody b;
   b.target_id = r.u16();
   b.creator = r.u16();
-  b.first_seq = r.u16();
+  b.epoch = r.u16();
+  b.first_seq = r.u32();
   const std::size_t count = r.u16();
   if (!r.ok() || count == 0 || count > kMaxGapSeqs || size != gapRequestSize(count) ||
-    !validAgentId(b.target_id) || !validAgentId(b.creator) ||
-    static_cast<std::size_t>(b.first_seq) + count > 0x10000)
+    !validAgentId(b.target_id) || !validAgentId(b.creator) || !seqRangeOk(b.epoch, b.first_seq, count))
   {
     return std::nullopt;
   }

@@ -1,5 +1,7 @@
 #include "cbba_core/cbba_agent.hpp"
 
+#include "cbba_core/capabilities.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -181,6 +183,11 @@ CbbaAgent::BidInfo CbbaAgent::bidFor(TaskId id, double now) const
   if (!exec_.accept_new) {
     return {0.0, "busy"};
   }
+  switch (fitness(state_, it->second)) {
+    case Fitness::PLATFORM: return {0.0, "platform"};
+    case Fitness::CAPABILITY: return {0.0, "capability"};
+    case Fitness::OK: break;
+  }
   const InsertionLimits limits = limitsFor(it->second, path_, now);
   const Insertion ins = bestInsertion(state_, pathTasks(path_), it->second, now, params_, limits);
   if (!ins.feasible || !(ins.score > 0.0)) {
@@ -212,6 +219,7 @@ bool CbbaAgent::buildBundle(double now)
     TaskId best_id = 0;
     Insertion best;
     double best_bid = 0.0;
+    int best_prio = 0;
 
     for (const auto & [id, task] : tasks_) {
       if (task.status != TaskStatus::OPEN) {continue;}
@@ -241,8 +249,11 @@ bool CbbaAgent::buildBundle(double now)
       }
       if (!can_bid) {continue;}
 
-      // 以實際分數挑選（出價被上限壓平時，仍先接真正最划算的）
-      if (!best.feasible || ins.score > best.score) {
+      // 先挑優先級高的（2-1：任何距離或電量差都不能跨級，2026-11-11），同級再以實際分數挑選
+      // （出價被上限壓平時，仍先接真正最划算的）
+      const int prio = taskPriority(task);
+      if (!best.feasible || prio > best_prio || (prio == best_prio && ins.score > best.score)) {
+        best_prio = prio;
         best = std::move(ins);
         best_id = id;
         best_bid = bid;

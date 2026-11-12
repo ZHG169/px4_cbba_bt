@@ -277,9 +277,24 @@ TaskSpec（或任務沒有 TaskSpec）時才發 current_task，所以 BT 拿到�
 ```
 task_id (uint64) = creator (16) | epoch (16) | seq (32)
    creator  建立者機號（1～254；0 保留 = 無人）
-   epoch    建立者的「世代」：每次啟動 + 1，存檔（見下）；0 保留
+   epoch    建立者的「世代」：每次啟動 + 1，存檔（見下）；0 保留給舊型 ID
    seq      這個世代內的流水號，從 1 開始；0 保留
 ```
+
+**舊型 ID 相容模式**（使用者 2026-11-11 定案）：上半 32 位元是 0 的 id 是舊型 ID，數值和版本 3 完全一樣
+（`機號 × 65536 + 流水號`：建立者在 16～31 位元、流水號在 0～15 位元），視為 **epoch = 0**。
+
+| | 舊型 ID（epoch 0） | 版本 4 ID（epoch ≥ 1） |
+|---|---|---|
+| 誰產生 | BT 自己算（現在的 `new_task`、itest、假狗、伯宇的狗 BT） | **只由 cbba_node／閘道產生**（不新增 `cbba_epoch` 話題，BT 不用知道世代） |
+| 判斷 | 上半 32 位元 = 0 | 上半 32 位元 ≠ 0（建立者 ≥ 1，所以不會和舊型混淆） |
+| 重開機重用 | 照版本 3：開機同步擋下（`rejected_local_tasks`） | 換世代，不會撞 |
+| 期限 | 保留到 M3 | — |
+
+**狗端的通訊由使用者統一負責**（2026-11-11）：第 2 步時狗和無人機一起改，current_task、BT 內部的任務識別（`externalTaskId`、
+`current_task_id`、外部點名稱）、task_result **全部改成 uint64**；BT 的 MissionTree、SplitTask、Switch、Action 流程不動。
+要改的：我們的無人機 BT（骨架副本、`uav_task_manager_node`、`px4_platform`、備用 BT）、伯宇的狗 BT 的介接層（`dog_ws` 編譯的那份）、
+`fake_dog.py`、itest。
 
 | 原本的問題 | 怎麼解決 |
 |---|---|
@@ -318,10 +333,10 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 
 | 地方 | 改動 |
 |---|---|
-| `types.hpp` | `TaskId` → `std::uint64_t`；`makeTaskId(creator, epoch, seq)`、`taskCreator()`、`taskEpoch()`、`taskSeq()` |
+| `types.hpp` | `TaskId` → `std::uint64_t`；`makeTaskId(creator, epoch, seq)`、`makeLegacyTaskId(creator, seq)`、`taskCreator()`、`taskEpoch()`（舊型 0）、`taskSeq()` |
 | CBBA_STATE 紀錄 | task_id 4 → 8 B、加 revision 2 B：每筆統一 **27 B**（第二節） |
-| 版本 3 的摘要 | 摘要的鍵從「建立者」改成（建立者, 世代）；min_seq、max_seq、known、closed 改 uint32：每筆 14 → **22 B**。同一個建立者的舊世代任務全部結束後，摘要就固定不變 |
-| GAP_REQUEST | 帶（建立者, 世代）、起始流水號 uint32 |
+| 版本 3 的摘要 | 摘要的鍵從「建立者」改成（建立者, 世代）；每筆固定 **24 B**（使用者 2026-11-11）：creator u16、epoch u16、min_seq u32、max_seq u32、known_count u32、closed_count u32、crc u32，**逐欄序列化（大端序），不用 sizeof(struct)**。舊型 ID 的鍵是（機號, 0）。同一個建立者的舊世代任務全部結束後，摘要就固定不變 |
+| GAP_REQUEST | 帶（建立者, 世代）、起始流水號 uint32；點陣圖照舊每個流水號 2 bit |
 | TASK_ANNOUNCE、COMPLETION／ACK、TASK_CLOSE、SYNC_BATCH | task_id 欄位 8 B |
 | 開機同步 | 「查出 BT 重開機後重用 task_id」的那段（`rejected_local_tasks`）在有世代後不再需要；保留當成最後防線 |
 | `swarm_interfaces` | `Task.task_id`、`TaskResult.task_id`、`Bid.task_id` uint32 → **uint64**（v2.0）。**伯宇的 BT 要改**：handoff 的 task_manager 約 12 處 `uint32_t task_id`（`externalTaskId`、`current_task_id`…）；我們的骨架副本、`uav_task_manager_node`、`px4_platform`、itest、`fake_dog.py` 一起改 |

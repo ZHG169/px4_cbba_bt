@@ -1,4 +1,4 @@
-// CbbaComm（協定版本 3）：經過模擬的廣播網路（誰聽得到誰、掉包、延遲）跑完整的機間協定
+// CbbaComm（協定版本 4）：經過模擬的廣播網路（誰聽得到誰、掉包、延遲）跑完整的機間協定
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -12,8 +12,37 @@ using namespace cbba_test;
 
 TEST(TaskName, Hex)
 {
+  // 舊型照版本 3（8 位十六進位）；版本 4 是 建立者.世代.流水號
   EXPECT_EQ(taskName(makeTaskId(3, 5)), "00030005");
   EXPECT_EQ(taskName(makeTaskId(50, 1)), "00320001");
+  EXPECT_EQ(taskName(makeTaskId(200, 3, 0x11)), "00C8.0003.00000011");
+}
+
+TEST(TaskId, LegacyAndV4)
+{
+  // 舊型 ID（上半 32 位元是 0）數值和版本 3 一樣、世代 0；版本 4 的建立者、世代、流水號各自取得出來
+  const TaskId legacy = makeTaskId(50, 7);
+  EXPECT_EQ(legacy, 0x00320007u);
+  EXPECT_TRUE(isLegacyTaskId(legacy));
+  EXPECT_EQ(taskCreator(legacy), 50);
+  EXPECT_EQ(taskEpoch(legacy), 0);
+  EXPECT_EQ(taskSeq(legacy), 7u);
+  EXPECT_EQ(makeTaskId(50, 0, 7), legacy);   // 世代 0 = 舊型
+
+  const TaskId v4 = makeTaskId(200, 3, 0x89ABCDEFu);
+  EXPECT_EQ(v4, 0x00C8000389ABCDEFULL);
+  EXPECT_FALSE(isLegacyTaskId(v4));
+  EXPECT_EQ(taskCreator(v4), 200);
+  EXPECT_EQ(taskEpoch(v4), 3);
+  EXPECT_EQ(taskSeq(v4), 0x89ABCDEFu);
+  EXPECT_EQ(formatTaskId(v4), "200.3.2309737967");
+  EXPECT_EQ(formatTaskId(legacy), "3276807");
+
+  EXPECT_TRUE(validTaskId(legacy));
+  EXPECT_TRUE(validTaskId(v4));
+  EXPECT_FALSE(validTaskId(0x0000FFFFu));               // 舊型、建立者 0
+  EXPECT_FALSE(validTaskId(0x00C8000000000001ULL));     // 版本 4、世代 0
+  EXPECT_FALSE(validTaskId(0x0000000300000001ULL));     // 版本 4、建立者 0
 }
 
 TEST(StampMs, NearNow)
@@ -106,7 +135,7 @@ TEST(CbbaComm, AgentStateFields)
   EXPECT_TRUE(b.flags.armed);
   EXPECT_TRUE(b.flags.offboard);
   EXPECT_FALSE(b.flags.landed);
-  EXPECT_EQ(b.path, std::vector<std::uint32_t>{makeTaskId(2, 1)});
+  EXPECT_EQ(b.path, std::vector<std::uint64_t>{makeTaskId(2, 1)});
   EXPECT_EQ(b.active_task, makeTaskId(2, 1));
   EXPECT_FALSE(b.has_queued);
   EXPECT_EQ(b.neighbors, std::vector<std::uint16_t>{1});
@@ -165,7 +194,7 @@ TEST(CbbaComm, UnknownTaskDoesNotEraseWinner)
   inject({});                       // 不認得：沒有紀錄
   EXPECT_EQ(swarm.node(1).agent().winner(t), 2);
   swarm.run(0.05);
-  inject({{t, 0, 0.0f}});           // 對照：認得但沒人得標
+  inject({{t, 0, 0, 0.0f}});        // 對照：認得但沒人得標（task_id、revision、winner、bid）
   EXPECT_NE(swarm.node(1).agent().winner(t), 2);
 }
 
@@ -274,7 +303,7 @@ TEST(CbbaComm, NonParticipantDoesNotBid)
   EXPECT_TRUE(b.stamps.empty());                     // 沒有 s
   ASSERT_EQ(b.records.size(), 1u);                   // 紀錄照送（正式指派要傳得出去），收的那端不交給規則
   EXPECT_EQ(wire::encodeCbbaState(wire::Header{PacketType::CBBA_STATE, 3, 1, 1, 0}, b).size(),
-    wire::cbbaStateSize(0, 1));                      // 37 + 21（協定版本 3 的固定大小多了 digest_count）
+    wire::cbbaStateSize(0, 1));                      // 37 + 27（協定版本 4 的紀錄 27 B）
   EXPECT_TRUE(swarm.node(1).converged(swarm.now()));   // 不參與的鄰居不影響收斂判定
 
   swarm.node(3).setParticipating(true, swarm.now());  // 起飛
@@ -646,7 +675,7 @@ TEST(CbbaComm, ManyTasksSplitIntoParts)
   EXPECT_TRUE(swarm.consistent());
   const auto full = swarm.node(2).cbbaStateBody(swarm.now());
   EXPECT_EQ(full.records.size(), 150u);
-  EXPECT_EQ(wire::splitCbbaState(full).size(), 3u);   // 54 筆一批
+  EXPECT_EQ(wire::splitCbbaState(full).size(), 4u);   // (1200 − 37 − 18) / 27 = 42 筆一批（協定版本 4）
   const auto & st = swarm.node(2).stats();
   EXPECT_GT(st.cbba_parts, 0);
   EXPECT_EQ(st.malformed, 0);
@@ -708,8 +737,8 @@ TEST(CbbaComm, QuietWhenConverged)
   swarm.run(3.0);
   ASSERT_TRUE(swarm.consistent());
 
-  // 收斂後每架每秒：CBBA_STATE 5 則（5 架 5 任務：37 + 6×5 + 21×5 = 172 B），其中 1 則帶摘要（5 個建立者 × 14 B）、
-  // AGENT_STATE 2 則（路徑 1、鄰居 4：74 + 4 + 8 = 86 B），加上每 5 s 一則保底重播（65 B）。沒有缺口請求、補發
+  // 收斂後每架每秒（協定版本 4）：CBBA_STATE 5 則（5 架 5 任務：37 + 6×5 + 27×5 = 202 B），其中 1 則帶摘要（5 個建立者 × 24 B）、
+  // AGENT_STATE 2 則（路徑 1、鄰居 4：90 + 8 + 8 = 106 B），加上每 5 s 一則保底重播（123 B）。沒有缺口請求、補發
   // 缺口請求只看這 10 s（收斂之前五台同時建任務，摘要短暫不一致時有請求是正常的）
   std::vector<int> requests_before;
   for (AgentId a = 1; a <= 5; ++a) {
@@ -718,7 +747,7 @@ TEST(CbbaComm, QuietWhenConverged)
   const std::size_t before = swarm.bytes();
   swarm.run(10.0);
   const double per_agent_per_sec = (swarm.bytes() - before) / 10.0 / 5.0;
-  EXPECT_NEAR(per_agent_per_sec, 5 * 172.0 + 5 * 14.0 + 2 * 86.0 + 65.0 / 5.0, 30.0);
+  EXPECT_NEAR(per_agent_per_sec, 5 * 202.0 + 5 * 24.0 + 2 * 106.0 + 123.0 / 5.0, 30.0);
   for (AgentId a = 1; a <= 5; ++a) {
     EXPECT_EQ(swarm.node(a).stats().gap_requests, requests_before[a - 1]) << "agent " << a;
   }
@@ -1004,7 +1033,9 @@ TEST(Sync, ClosedTasksAreNotResentWhenOneTaskIsMissing)
   swarm.add(3, {20, 0, 5});
   swarm.run(2.0);
   createAndCancel(swarm, 200);
-  swarm.run(3.0);
+  // 建立、取消 200 個任務時摘要短暫不一致，會直接推送最近的新增與結束（受 repair_rate 限速）。等佇列送完再開始算：
+  // 協定版本 4 的任務定義 123 B，200 筆（定義＋結束）每台約 38 kB，8 kB/s 約 4.7 s（版本 3 時 3 s 就夠）
+  swarm.run(8.0);
   ASSERT_EQ(swarm.node(3).roundKey(), swarm.node(1).roundKey());
 
   const int before = taskTraffic(swarm);
@@ -1093,11 +1124,90 @@ TEST(Sync, DigestMatchesRoundKeyState)
   swarm.run(1.0);
   const auto d = swarm.node(1).digestMap();
   ASSERT_EQ(d.size(), 2u);
-  EXPECT_EQ(d.at(1).min_seq, 5);
-  EXPECT_EQ(d.at(1).max_seq, 9);
-  EXPECT_EQ(d.at(1).known, 5);
-  EXPECT_EQ(d.at(1).closed, 1);
-  EXPECT_EQ(d.at(2).known, 1);
-  EXPECT_EQ(d.at(2).closed, 0);
+  const DigestKey k1{1, 0};   // 舊型 ID：世代 0
+  const DigestKey k2{2, 0};
+  EXPECT_EQ(d.at(k1).min_seq, 5u);
+  EXPECT_EQ(d.at(k1).max_seq, 9u);
+  EXPECT_EQ(d.at(k1).known, 5u);
+  EXPECT_EQ(d.at(k1).closed, 1u);
+  EXPECT_EQ(d.at(k2).known, 1u);
+  EXPECT_EQ(d.at(k2).closed, 0u);
   EXPECT_EQ(swarm.node(2).digestMap(), d);
+}
+
+TEST(Sync, V4TaskIdsHaveTheirOwnDigestAndAreRepaired)
+{
+  // 同一個建立者的舊型 ID 和版本 4 ID（世代 3、流水號超過 16 位元）是不同的摘要；
+  // 斷線期間建立的版本 4 任務，恢復後照樣由缺口請求補齊
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.add(3, {20, 0, 5});
+  swarm.run(2.0);
+  Task legacy = newTask(1, 4, 3, 0, swarm.now());
+  swarm.node(1).addLocalTask(legacy, swarm.now());
+  swarm.setOnline(3, false);
+  for (std::uint32_t k = 0; k < 3; ++k) {
+    Task t = newTask(1, 1, 5.0 + k, 0, swarm.now());
+    t.id = makeTaskId(1, 3, 70000 + k);
+    ASSERT_TRUE(swarm.node(1).addLocalTask(t, swarm.now()));
+  }
+  swarm.run(0.5);
+  swarm.setOnline(3, true);
+  swarm.run(4.0);
+
+  const auto d = swarm.node(1).digestMap();
+  ASSERT_EQ(d.size(), 2u);
+  EXPECT_EQ(d.at(DigestKey{1, 0}).known, 1u);
+  const auto & v4 = d.at(DigestKey{1, 3});
+  EXPECT_EQ(v4.known, 3u);
+  EXPECT_EQ(v4.min_seq, 70000u);
+  EXPECT_EQ(v4.max_seq, 70002u);
+  for (std::uint32_t k = 0; k < 3; ++k) {
+    EXPECT_TRUE(swarm.node(3).knows(makeTaskId(1, 3, 70000 + k))) << k;
+  }
+  EXPECT_EQ(swarm.node(3).digestMap(), d);
+  EXPECT_TRUE(swarm.consistent());
+}
+
+TEST(CbbaComm, AnnounceCarriesV4Fields)
+{
+  // 版本 4 的任務定義欄位（新型任務：平台、能力、優先級、任務組、TaskSpec 長度與 CRC）傳到別台不變
+  Swarm swarm;
+  swarm.add(1, {0, 0, 5});
+  swarm.add(2, {10, 0, 5});
+  swarm.run(2.0);
+  Task t = newTask(1, 1, 5, 0, swarm.now());
+  t.id = makeTaskId(1, 2, 1);
+  t.type = TaskType::NONE;
+  t.platform = 1;
+  t.required_caps = 0x12;
+  t.priority = 1;
+  t.revision = 4;
+  t.ext.group_id = makeTaskId(1, 2, 100);
+  t.ext.role_index = 1;
+  t.ext.role_count = 2;
+  t.ext.optional = true;
+  t.ext.skip_satisfies = true;
+  t.ext.commit_radius = 5.0;
+  t.ext.spec_length = 300;
+  t.ext.spec_crc = 0xABCDu;
+  ASSERT_TRUE(swarm.node(1).addLocalTask(t, swarm.now()));
+  swarm.run(1.0);
+  ASSERT_TRUE(swarm.node(2).knows(t.id));
+  const Task & r = swarm.node(2).agent().tasks().at(t.id);
+  EXPECT_EQ(r.type, TaskType::NONE);
+  EXPECT_EQ(r.platform, 1);
+  EXPECT_EQ(r.required_caps, 0x12u);
+  EXPECT_EQ(r.priority, 1);
+  EXPECT_EQ(r.revision, 4);
+  EXPECT_EQ(r.ext.group_id, t.ext.group_id);
+  EXPECT_EQ(r.ext.role_index, 1);
+  EXPECT_EQ(r.ext.role_count, 2);
+  EXPECT_TRUE(r.ext.optional);
+  EXPECT_TRUE(r.ext.skip_satisfies);
+  EXPECT_FALSE(r.ext.all_or_nothing);
+  EXPECT_NEAR(r.ext.commit_radius, 5.0, 1e-9);
+  EXPECT_EQ(r.ext.spec_length, 300u);
+  EXPECT_EQ(r.ext.spec_crc, 0xABCDu);
 }

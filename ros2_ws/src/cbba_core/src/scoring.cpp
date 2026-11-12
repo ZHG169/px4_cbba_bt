@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "cbba_core/capabilities.hpp"
 #include "cbba_core/energy_model.hpp"
 
 namespace cbba_core
@@ -84,7 +85,7 @@ Insertion bestInsertion(
   const ScoringParams & params, const InsertionLimits & limits)
 {
   Insertion best;
-  if (!isCompatible(agent.type, task.type) || task.status != TaskStatus::OPEN) {
+  if (fitness(agent, task) != Fitness::OK || task.status != TaskStatus::OPEN) {
     return best;
   }
 

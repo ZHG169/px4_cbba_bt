@@ -54,6 +54,7 @@ const char * toString(AgentType type)
 const char * toString(TaskType type)
 {
   switch (type) {
+    case TaskType::NONE: return "NONE";
     case TaskType::AIR_RECON: return "AIR_RECON";
     case TaskType::GROUND_INTERVENTION: return "GROUND_INTERVENTION";
     case TaskType::PATROL: return "PATROL";
