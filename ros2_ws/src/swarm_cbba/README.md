@@ -25,7 +25,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `current_task` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 1 | 目前要執行的任務；`task_id = 0` 表示沒有任務（取消）。同一任務連續 `assign_hold` 秒排第一才發 |
 | `task_closed` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 100 | 任務結束（`status` DONE／CANCELLED），每個任務一次。2026-10-13 我們加的，狗端不用訂；無人機發布火警後懸停監控，等地面處置完成才走 |
 | `task_announced` | CBBA → BT | `swarm_interfaces/Task` | reliable、transient_local、depth 256 | 全隊已知的任務（自己建立或收到別台的 TASK_ANNOUNCE），每個任務一次。2026-10-14 我們加的，**只有 `agent_type: UAV` 才發**（狗的 cbba_node 沒有這個話題）；無人機的火點去重複要算進別台報過的火 |
-| `task_orphaned` | CBBA → 地面站等 | `swarm_interfaces/Task` | reliable、depth 20 | 孤兒任務（2026-10-17 我們加的，狗、無人機都發）：任務還開著，但 `orphan_warn_sec`（30 s）內一直沒有人得標、也沒有正式指派。每個孤兒任務發一次，log 也有警告；之後有人得標時印「有人得標了」。只通知、不處理（換點、取消、叫人由操作員決定）；BT 不用訂 |
+| `task_orphaned` | CBBA → 地面站等 | `swarm_interfaces/TaskOrphaned`（2026-11-14 起；之前是 `Task`） | reliable、depth 20 | 孤兒任務（2026-10-17 我們加的，狗、無人機、閘道都發），`reason`：NO_WINNER（開著但 `orphan_warn_sec` 30 s 沒有人得標、也沒有正式指派）、NO_CAPABLE（全隊沒有載具的平台、能力符合，持續 `orphan_no_capable_sec` 3 s）、EXPIRED（過期還沒完成）、PRECONDITION（執行端回報 E_PRECONDITION）、OPTIONAL_*（閘道略過 optional 角色 O1～O3）。每個任務每種原因一次，log 也有警告；之後有人得標時印「有人得標了」。只通知、不處理；BT 不用訂 |
 | `cbba_path` | CBBA → 測試、地面站 | `std_msgs/UInt32MultiArray` | reliable、transient_local、depth 1 | 這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次（2026-10-27 我們加的，狗、無人機都發）：`current_task` 只有第一個，弱網測試（`itest.py loss`）要比對每台分到幾個任務；BT 不用訂 |
 | `robot_state` | BT → CBBA | `swarm_interfaces/RobotState` | BT 發 reliable；CBBA 收 best_effort | 約 2 Hz：位置（map ENU）、電量、`mode` |
 | `task_result` | BT → CBBA | `swarm_interfaces/TaskResult` | reliable | 任務結束時一次：`success`、`detail`（給人看）、`reason` |
@@ -64,6 +64,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `preempt_exclude_sec` | = `failure_exclude_sec` | PREEMPTED 後多久不出價；`cbba_v60.yaml`、`cbba_uav.yaml` 設 5 s（只擋 mode = MANUAL 晚到的空檔，接管期間靠 MANUAL） |
 | `max_failures` | 0 | 同一任務 TRANSIENT 失敗幾次後永久不出價；0 = 不啟用（只打折） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
+| `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
 | `publish_announced` | UAV：true；UGV：false | 要不要發 `task_announced`（2026-11-09）。預設只有無人機發（火點去重複），狗照舊沒有這個話題；整合測試 `itest comm／loss --dogs` 給狗 true，才量得到狗的送達。真的狗不用設 |
 | `repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period`、`resend_gap` | 8000 B/s、10 s、0.5 s、1 s、1 s | 補發（機間協定版本 3，2026-10-28，`cbba_core/doc/protocol_v3_sync.md`）：壓縮摘要 → 缺口請求 → 限速的分批回覆。全隊要一起升到版本 3（和版本 2 互相拒收）；BT、話題不受影響 |
 | `completion_retry`、`completion_max` | 1 s、10 次 | 完成確認沒收齊時的重送間隔、次數（2026-11-04 開成參數；全隊應該一樣） |

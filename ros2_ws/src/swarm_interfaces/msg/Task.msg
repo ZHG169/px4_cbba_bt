@@ -22,3 +22,21 @@ builtin_interfaces/Time status_stamp  # 狀態最後一次改變的時間
 uint16 revision                       # 任務定義的版本（建立者改內容時 + 1）
 string spec                           # TaskSpec（JSON：steps 等）。只有 current_task 帶，而且一定是收齊的；
                                       # 沒有 TaskSpec 的任務是空字串。new_task 帶的話一起送給全隊（TASK_SPEC）
+# 2026-11-14 介面 v2.0（2-1b M0 合約第四節）：只加欄位，舊的 BT 不讀這些，重新編譯就能跑。
+# cbba_node 發的 current_task、task_closed、task_announced、task_orphaned 都填；new_task、cancel_task 不讀這些
+# （新型任務由閘道的 inject_task 建立）。舊型任務（type 1～3）填的是對應後的值（AIR_RECON → uav、P3；
+# GROUND_INTERVENTION → quadruped、P0；PATROL → quadruped、P3），新型任務 type = 0
+uint8 PLATFORM_ANY = 0
+uint8 PLATFORM_UAV = 1
+uint8 PLATFORM_QUADRUPED = 2
+uint8 priority                        # P0～P3，0 最高
+uint8 platform                        # PLATFORM_*
+string[] required_capabilities        # 能力標籤（註冊表 tools.yaml 的名稱）；不認得的位元是 "bitN"
+uint64 group_id                       # 同一個事件拆出的角色組；0 = 單獨任務
+uint8 role_index                      # 第幾個角色（0 起）；角色名稱在 spec
+uint8 role_count                      # 共幾個角色；0 = 不屬於角色組
+bool optional                         # 可略過的角色
+uint8 floor                           # 樓層；0 = 不分
+bool deadline_hard                    # deadline_sec 是硬期限（來不及就不出價）
+builtin_interfaces/Time release       # 可以開始的時刻；0 = 立即
+builtin_interfaces/Time expires       # 失效的時刻；0 = 不失效

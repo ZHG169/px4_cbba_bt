@@ -308,6 +308,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | 4e optional 關閉 | 閘道 `Gateway::step`：O3（同組必要角色都結束，`groupMandatoryDone`）馬上關；沒有正式指派時 O1（沒有能做的載具，`membership_ready` 後 10 s）、O2（有人能做沒人接，15 s）；TASK_CLOSE reason 4（`dropOptional`）、cbba_node 印原因＋`task_orphaned`；`membershipReady`（`NeighborInfo::last_status`）；非閘道節點本機 O3 只停出價（`dropOptionalLocally`）。O4 不用另外做；`skip_satisfies` 只帶著（CB-4）；orphan 的原因欄位等 v2.0 | `gateway`、`cbba_comm`、`cbba_node`、`test_gateway`（+5 項 Optional） | ✅ 11/13 單元＋手動（閘道＋狗：O1 10 s 略過、O3 取消必要角色後馬上略過） |
 | BT 接口（狗） | 外部 task manager 用 2-1b 的**通用 steps**（`step.action`，狗和無人機同一套名稱，11/13 使用者定）寫突發任務 → `current_task.spec`；狗 BT 的 `parseSpecSteps` 翻成外部點的 tasks（第一步 go_to 是站的位置、inspect 的 location → 雲台 target、沒寫 snapshots 拍 1 張），交給 SplitTask＋Switch；spec 空的照舊、不支援的回 `BAD_SPEC`（PERMANENT）。**`ptz_inspect` 改名 `inspect`**（雲台的 ROS action `/ptz_inspect` 不變）；itest 的狗巡邏任務檔跟著改 | `docker/dog/task_manager_spec.patch`（mission_loader、external_task、node、test_tree、任務檔、說明） | ✅ 11/13 端到端（閘道 → CBBA → 狗 BT：go_to 當站的位置、兩次 inspect、舊名 ptz_inspect 回 BAD_SPEC）；無人機（uav_adapter，air_recon → inspect）之後照做 |
 | 4f 異質成本（第一批） | 公式不變，只加可行性：硬期限（`deadline_hard` 來不及 → 不可行，插入不能擠到期限之後；執行中的 `exempt` 不檢查）、release（到達 = max(到達, release)；`AssignmentManager::dispatchTime` 等到 release − 前往時間才發 current_task）、任務的 `min_battery_reserve`（存量取較大的）、`cbba_uav.yaml` 的 `max_bundle: 2`（comm／loss 沒讀，仍 5）。第二批（無人機續航比例、平台參數讀註冊表）放 M1 | `scoring`、`cbba_agent`、`assignment_manager`、`cbba_uav.yaml`、`test_scoring`（+4）、`test_agent`（+1）、`test_gateway`（+1 Release） | ✅ 11/14 單元＋手動（閘道＋狗：硬期限來不及不出價、release 前不發，注入後約 15 s 才發） |
+| 介面 v2.0 | `Task` 加 priority、platform、required_capabilities、group_id、role_index／count、optional、floor、deadline_hard、release、expires（舊型填對應值）；`TaskResult` 加 failure_code（`failure_codes.hpp`：有認得的碼 → reason 照合約的表，BT 的 reason 不看；空的照舊）、failed_capability（E_HW → `failed_caps`，到重開）、findings_uri（只記 log）；`task_orphaned` 改型別 `TaskOrphaned`（原因 NO_WINNER、NO_CAPABLE〔`orphan_no_capable_sec` 3 s〕、EXPIRED、PRECONDITION、OPTIONAL_*）；swarm_interfaces 2.0.0 | `swarm_interfaces`、`failure_codes.hpp/.cpp`、`capabilities`（`capabilityNames`）、`cbba_node.cpp`、`test_failure_codes`（4 項）、`swarm_cbba/test/v2_iface.sh`（V1～V6：閘道＋狗，假 BT） | ✅ 11/14 單元＋`v2_iface.sh`＋`g2_e2e.sh`（EXPIRED 改在收到 reason 3 的 TASK_CLOSE 時發；沒有能做的載具時不重複報 NO_WINNER） |
 | 5 DETECTION | 機器人偵測送閘道、斷線暫存（欄位和 EVT-1 一起定） | — | 還沒做 |
 
 第 4 步的手動測試都用「閘道＋狗的 cbba_node」（`participate:=always`、domain 77、獨立的 `CBBA_LOCK_DIR`），需要時加狗的 BT
@@ -316,9 +317,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 CBBA 的 UDP 不受 `ROS_DOMAIN_ID` 隔離：只重開一個節點時，任務會從還在跑的節點補回來（設計如此）。
 
 **M0（11/20）還剩下的（依順序）**：
-1. **介面 v2.0**：`current_task` 加 priority、platform、required_capabilities、group_id、role、release／expires；`task_result` 加
-   `failure_code`（8 個 E_* → PERMANENT／TRANSIENT／STOPPED，合約第三節的表）、`failed_capability`（E_HW 時拿掉能力）；
-   `task_orphaned` 加原因（O1、O2、沒有能力、沒人得標、過期）。改訊息 → 全隊（含狗的 BT）重編，BT 不讀新欄位就不用改程式
+1. ~~介面 v2.0~~（11/14 寫好，見上表；`teammates` 是 CB-4）。改訊息 → 全隊（含狗的 BT）重編，BT 不讀新欄位就不用改程式
 2. **5 DETECTION**：機器人偵測送閘道、閘道斷線時暫存（欄位和 EVT-1 一起定；來不及就先做傳送與暫存）
 3. **註冊表**：`tools.yaml`、`platforms.yaml`、`fleet.yaml`（能力位元位置要和 `capabilities.hpp` 一致）
 4. **給伯宇的介面變更清單**（`README_v60.md` 第 0.1 節已有大部分：uint64、`revision`／`spec`、兩個 patch、`inspect` 改名、

@@ -19,8 +19,13 @@
 //               task_announced (swarm_interfaces/Task)       全隊已知的任務，每個任務一次（2026-10-14，預設只有 agent_type = UAV
 //                                                            才發，狗端沒有這個話題；參數 publish_announced 可以改，2026-11-09 給
 //                                                            整合測試量狗的送達）：無人機的火點去重複要知道別台已經報過的火
-//               task_orphaned (swarm_interfaces/Task)        孤兒任務（2026-10-17，我們加的）：任務還開著，但 orphan_warn_sec 內
-//                                                            一直沒有人得標、也沒有正式指派。只通知（給地面站），不處理
+//               task_orphaned (swarm_interfaces/TaskOrphaned) 孤兒任務（2026-10-17，我們加的；2026-11-14 介面 v2.0 起帶原因）：
+//                                                            開著但 orphan_warn_sec 內沒有人得標（NO_WINNER）、全隊沒有能做的
+//                                                            載具（NO_CAPABLE）、過期（EXPIRED）、執行端回報 E_PRECONDITION、
+//                                                            optional 角色略過（O1～O3，閘道）。只通知（給地面站），不處理
+// 介面 v2.0（2026-11-14，2-1b M0 合約第四節）：Task 加 priority、platform、required_capabilities、group／role、floor、
+// deadline_hard、release／expires（舊型任務填對應後的值）；TaskResult 加 failure_code（8 個 E_* → reason，
+// cbba_core/failure_codes.hpp）、failed_capability（E_HW：這台拿掉這個能力，到重開為止）、findings_uri（只記 log）
 //   CBBA → 測試、地面站
 //               cbba_path    (std_msgs/UInt64MultiArray)     這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次（2026-11-11 起 64 位元）
 //                                                            （2026-10-27，我們加的）：current_task 只有路徑第一個，弱網測試要比對
@@ -67,6 +72,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -80,12 +86,14 @@
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_assignments.hpp>
+#include <swarm_interfaces/msg/task_orphaned.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
 #include <swarm_interfaces/srv/inject_task.hpp>
 
 #include "cbba_core/assignment_manager.hpp"
 #include "cbba_core/capabilities.hpp"
 #include "cbba_core/cbba_comm.hpp"
+#include "cbba_core/failure_codes.hpp"
 #include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
 
@@ -97,6 +105,7 @@ namespace
 using RobotStateMsg = swarm_interfaces::msg::RobotState;
 using TaskMsg = swarm_interfaces::msg::Task;
 using TaskResultMsg = swarm_interfaces::msg::TaskResult;
+using TaskOrphanedMsg = swarm_interfaces::msg::TaskOrphaned;
 using AssignmentsMsg = swarm_interfaces::msg::TaskAssignments;
 using InjectTaskSrv = swarm_interfaces::srv::InjectTask;
 
@@ -161,7 +170,47 @@ TaskMsg toMsg(const Task & t)
   m.status = static_cast<std::uint8_t>(t.status);
   m.status_stamp = toRosTime(t.status_stamp);
   m.revision = t.revision;
+  // 介面 v2.0（2026-11-14）：舊型任務填對應後的值（capabilities.hpp 的 effective*、types.hpp 的 priorityLevel）
+  m.priority = priorityLevel(t);
+  m.platform = effectivePlatform(t);
+  m.required_capabilities = capabilityNames(effectiveRequiredCaps(t));
+  m.group_id = t.ext.group_id;
+  m.role_index = t.ext.role_index;
+  m.role_count = t.ext.role_count;
+  m.optional = t.ext.optional;
+  m.floor = t.ext.floor;
+  m.deadline_hard = t.ext.deadline_hard;
+  if (t.ext.release > 0.0) {
+    m.release = toRosTime(t.ext.release);
+  }
+  if (t.ext.expires > 0.0) {
+    m.expires = toRosTime(t.ext.expires);
+  }
   return m;
+}
+
+const char * orphanReasonName(std::uint8_t r)
+{
+  switch (r) {
+    case TaskOrphanedMsg::NO_WINNER: return "NO_WINNER";
+    case TaskOrphanedMsg::NO_CAPABLE: return "NO_CAPABLE";
+    case TaskOrphanedMsg::EXPIRED: return "EXPIRED";
+    case TaskOrphanedMsg::PRECONDITION: return "PRECONDITION";
+    case TaskOrphanedMsg::OPTIONAL_NO_CAPABLE: return "OPTIONAL_NO_CAPABLE";
+    case TaskOrphanedMsg::OPTIONAL_UNASSIGNED: return "OPTIONAL_UNASSIGNED";
+    case TaskOrphanedMsg::OPTIONAL_GROUP_DONE: return "OPTIONAL_GROUP_DONE";
+  }
+  return "?";
+}
+
+std::uint8_t orphanReasonOf(OptionalDrop d)
+{
+  switch (d) {
+    case OptionalDrop::NO_CAPABLE: return TaskOrphanedMsg::OPTIONAL_NO_CAPABLE;
+    case OptionalDrop::UNASSIGNED: return TaskOrphanedMsg::OPTIONAL_UNASSIGNED;
+    case OptionalDrop::GROUP_DONE: return TaskOrphanedMsg::OPTIONAL_GROUP_DONE;
+  }
+  return TaskOrphanedMsg::OPTIONAL_GROUP_DONE;
 }
 
 const char * reasonName(std::uint8_t r)
@@ -231,6 +280,10 @@ public:
     // 孤兒任務：開著但這麼久沒有人得標就警告（0 = 不檢查）。全隊能做的都被永久排除（PERMANENT）、不在 AUTO 或失聯時，
     // CBBA 不會有任何訊號，期限又是軟限制，地面站不會知道（2026-10-17，宜臻的實作說明）
     orphan_warn_sec_ = declare_parameter<double>("orphan_warn_sec", 30.0);
+    // 全隊沒有能做的載具（平台、能力不符）持續這麼久就報孤兒任務 NO_CAPABLE（介面 v2.0，2026-11-14）。
+    // 不用 orphan_warn_sec 那麼久（沒有載具時等多久都不會有人接），但剛啟動、鄰居的 AGENT_STATE 還沒到時不能誤報：
+    // 預設 3 s ≈ lost_timeout 1.5 s ＋ 幾個 AGENT_STATE 週期。0 = 不檢查（orphan_warn_sec 照常）
+    orphan_no_capable_sec_ = declare_parameter<double>("orphan_no_capable_sec", 3.0);
     // task_announced 要不要發（2026-11-09）：預設只有無人機發（火點去重複），狗的 cbba_node 照舊沒有這個話題。
     // 整合測試（itest comm／loss --dogs）給狗 true，才量得到「狗知道幾個任務」（送達）；真的狗不用設
     const bool publish_announced = declare_parameter<bool>("publish_announced", uav);
@@ -362,7 +415,7 @@ public:
       announced_pub_ = create_publisher<TaskMsg>(topic("task_announced"),
           rclcpp::QoS(256).reliable().transient_local());
     }
-    orphan_pub_ = create_publisher<TaskMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
+    orphan_pub_ = create_publisher<TaskOrphanedMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
     // 排第一卻等 TaskSpec 超過 spec_wait（協定版本 4，2026-11-12）：每 spec_wait 發一次，給閘道重送、改版或取消
     spec_missing_pub_ = create_publisher<TaskMsg>(topic("task_spec_missing"), rclcpp::QoS(20).reliable());
     // 路徑（2026-10-27）：只要最新的一份，晚訂閱的也拿得到
@@ -589,23 +642,44 @@ private:
     // 格式照機器狗端（e2e 腳本 grep「reason 2，detail「…」」），reason 的名稱只能補在最後
     RCLCPP_INFO(get_logger(), "task_result %s：success %d，reason %u，detail「%s」（%s）",
       name.c_str(), msg.success ? 1 : 0, msg.reason, msg.detail.c_str(), reasonName(msg.reason));
+    if (!msg.failure_code.empty() || !msg.findings_uri.empty()) {
+      RCLCPP_INFO(get_logger(), "task_result %s：failure_code「%s」，failed_capability「%s」，findings_uri「%s」",
+        name.c_str(), msg.failure_code.c_str(), msg.failed_capability.c_str(), msg.findings_uri.c_str());
+    }
     const auto & active = assignments_->active();
     if (!active || active->task != msg.task_id) {
       RCLCPP_WARN(get_logger(), "任務 %s 的回報拒絕：不是目前 current_task 上的任務（目前是 %s），任務狀態不變",
         name.c_str(), active ? taskName(active->task).c_str() : "無");
       return;
     }
+    // 介面 v2.0：有 failure_code 時依合約第三節的表決定 reason（BT 填的 reason 不看）；空的或不認得的照舊用 reason
+    std::uint8_t reason = msg.reason;
+    std::optional<FailureCodeInfo> code;
+    if (!msg.success && !msg.failure_code.empty()) {
+      code = failureCodeInfo(msg.failure_code);
+      if (code) {
+        reason = static_cast<std::uint8_t>(code->cls);
+        if (reason != msg.reason) {
+          RCLCPP_INFO(get_logger(), "任務 %s：failure_code %s → reason %s（BT 填的 reason %u 不看）", name.c_str(),
+            msg.failure_code.c_str(), reasonName(reason), msg.reason);
+        }
+      } else {
+        RCLCPP_WARN(get_logger(), "任務 %s：不認得的 failure_code「%s」，照 reason %u（%s）", name.c_str(),
+          msg.failure_code.c_str(), msg.reason, reasonName(msg.reason));
+      }
+    }
     // spec §2.3 規則 3：PERMANENT 這台永久不再對它出價，PREEMPTED preempt_exclude_sec 秒，
     // 其他（TRANSIENT／STOPPED）failure_exclude_sec 秒
-    const double exclude = msg.reason == TaskResultMsg::PERMANENT ? kInf :
-      msg.reason == TaskResultMsg::PREEMPTED ? preempt_exclude_sec_ : failure_exclude_sec_;
+    const double exclude = reason == TaskResultMsg::PERMANENT ? kInf :
+      reason == TaskResultMsg::PREEMPTED ? preempt_exclude_sec_ : failure_exclude_sec_;
     const ReportCheck check = assignments_->onResult(msg.task_id, active->version, msg.success, now, exclude);
     if (check != ReportCheck::ACCEPTED) {
       RCLCPP_WARN(get_logger(), "任務 %s 的回報拒絕（%s），任務狀態不變", name.c_str(), toString(check));
       return;
     }
-    // 括號內照機器狗端放 detail（比 reason 名稱具體）；BT 沒給 detail 時用 reason 名稱
-    const char * why = msg.detail.empty() ? reasonName(msg.reason) : msg.detail.c_str();
+    // 括號內照機器狗端放 detail（比 reason 名稱具體）；BT 沒給 detail 時用失敗碼，再沒有用 reason 名稱
+    const char * why = !msg.detail.empty() ? msg.detail.c_str() :
+      !msg.failure_code.empty() ? msg.failure_code.c_str() : reasonName(reason);
     if (msg.success) {
       reported_at_[msg.task_id] = now;
       RCLCPP_INFO(get_logger(), "任務 %s 完成，等待全隊確認", name.c_str());
@@ -616,7 +690,10 @@ private:
         name.c_str(), why, exclude);
     }
     // TRANSIENT 才算「這台做這個點會失敗」：之後的出價打折，別台優先接手（上面的 log 格式照機器狗端，另外印一行）
-    if (!msg.success && msg.reason == TaskResultMsg::TRANSIENT) {
+    if (!msg.success && code) {
+      applyFailureCode(msg, *code);
+    }
+    if (!msg.success && reason == TaskResultMsg::TRANSIENT) {
       comm_->countFailure(msg.task_id, now);
       const auto & agent = comm_->agent();
       const int f = agent.failures(msg.task_id);
@@ -631,11 +708,50 @@ private:
     }
   }
 
+  // 失敗碼的附帶處理（合約第三節的表「另外」那一欄）：E_HW 拿掉故障的能力（下一個 tick 經 setState 生效、AGENT_STATE
+  // 廣播的可用能力跟著少，閘道的機隊可行性、O1 看得到）；E_PRECONDITION 發 task_orphaned 給值班。
+  // 拿掉的能力到 cbba_node 重開才恢復（能力恢復的話題 capability_status 是 M1）
+  void applyFailureCode(const TaskResultMsg & msg, const FailureCodeInfo & code)
+  {
+    const std::string name = taskName(msg.task_id);
+    if (code.drop_capability) {
+      const auto cap = capabilityFromName(msg.failed_capability);
+      if (!cap) {
+        RCLCPP_WARN(get_logger(), "任務 %s：%s 沒帶認得的 failed_capability（「%s」），能力不變", name.c_str(),
+          msg.failure_code.c_str(), msg.failed_capability.c_str());
+      } else if ((state_.failed_caps & capBit(*cap)) == 0) {
+        state_.failed_caps |= capBit(*cap);
+        RCLCPP_WARN(get_logger(), "能力 %s 故障（任務 %s 回報 %s）：之後不對需要它的任務出價，到重開為止；"
+          "可用能力 %s", capabilityName(*cap), name.c_str(), msg.failure_code.c_str(),
+          capabilitiesToString(availableCaps(state_)).c_str());
+      }
+    }
+    if (code.notify_orphan) {
+      const auto it = comm_->agent().tasks().find(msg.task_id);
+      if (it != comm_->agent().tasks().end()) {
+        publishOrphan(it->second, TaskOrphanedMsg::PRECONDITION, 0.0,
+          "執行端回報 " + msg.failure_code + (msg.detail.empty() ? "" : "：" + msg.detail));
+      }
+    }
+  }
+
+  void publishOrphan(const Task & task, std::uint8_t reason, double waited, const std::string & detail)
+  {
+    TaskOrphanedMsg m;
+    m.task = toMsg(task);
+    m.reason = reason;
+    m.waited_sec = static_cast<float>(waited);
+    m.detail = detail;
+    orphan_pub_->publish(m);
+    RCLCPP_INFO(get_logger(), "task_orphaned %s：%s（%s）", taskName(task.id).c_str(), orphanReasonName(reason),
+      detail.c_str());
+  }
+
   // 孤兒任務：開著、沒有人得標、也沒有正式指派，超過 orphan_warn_sec 印警告、發 task_orphaned 一次；之後有人得標時印一行。
   // 每台各自看本機的表（得標者經由 CBBA_STATE 傳到每台），不需要知道別台的排除狀態
   void checkOrphans(double now)
   {
-    if (!(orphan_warn_sec_ > 0.0)) {
+    if (!(orphan_warn_sec_ > 0.0) && !(orphan_no_capable_sec_ > 0.0)) {
       return;
     }
     const auto & agent = comm_->agent();
@@ -653,14 +769,32 @@ private:
             winner != kNoAgent ? winner : assignee);
         }
         unassigned_since_.erase(id);
+        no_capable_since_.erase(id);
         continue;
       }
       const double since = unassigned_since_.emplace(id, now).first->second;
-      if (now - since >= orphan_warn_sec_ && orphan_warned_.insert(id).second) {
+      // 全隊沒有能做的載具（介面 v2.0）：能力問題，等多久都不會有人接，持續 orphan_no_capable_sec 就報（每個任務一次）
+      if (orphan_no_capable_sec_ > 0.0 && comm_->capableAgents(task, now).empty()) {
+        const double nc_since = no_capable_since_.emplace(id, now).first->second;
+        if (now - nc_since >= orphan_no_capable_sec_ && no_capable_warned_.insert(id).second) {
+          const std::string need = std::string("平台 ") + platformName(effectivePlatform(task)) + "、能力 " +
+            capabilitiesToString(effectiveRequiredCaps(task));
+          RCLCPP_WARN(get_logger(), "孤兒任務 %s：全隊（聽得到的載具）沒有一台符合（%s），請地面站處理",
+            taskName(id).c_str(), need.c_str());
+          publishOrphan(task, TaskOrphanedMsg::NO_CAPABLE, now - nc_since, "全隊沒有載具符合：" + need);
+        }
+      } else {
+        no_capable_since_.erase(id);
+      }
+      // 全隊沒有能做的載具時不報 NO_WINNER（已經報過 NO_CAPABLE，原因不同、不重複）
+      if (orphan_warn_sec_ > 0.0 && now - since >= orphan_warn_sec_ && no_capable_since_.count(id) == 0 &&
+        orphan_warned_.insert(id).second)
+      {
         RCLCPP_WARN(get_logger(), "孤兒任務 %s (%.1f, %.1f, %.1f)：開著但 %.0f s 沒有人得標"
           "（能做的載具可能都被永久排除、不在 AUTO 或失聯），請地面站處理", taskName(id).c_str(),
           task.position.x, task.position.y, task.position.z, now - since);
-        orphan_pub_->publish(toMsg(task));
+        publishOrphan(task, TaskOrphanedMsg::NO_WINNER, now - since,
+          "開著但 " + std::to_string(static_cast<int>(now - since)) + " s 沒有人得標");
       }
     }
   }
@@ -797,7 +931,7 @@ private:
   }
 
   // optional 角色的自動關閉（閘道，4e）：O1～O3 成立就送 TASK_CLOSE reason 4，log 原因、發 task_orphaned 一次給值班看
-  //（Task.msg 還沒有原因欄位：介面 v2.0 再加）
+  //（原因 OPTIONAL_*，介面 v2.0）
   void dropOptionals(double now)
   {
     if (!gateway_) {
@@ -809,7 +943,8 @@ private:
         taskName(d.task).c_str(), toString(d.reason),
         d.reason == OptionalDrop::GROUP_DONE ? "" : ("，" + std::to_string(static_cast<int>(d.waited)) + " s").c_str());
       if (it != comm_->agent().tasks().end()) {
-        orphan_pub_->publish(toMsg(it->second));
+        publishOrphan(it->second, orphanReasonOf(d.reason), d.reason == OptionalDrop::GROUP_DONE ? 0.0 : d.waited,
+          std::string("optional 角色略過（") + toString(d.reason) + "）");
       }
     }
   }
@@ -1011,6 +1146,9 @@ private:
       const auto reason = comm_->closeReason(id);
       if (reason == wire::kCloseExpired) {
         RCLCPP_INFO(get_logger(), "任務 %s 已過期（建立者關閉，reason 3）", taskName(id).c_str());
+        // 孤兒任務 EXPIRED 在這裡發（每個節點、每個任務剛好一次）：不在 takeExpired 發，因為建立者的 TASK_CLOSE
+        // 常比本機的過期判定先到，那時 takeExpired 不會再有這個任務（2026-11-14 測試發現）
+        publishOrphan(task, TaskOrphanedMsg::EXPIRED, 0.0, "expires 到了還沒完成");
       } else if (reason == wire::kCloseOptionalDropped) {
         RCLCPP_INFO(get_logger(), "任務 %s 已略過（optional 角色，reason 4）", taskName(id).c_str());
       } else if (task.status != TaskStatus::DONE) {
@@ -1140,8 +1278,11 @@ private:
   std::set<TaskId> closed_;                // 已經印過結束的任務
   std::set<TaskId> announced_;             // 已經發過 task_announced 的任務
   double orphan_warn_sec_{30.0};
+  double orphan_no_capable_sec_{3.0};
   std::map<TaskId, double> unassigned_since_;   // 開著、沒有人得標的任務 → 從什麼時候開始
-  std::set<TaskId> orphan_warned_;              // 已經警告過的孤兒任務
+  std::map<TaskId, double> no_capable_since_;   // 開著、沒有人得標、全隊沒有能做的載具 → 從什麼時候開始
+  std::set<TaskId> orphan_warned_;              // 已經警告過的孤兒任務（NO_WINNER）
+  std::set<TaskId> no_capable_warned_;          // 已經報過 NO_CAPABLE 的任務
   int last_conflicts_{0};
   int last_rejected_{0};
   int last_rejected_closes_{0};
@@ -1152,7 +1293,7 @@ private:
   rclcpp::Publisher<TaskMsg>::SharedPtr closed_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr announced_pub_;   // 預設只有無人機（publish_announced）
-  rclcpp::Publisher<TaskMsg>::SharedPtr orphan_pub_;
+  rclcpp::Publisher<TaskOrphanedMsg>::SharedPtr orphan_pub_;
   rclcpp::Publisher<TaskMsg>::SharedPtr spec_missing_pub_;
   // 閘道（participate: never）
   std::unique_ptr<Gateway> gateway_;

@@ -1,6 +1,6 @@
 # 機器狗（V60）端使用說明
 
-給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-13 更新：機間協定版本 4，見第 0.1 節）
+給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-14 更新：機間協定版本 4、介面 v2.0，見第 0.1 節）
 
 **一句話**：main 上的 CBBA 節點照你 handoff（2026-10-11）的格式做好了。`mission.xml`、launch 指令、yaml 不用改；
 **換掉三個套件、你的 `task_manager` 套兩個 patch（第 0.1 節），再重新編譯**。
@@ -14,6 +14,8 @@
 | `current_task.spec`：外部 task manager（閘道、Node-RED）給的通用 steps（`{"steps": [{"action": "go_to"…}, {"action": "inspect"…}]}`，狗和無人機同一套名稱） | 不套的話照舊固定做一次雲台（spec 被忽略） | `docker/dog/task_manager_spec.patch`（`parseSpecSteps`：第一步 go_to 當站的位置、inspect 的 location → 雲台 target；`makeExternalWaypoint` 多一個 tasks、`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
 | 動作名稱統一：`ptz_inspect` 改叫 **`inspect`** | Switch 的 case、`kValidActions`、你的任務檔（`action: inspect`）都要改；雲台的 ROS action（`/ptz_inspect`、`PtzInspect.action`）不變 | 同上的 patch；新版的任務檔、新葉節點的 case 名稱請用通用名稱（`go_to`、`track`、`wait`、`speak`、`return_to_dock`、`alert_operator`） |
 | 改版：同一個 task_id、較大的 `revision`（例如目標移動） | `onCurrentTask` 的 `if (t.task_id == cur) return;` 會當成重送，照舊版做完 | **還沒做，要和你對**：同 task_id、revision 變大時先取消再插入 |
+| 介面 v2.0（2026-11-14）：`Task` 加 `priority`、`platform`、`required_capabilities`、`group_id`、`role_index`、`role_count`、`optional`、`floor`、`deadline_hard`、`release`、`expires` | 不讀也能跑，**要重編**（型別雜湊） | 重編；要用時直接讀 current_task 的欄位（舊型任務填對應後的值：火警 P0、quadruped、mobility_ground） |
+| 介面 v2.0：`TaskResult` 加 `failure_code`（8 個 E_*）、`failed_capability`、`findings_uri` | 不填照舊用 `reason`。填了 `failure_code` 時 cbba_node 照下表決定排除、你填的 `reason` 不看：E_PRECONDITION／E_UNREACHABLE／E_HW → PERMANENT，E_TIMEOUT／E_TARGET_LOST／E_COMM → TRANSIENT，E_LOW_BATTERY／E_SAFETY_STOP → STOPPED；E_HW 時 `failed_capability` 填故障的能力（例如 `rgb_camera`），這隻之後不接需要它的任務（到 cbba_node 重開） | 之後你的 Action 有失敗碼（REG-2）時，`finish()` 一起填；現在不用改 |
 | 新增葉節點（Track、Wait、Speak…） | spec 裡能用的 action 要同時在 `kValidActions` 和 Switch 的 case | 你新版加 case 時一起加 `kValidActions` |
 
 套 patch（照順序；你更新 `task_manager` 後也照這樣重套，有衝突時對照 patch 開頭的說明手動改）：
@@ -191,7 +193,7 @@ agent 50（UGV）：UDP 239.255.42.99:14600（網卡 系統預設），session �
 | `failure_exclude_sec` | 60 s | 失敗（TRANSIENT、STOPPED）後多久不接同一個任務 |
 | `preempt_exclude_sec` | 5 s（yaml） | PREEMPTED 後多久不接 |
 | `max_failures` | 0 | 同一個任務 TRANSIENT 失敗幾次後永久不接；0 = 不啟用（只打折） |
-| `orphan_warn_sec` | 30 s | 任務開著但這麼久沒有人得標（例如只有你能做、你回報了 PERMANENT）就印警告、發 `/v60/task_orphaned`；你的 BT 不用訂 |
+| `orphan_warn_sec` | 30 s | 任務開著但這麼久沒有人得標（例如只有你能做、你回報了 PERMANENT）就印警告、發 `/v60/task_orphaned`（2026-11-14 起型別 `TaskOrphaned`，帶原因）；你的 BT 不用訂 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | 1.0、0.1、0.05、20 | **佔位值，請用實測換掉**（`cbba_core/doc/ugv_tuning.md`） |
 | `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式，**全隊要一樣**，不要只改狗的 |
 | `mesh_ip` | 環境變數 `MESH_IP` | |

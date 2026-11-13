@@ -410,6 +410,15 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | bundle 上限 | `cbba_uav.yaml` 的 `max_bundle: 2`（狗照預設 5）。itest 的 comm、loss 沒讀 cbba_uav.yaml（還是 5，和第 5 週的數據可比較）；uav、demo 會吃到 2 |
 | 第二批（M1） | 無人機耗電改用續航比例、平台參數從 `platforms.yaml`／`fleet.yaml` 讀 |
 
+### 實作（2026-11-14，介面 v2.0）
+
+| 項目 | 程式 |
+|---|---|
+| `Task` | 加 priority、platform、required_capabilities（string[]）、group_id、role_index、role_count、optional、floor、deadline_hard、release、expires（`cbba_node` 的 `toMsg`；舊型任務填 `priorityLevel`、`effectivePlatform`、`effectiveRequiredCaps` 對應後的值）。角色名稱不在 A 層，放在 spec。`teammates` 是 CB-4（M1～M2），這一步沒做 |
+| `TaskResult` | 加 failure_code、failed_capability、findings_uri。`cbba_core/failure_codes.hpp`（`failureCodeInfo`，第三節的表）：有認得的 failure_code → reason 照表（BT 填的不看）；空的或不認得 → 照舊用 reason（不認得的印警告）。E_HW → `AgentState::failed_caps` 加上 failed_capability（AGENT_STATE 的可用能力跟著少，到 cbba_node 重開；`capability_status` 恢復是 M1）；E_PRECONDITION → task_orphaned（PRECONDITION）。findings_uri 只記 log |
+| `task_orphaned` | 型別改成 `TaskOrphaned`（task、reason、waited_sec、detail）。原因：NO_WINNER（原本的 30 s；全隊沒有能做的載具時不報，已經報過 NO_CAPABLE）、NO_CAPABLE（`capableAgents` 是空的，持續 `orphan_no_capable_sec` 3 s；閘道上就是「機隊可行性」的告警）、EXPIRED（收到建立者的 TASK_CLOSE reason 3 時，每個節點一次；建立者自己也是）、PRECONDITION、OPTIONAL_NO_CAPABLE／UNASSIGNED／GROUP_DONE（閘道 4e 的 O1～O3） |
+| 測試 | `test_failure_codes`（4 項：8 個碼的對照、不認得的、數值和 reason 相同、能力名稱陣列） |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

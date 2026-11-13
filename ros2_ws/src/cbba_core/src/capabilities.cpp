@@ -61,24 +61,30 @@ std::optional<Capabilities> parseCapabilities(const std::vector<std::string> & n
   return caps;
 }
 
+std::vector<std::string> capabilityNames(Capabilities caps)
+{
+  std::vector<std::string> out;
+  for (unsigned bit = 0; bit < 64; ++bit) {
+    if ((caps & (Capabilities{1} << bit)) == 0) {
+      continue;
+    }
+    out.push_back(bit < kNames.size() ? capabilityName(static_cast<Capability>(bit)) :
+      "bit" + std::to_string(bit));
+  }
+  return out;
+}
+
 std::string capabilitiesToString(Capabilities caps)
 {
   if (caps == 0) {
     return "none";
   }
   std::string out;
-  for (unsigned bit = 0; bit < 64; ++bit) {
-    if ((caps & (Capabilities{1} << bit)) == 0) {
-      continue;
-    }
+  for (const std::string & name : capabilityNames(caps)) {
     if (!out.empty()) {
       out += ',';
     }
-    if (bit < kNames.size()) {
-      out += capabilityName(static_cast<Capability>(bit));
-    } else {
-      out += "bit" + std::to_string(bit);
-    }
+    out += name;
   }
   return out;
 }

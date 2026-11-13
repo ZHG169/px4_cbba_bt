@@ -52,6 +52,8 @@ const char * capabilityName(Capability c);
 // 字串陣列 → 遮罩；有不認得的名稱時回傳 nullopt，第一個不認得的寫進 bad（可為 nullptr）
 std::optional<Capabilities> parseCapabilities(
   const std::vector<std::string> & names, std::string * bad = nullptr);
+// 遮罩 → 名稱陣列（current_task 的 required_capabilities；不認得的位元是 "bitN"）
+std::vector<std::string> capabilityNames(Capabilities caps);
 // 遮罩 → "rgb_camera,thermal_camera"（log 用；0 → "none"；不認得的位元印成 bitN）
 std::string capabilitiesToString(Capabilities caps);
 

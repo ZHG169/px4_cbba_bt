@@ -10,6 +10,7 @@ endif()
 # 核心函式庫：不依賴 ROS，可以單獨編譯與測試
 add_library(${PROJECT_NAME}_core
   src/capabilities.cpp
+  src/failure_codes.cpp
   src/energy_model.cpp
   src/scoring.cpp
   src/cbba_agent.cpp
@@ -39,6 +40,7 @@ target_link_libraries(cbba_sim ${PROJECT_NAME}_sim)
 
 set(CBBA_CORE_TESTS
   test_capabilities
+  test_failure_codes
   test_energy_model
   test_scoring
   test_rules

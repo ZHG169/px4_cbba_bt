@@ -29,6 +29,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
+| `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
 | `publish_announced` | UAV：true；UGV：false | 要不要發 `task_announced`（2026-11-09）。預設只有無人機發（火點去重複），狗照舊沒有這個話題；整合測試 `itest comm／loss --dogs` 給狗 true，才量得到狗的送達。真的狗不用設 |
 
 ---
@@ -84,6 +85,7 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
+| `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
 | `publish_announced` | UAV：true；UGV：false | 要不要發 `task_announced`（2026-11-09）。預設只有無人機發（火點去重複），狗照舊沒有這個話題；整合測試 `itest comm／loss --dogs` 給狗 true，才量得到狗的送達。真的狗不用設 |
 | `max_queued_fires` | 1 | 執行中任務之後最多保留幾個火警 |
 | `max_queue_wait` | 120 s | 沒有期限的任務，排隊時最多等多久（從任務建立時算，不會每輪競標重新起算）。有期限時用期限 |
