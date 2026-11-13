@@ -570,6 +570,7 @@ InsertionLimits CbbaAgent::limitsFor(
   const bool active_head = exec_.active_pinned && !path.empty() && !exec_.pinned.empty() &&
     path.front() == exec_.pinned.front();
   limits.head_remaining = active_head ? exec_.active_remaining : -1.0;
+  limits.exempt = exec_.active_pinned && !exec_.pinned.empty() ? exec_.pinned.front() : 0;   // 執行中的不檢查硬期限
   limits.min_position = canPreempt(task) ? 0 : pinned_in_path;
   // 真的會搶占（路徑第一個是執行中、可中斷、優先級較低的任務）：評分時不算延後它的損失
   limits.preempt_drops_head = active_head && exec_.preemptible && !exec_.pinned.empty() &&

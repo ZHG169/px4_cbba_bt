@@ -11,7 +11,7 @@ namespace cbba_core
 
 PathEval evaluatePath(
   const AgentState & agent, const std::vector<Task> & ordered_tasks, double now,
-  const ScoringParams & params, double head_remaining)
+  const ScoringParams & params, double head_remaining, TaskId exempt)
 {
   const double cruise = agent.cruise_speed > 0.0 ? agent.cruise_speed : params.cruise_speed;
   const double speed = cruise * params.speed_margin;
@@ -22,6 +22,8 @@ PathEval evaluatePath(
   PathEval eval;
   Vec3 current = agent.position;
   double clock = 0.0;  // 從現在起算的時間
+  bool hard_late = false;
+  double reserve = agent.safety_reserve;
 
   for (const Task & task : ordered_tasks) {
     LegEval leg;
@@ -40,9 +42,20 @@ PathEval evaluatePath(
       leg.arrival += wasted;
       leg.completion += wasted;
     }
+    // release：還不能開始就等（執行中、用 BT 剩餘時間的第一個任務不用）
+    const bool head_running = eval.legs.empty() && head_remaining >= 0.0;
+    if (!head_running && task.ext.release > 0.0 && task.ext.release - now > leg.arrival) {
+      const double wait = task.ext.release - now - leg.arrival;
+      leg.arrival += wait;
+      leg.completion += wait;
+    }
     const double remaining = (task.created + task.deadline_sec) - now;
     leg.remaining_deadline = std::max(remaining, params.min_deadline);
     leg.overdue = leg.arrival > remaining;
+    if (leg.overdue && task.ext.deadline_hard && task.explicit_deadline && task.id != exempt) {
+      hard_late = true;   // 硬期限來不及：這條路徑不可行
+    }
+    reserve = std::max(reserve, static_cast<double>(task.ext.min_battery_reserve));
     leg.temporal = leg.arrival / leg.remaining_deadline;
     leg.cost = leg.distance * leg.temporal;
 
@@ -62,8 +75,8 @@ PathEval evaluatePath(
     return eval;
   }
 
-  eval.battery_cost = batteryCost(agent.battery, energy.total, agent.safety_reserve);
-  eval.feasible = std::isfinite(eval.battery_cost);
+  eval.battery_cost = batteryCost(agent.battery, energy.total, reserve);
+  eval.feasible = std::isfinite(eval.battery_cost) && !hard_late;
   eval.total_cost = eval.feasible ?
     eval.st_cost * (1.0 + params.battery_weight * eval.battery_cost) : kInf;
   return eval;
@@ -89,7 +102,7 @@ Insertion bestInsertion(
     return best;
   }
 
-  const PathEval current = evaluatePath(agent, path, now, params, limits.head_remaining);
+  const PathEval current = evaluatePath(agent, path, now, params, limits.head_remaining, limits.exempt);
   if (!current.feasible) {
     return best;
   }
@@ -98,7 +111,8 @@ Insertion bestInsertion(
     std::vector<Task> candidate = path;
     candidate.insert(candidate.begin() + static_cast<std::ptrdiff_t>(pos), task);
     // 插在最前面時，原本在執行的任務不再是第一個：不用它的剩餘時間
-    PathEval eval = evaluatePath(agent, candidate, now, params, pos == 0 ? -1.0 : limits.head_remaining);
+    PathEval eval = evaluatePath(agent, candidate, now, params, pos == 0 ? -1.0 : limits.head_remaining,
+        limits.exempt);
     if (!eval.feasible || (limits.allow && !limits.allow(eval, pos, candidate))) {
       continue;
     }
@@ -108,8 +122,8 @@ Insertion bestInsertion(
       std::vector<Task> rest(path.begin() + 1, path.end());
       std::vector<Task> with = rest;
       with.insert(with.begin(), task);
-      const PathEval before = evaluatePath(agent, rest, now, params, -1.0);
-      const PathEval after = evaluatePath(agent, with, now, params, -1.0);
+      const PathEval before = evaluatePath(agent, rest, now, params, -1.0, limits.exempt);
+      const PathEval after = evaluatePath(agent, with, now, params, -1.0, limits.exempt);
       if (before.feasible && after.feasible) {
         marginal = after.total_cost - before.total_cost;
       }

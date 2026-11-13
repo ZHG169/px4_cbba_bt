@@ -247,7 +247,8 @@ struct Revisable
   InjectRequest req = groundRequest("move-1");
   TaskId id{0};
 
-  explicit Revisable(double expires_sec = 0.0, double commit_radius = 0.0, bool optional = false)
+  explicit Revisable(double expires_sec = 0.0, double commit_radius = 0.0, bool optional = false,
+    double release_sec = 0.0)
   {
     AssignmentConfig c;
     c.require_accept = false;
@@ -262,6 +263,7 @@ struct Revisable
     req.spec = "{\"steps\":[{\"action\":\"inspect\"}]}";
     req.expires_sec = expires_sec;
     req.task.ext.commit_radius = commit_radius;
+    req.release_sec = release_sec;
     if (optional) {   // 兩個角色的組裡的 optional 角色（另一個角色沒建：這一組不會被判成「必要角色都結束」）
       req.role = "extra";
       req.task.ext.role_count = 2;
@@ -658,4 +660,21 @@ TEST(Optional, O3WithoutGatewayOnlyStopsLocalBidding)
   swarm.run(5.0);
   EXPECT_FALSE(swarm.node(1).taskOpen(a.task_id));
   EXPECT_EQ(swarm.node(1).closeReason(a.task_id), std::optional<std::uint8_t>(wire::kCloseOptionalDropped));
+}
+
+// ===========================================================================
+// release（4f，2026-11-13）
+// ===========================================================================
+TEST(Release, DispatchedJustInTime)
+{
+  // release 10 s 後、狗離目標 7 m（規劃速度 4 m/s → 1.75 s）：狗得標，但到「release − 前往時間」（約 8.25 s）才發 current_task
+  Revisable t(0.0, 0.0, false, 10.0);
+  EXPECT_EQ(t.swarm.node(kGateway).agent().winner(t.id), 50);
+  EXPECT_FALSE(t.dog->active());
+  EXPECT_EQ(t.swarm.node(kGateway).assignment(t.id).assignee, kNoAgent);   // 還沒鎖定
+  t.swarm.run(4.0);   // 約 6 s
+  EXPECT_FALSE(t.dog->active());
+  t.swarm.run(4.0);   // 約 10 s
+  ASSERT_TRUE(t.dog->active());
+  EXPECT_EQ(t.dog->active()->task, t.id);
 }

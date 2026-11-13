@@ -20,6 +20,9 @@
 // require_accept = false（無人機的 BT 還沒好）：跳過和 BT 的握手（請求當下就算接受），
 // 可行性檢查、版本、回報檢查照常。
 //
+// release（4f，2026-11-13）：排第一的任務有 release 時，等到「release − 前往時間」才建立正式指派、發 current_task
+// （剛好在 release 時到達；之前不鎖定，別台照 CBBA 規則仍可以贏走）。
+//
 // 改版（2026-11-13）：執行中的任務只改了位置、時間、價值時指派保留，新 revision 的 TaskSpec 收齊後重發 current_task；
 // 改了平台、能力、優先級時 CbbaComm 撤銷這台的指派，checkHeld 照「被更新的正式指派取代」處理。
 //
@@ -152,6 +155,9 @@ private:
   void abandonPending(const std::string & why);
   void updateConstraints(double now);
   bool updateCommitted();   // 回傳：執行中的任務是否已接近（commit_radius）
+  double dispatchTime(TaskId task) const;   // 最早什麼時候發 current_task（release − 前往時間；沒有 release 時 −∞）
+  void holdForRelease(TaskId task);
+  TaskId release_hold_{0};
   bool inPath(TaskId task) const;
   std::string name(TaskId task, std::uint64_t version) const;
   void info(const std::string & text) {log_(0, text);}

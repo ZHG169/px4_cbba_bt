@@ -517,3 +517,25 @@ TEST(Agent, BidForReportsOwnBidAndReason)
   far.excludeTask(101, 1.0, 60.0);
   EXPECT_STREQ(far.bidFor(101, 2.0).why, "excluded");
 }
+
+TEST(Agent, RunningTaskIsNotDroppedAtHardDeadline)
+{
+  // 硬期限 20 s（4f，2026-11-13）：t=0 得標；執行中（釘住）的到 t=30 照樣留在路徑上，照常做完；
+  // 還沒在執行的，t=30 重新評估時來不及 → 釋放
+  for (const bool running : {true, false}) {
+    CbbaAgent uav(makeUav(1, 0, 0), ScoringParams{});
+    Task t = makeTask(101, 40, 0);
+    t.deadline_sec = 20.0;
+    t.ext.deadline_hard = true;
+    ASSERT_TRUE(uav.onTask(t, 0.0));
+    ASSERT_TRUE(contains(uav.path(), 101));
+    if (running) {
+      ExecConstraints c;
+      c.pinned = {101};
+      c.active_pinned = true;
+      uav.setExecConstraints(c, 0.0);
+    }
+    uav.reevaluate(30.0);
+    EXPECT_EQ(contains(uav.path(), 101), running) << (running ? "執行中" : "沒在執行");
+  }
+}

@@ -398,6 +398,18 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | 本機 O3 | `CbbaComm::dropOptionalLocally`（不是閘道的節點，每 0.5 s）：同組必要角色都結束了 → 自己永久不對 optional 角色出價（不送 TASK_CLOSE；自己是持有者的照常做完）（`optional_local_drops`）。閘道在線時它的正式關閉很快就到 |
 | 還沒做 | O4 不用另外做（組的取消、過期就是各任務自己的）；`skip_satisfies` 只帶著（precedence 是 CB-4，M1～M2）；`task_orphaned` 的原因欄位（介面 v2.0） |
 
+### 實作（2026-11-13，第 4f 步第一批：時間與電量的可行性）
+
+出價公式不變（11/11 決定沿用），只加可行性與到達時間的條件；舊型任務這些欄位都是 0，結果完全相同。
+
+| 項目 | 程式 |
+|---|---|
+| 硬期限 | `scoring.cpp` 的 `evaluatePath`：`deadline_hard`（且有期限）的任務到達時間超過期限 → 整條路徑不可行；插入新任務會把它擠到期限之後的位置也不行。執行中的任務（`InsertionLimits::exempt`，`limitsFor` 填路徑上釘住的執行中任務）不檢查：做到一半期限到了照常做完 |
+| release | 到達時間 = max(實際到達, release)，等的時間算進時間成本、後面的延後。執行：`current_task` 還沒有 release 欄位，`AssignmentManager::dispatchTime` 讓排第一的任務等到「release − 前往時間」才建立正式指派、發 current_task（之前不鎖定） |
+| 任務的電量下限 | 做完並返航後要剩 max(載具的 safety_reserve, 路徑上各任務的 `min_battery_reserve`) |
+| bundle 上限 | `cbba_uav.yaml` 的 `max_bundle: 2`（狗照預設 5）。itest 的 comm、loss 沒讀 cbba_uav.yaml（還是 5，和第 5 週的數據可比較）；uav、demo 會吃到 2 |
+| 第二批（M1） | 無人機耗電改用續航比例、平台參數從 `platforms.yaml`／`fleet.yaml` 讀 |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

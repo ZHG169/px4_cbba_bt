@@ -16,6 +16,13 @@
 //   期望到達時間   到達時間 + (1 − p) / p × (前往時間 + 執行時間)：成功前預期失敗 (1 − p) / p 次（幾何分佈）；
 //                  路徑後面的任務一起延後。執行中、有 BT 剩餘時間（head_remaining）的第一個任務不加
 //   p = 1（沒失敗過）時和原本的公式完全相同。電量的可行性仍以一次嘗試計算
+//
+// 任務定義的時間與電量限制（4f 第一批，2026-11-13，合約第二節「異質成本」）：公式不變，只加可行性與到達時間的條件
+//   硬期限   ext.deadline_hard（且有期限）：到達時間超過期限 → 整條路徑不可行。執行中的任務（exempt）不檢查：做到一半期限到了
+//            不撤銷，照常做完
+//   release  ext.release：最早可以開始的時刻。早到要等：到達時間 = max(實際到達, release)，等的時間算進時間成本、後面的跟著延後
+//   電量     做完並返航後至少要剩 max(載具的 safety_reserve, 路徑上各任務的 ext.min_battery_reserve)
+//   舊型任務這些欄位都是 0，結果和原本完全相同
 #pragma once
 
 #include <cstddef>
@@ -54,7 +61,7 @@ struct LegEval
 
 struct PathEval
 {
-  bool feasible{true};       // 目前只有電量會造成不可行（期限是軟限制）
+  bool feasible{true};       // 電量不夠、或硬期限來不及時不可行（軟期限只影響成本）
   double st_cost{0.0};       // C_ST
   double path_energy{0.0};   // 含回程
   double battery_after{0.0}; // 做完並返航後的電量
@@ -65,9 +72,10 @@ struct PathEval
 
 // 依給定順序執行 tasks 的成本與可行性。
 // head_remaining ≥ 0：第一個任務已經在執行，還要這麼多秒才完成（BT 回報的預估），用它代替估計的到達＋執行時間
+// exempt：執行中的任務，不檢查它的硬期限（0 = 沒有）
 PathEval evaluatePath(
   const AgentState & agent, const std::vector<Task> & ordered_tasks, double now,
-  const ScoringParams & params, double head_remaining = -1.0);
+  const ScoringParams & params, double head_remaining = -1.0, TaskId exempt = 0);
 
 // 邊際成本轉分數；不可行時回傳 0
 double costToScore(double value, double marginal_cost, double cost_ref);
@@ -89,6 +97,7 @@ struct InsertionLimits
   // 插在最前面＝搶占路徑第一個（執行中、可中斷、優先級較低）：被搶占的任務會交回 CBBA 重新競標，
   // 評分時把它從路徑拿掉（不算「延後它」的損失），否則巡檢中的 V60 對身邊火警的出價永遠比不上閒著、但遠很多的（2026-10-12）
   bool preempt_drops_head{false};
+  TaskId exempt{0};              // 執行中的任務：不檢查硬期限（見 evaluatePath）
   // 這個位置可不可以（插入後的路徑評估、位置、插入後的路徑）；沒設定時都可以
   std::function<bool(const PathEval &, std::size_t, const std::vector<Task> &)> allow;
 };

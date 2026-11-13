@@ -302,3 +302,70 @@ TEST(Scoring, ActiveHeadWithRemainingTimeIsNotDelayed)
   EXPECT_NEAR(eval.legs[0].completion, 3.0, 1e-9);
   EXPECT_NEAR(eval.legs[1].arrival, 8.0, 1e-9);     // 3 + 20 m / 4 m/s
 }
+
+// ===========================================================================
+// 任務定義的時間與電量限制（4f 第一批，2026-11-13）
+// ===========================================================================
+TEST(Scoring, HardDeadlineIsInfeasibleSoftIsJustCostly)
+{
+  // 到達 10 s、期限 5 s：軟期限照樣出價（分數低），硬期限不可行（0）；執行中的（exempt）不檢查
+  const AgentState uav = makeUav(0, 0);
+  Task soft = makeTask(1, TaskType::NONE, 40, 0, 5.0);
+  soft.platform = 1;
+  Task hard = soft;
+  hard.ext.deadline_hard = true;
+  EXPECT_GT(bestInsertion(uav, {}, soft, 0.0, makeParams()).score, 0.0);
+  const Insertion no = bestInsertion(uav, {}, hard, 0.0, makeParams());
+  EXPECT_FALSE(no.feasible);
+  EXPECT_EQ(no.score, 0.0);
+  EXPECT_FALSE(evaluatePath(uav, {hard}, 0.0, makeParams()).feasible);
+  EXPECT_TRUE(evaluatePath(uav, {hard}, 0.0, makeParams(), -1.0, hard.id).feasible);
+}
+
+TEST(Scoring, InsertionMustNotPushHardDeadlineTaskLate)
+{
+  // 路徑上已有 A（到達 10 s、硬期限 12 s）；B 插在 A 前面會讓 A 遲到 → 只能排在 A 後面
+  const AgentState uav = makeUav(0, 0);
+  Task a = makeTask(1, TaskType::NONE, 40, 0, 12.0);
+  a.platform = 1;
+  a.ext.deadline_hard = true;
+  Task b = makeTask(2, TaskType::NONE, 0, 30, 600.0);
+  b.platform = 1;
+  const Insertion ins = bestInsertion(uav, {a}, b, 0.0, makeParams());
+  ASSERT_TRUE(ins.feasible);
+  EXPECT_EQ(ins.position, 1u);
+}
+
+TEST(Scoring, ReleaseMakesItWait)
+{
+  // 到達 10 s、release 30 s：等到 30 s 才算到達；等越久分數越低，後面的任務跟著延後
+  const AgentState uav = makeUav(0, 0);
+  Task now_task = makeTask(1, TaskType::NONE, 40, 0, 120.0);
+  now_task.platform = 1;
+  Task later = now_task;
+  later.ext.release = 30.0;
+  const PathEval e = evaluatePath(uav, {later}, 0.0, makeParams());
+  ASSERT_EQ(e.legs.size(), 1u);
+  EXPECT_DOUBLE_EQ(e.legs[0].arrival, 30.0);
+  EXPECT_LT(bestInsertion(uav, {}, later, 0.0, makeParams()).score,
+    bestInsertion(uav, {}, now_task, 0.0, makeParams()).score);
+  Task next = makeTask(2, TaskType::NONE, 40, 40, 600.0);
+  next.platform = 1;
+  EXPECT_DOUBLE_EQ(evaluatePath(uav, {later, next}, 0.0, makeParams()).legs[1].arrival, 30.0 + 40.0 / 4.0);
+  // release 已經過了：不用等
+  later.ext.release = 5.0;
+  EXPECT_DOUBLE_EQ(evaluatePath(uav, {later}, 0.0, makeParams()).legs[0].arrival, 10.0);
+}
+
+TEST(Scoring, TaskBatteryReserveRaisesTheFloor)
+{
+  // 電量 70、載具存量 20：路徑耗能 42 → 可行；任務要求做完剩 40 → 只能用 30 → 不可行
+  const AgentState uav = makeUav(0, 0, 70.0);
+  Task t = makeTask(1, TaskType::NONE, 40, 0, 60.0, 80.0, 10.0);
+  t.platform = 1;
+  EXPECT_TRUE(evaluatePath(uav, {t}, 0.0, makeParams()).feasible);
+  t.ext.min_battery_reserve = 40;
+  EXPECT_FALSE(evaluatePath(uav, {t}, 0.0, makeParams()).feasible);
+  t.ext.min_battery_reserve = 10;   // 比載具的低：照載具的
+  EXPECT_TRUE(evaluatePath(uav, {t}, 0.0, makeParams()).feasible);
+}

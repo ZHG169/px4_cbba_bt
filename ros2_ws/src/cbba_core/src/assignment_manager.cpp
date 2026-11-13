@@ -233,6 +233,8 @@ void AssignmentManager::step(double now)
         warn("保留的 " + name(r.task, r.version) + " 已被取代，不執行");
         reserved_.reset();
       }
+    } else if (now < dispatchTime(head)) {
+      holdForRelease(head);   // release 之前：前往時間算好、剛好在 release 時到，才發（不建立正式指派、不鎖定）
     } else if (!comm_.specReady(head)) {
       waiting = head;   // WAITING_SPEC：TaskSpec 收齊前不建立正式指派、不發 current_task
     } else {
@@ -274,6 +276,29 @@ void AssignmentManager::step(double now)
   }
 
   updateConstraints(now);
+}
+
+// release（4f，2026-11-13）：current_task 還沒有 release 欄位（介面 v2.0），BT 拿到就會出發。所以等到
+// 「release − 前往時間」才發，剛好在 release 時到達（前往時間的算法和出價一樣：標稱速度 × speed_margin）
+double AssignmentManager::dispatchTime(TaskId task) const
+{
+  const auto it = comm_.agent().tasks().find(task);
+  if (it == comm_.agent().tasks().end() || !(it->second.ext.release > 0.0)) {
+    return -kInf;
+  }
+  const AgentState & s = comm_.agent().state();
+  const ScoringParams & p = comm_.agent().params();
+  const double cruise = s.cruise_speed > 0.0 ? s.cruise_speed : p.cruise_speed;
+  const double speed = std::max(cruise * p.speed_margin, 0.1);
+  return it->second.ext.release - distance(s.position, it->second.position) / speed;
+}
+
+void AssignmentManager::holdForRelease(TaskId task)
+{
+  if (task != release_hold_) {
+    release_hold_ = task;
+    info("排第一但還沒到 release：" + taskName(task) + " 等到剛好來得及才發 current_task");
+  }
 }
 
 void AssignmentManager::setWaiting(TaskId task, double now)
