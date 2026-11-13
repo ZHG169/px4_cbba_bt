@@ -306,6 +306,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | 4c 過期 | expires 到了本機停止出價、撤銷自己的指派；建立者送 TASK_CLOSE reason 3 | — | 還沒做 |
 | 4d 搶占與接手 | 失聯接手依優先級（`takeover_by_priority`）、commit_radius（cbba_node 用 robot_state 算、AGENT_STATE 報已接近） | — | 還沒做 |
 | 4e optional 關閉 | O1～O4、`membership_ready`、`skip_satisfies`、TASK_CLOSE reason 4、`task_orphaned` 帶原因 | — | 還沒做 |
+| BT 接口（狗） | 外部 task manager 固定每種突發任務的 tasks → `current_task.spec`；狗 BT 的 `makeExternalWaypoint` 照 spec 建清單（格式同任務檔 `waypoints[].tasks`、SplitTask＋Switch 分派），spec 空的照舊、不能用回 `BAD_SPEC`（PERMANENT） | `docker/dog/task_manager_spec.patch`（mission_loader 的 `parseTasks`／`parseSpecTasks`、external_task、node、test_tree 4 項） | ✅ 11/13 編譯零警告、test_tree 52 項全過（新 4 項）；無人機骨架之後照做 |
 | 5 DETECTION | 機器人偵測送閘道、斷線暫存（欄位和 EVT-1 一起定） | — | 還沒做 |
 
 itest 現在不會建帶 TaskSpec 的任務：TaskSpec 的整合測試在第 4 步閘道注入時一起做。

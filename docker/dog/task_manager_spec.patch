@@ -1,0 +1,360 @@
+伯宇 task_manager（docs/handoff_uav_2026-10-12/bt/task_manager）的介接層：讀 current_task.spec（2026-11-13，2-1b M0）。
+外部 task manager（閘道）把每種突發任務要做的 tasks 放進 spec，經 CBBA 送到得標的狗；這份 patch 讓 BT 照 spec 建外部點的
+tasks 清單（格式同任務檔 waypoints[].tasks，config/MISSION_FORMAT.md 最後一節），SplitTask、Switch、樹都不動：
+  - mission_loader.hpp：任務檔解析 tasks 的迴圈抽成 parseTasks()（任務檔照舊呼叫）；新增 parseSpecTasks(spec)
+  - external_task.hpp：makeExternalWaypoint() 多一個可選的 tasks（有就照它＋report_result，沒有照舊 ptz_inspect）；
+    failureReason：BAD_SPEC → PERMANENT
+  - task_manager_node.cpp：onCurrentTask() 解析 spec → dispatchExternal()；解析失敗回 BAD_SPEC、不執行
+  - test/test_tree.cpp：4 項；config/MISSION_FORMAT.md：spec 一節
+要先套 task_manager_uint64.patch。他更新 handoff 時照順序重套：
+  cd docs/handoff_uav_2026-10-12/bt && patch -p1 -d task_manager < ../../../docker/dog/task_manager_uint64.patch
+  cd docs/handoff_uav_2026-10-12/bt && patch -p1 -d task_manager < ../../../docker/dog/task_manager_spec.patch
+
+diff -ruN task_manager.before/config/MISSION_FORMAT.md task_manager/config/MISSION_FORMAT.md
+--- task_manager.before/config/MISSION_FORMAT.md	2026-09-08 17:49:25.000000000 +0800
++++ task_manager/config/MISSION_FORMAT.md	2026-11-13 15:12:45.887117999 +0800
+@@ -54,3 +54,22 @@
+ 
+ VLM 不知道地圖座標。它該做的是選「去哪、看什麼、拍幾張」，座標由一張地點表（地點名 → x, y, z）查出來填進去。
+ 模擬地圖 `tb3_sandbox` 可用的點見 `sim_mission.yaml`；真機地點表要等導航組的地圖量出來。
++
++## CBBA 派來的任務：`current_task.spec`（2026-11-13）
++
++外部 task manager（閘道）注入任務時可以帶 TaskSpec，經 CBBA 到得標那隻狗的 `current_task.spec`。格式就是上面
++`waypoints[].tasks` 那一段，外面包一層 `tasks`（JSON 或 yaml 都行）：
++
++```json
++{"tasks": [
++  {"action": "ptz_inspect", "target": {"x": 12.0, "y": 5.0, "z": 1.5}, "snapshots": 2, "timeout": 30}
++]}
++```
++
++- 解析、檢查和任務檔共用同一段（`mission_loader.hpp` 的 `parseTasks`）：`action` 要在 `kValidActions`、參數規則一樣。
++- 站的位置照舊：`current_task.position` 前 1.5 m、面向它；spec 不用寫 go_to。
++- `report_result` 不要寫：BT 自己補在最後。
++- `spec` 是空的（舊型任務、平板）：照舊 `[ptz_inspect, report_result]`。
++- spec 不能用（不是 JSON／yaml、沒有 `tasks`、action 不認得、參數不合法）：不執行，回 `task_result` 失敗、
++  detail `BAD_SPEC: …`、reason PERMANENT（CBBA 不再派給這隻）。
++- 新增葉節點時：`bt/mission.xml` 的 Switch 加 case、`kValidActions` 加名字，這裡不用改。
+diff -ruN task_manager.before/include/task_manager/external_task.hpp task_manager/include/task_manager/external_task.hpp
+--- task_manager.before/include/task_manager/external_task.hpp	2026-11-12 02:42:36.402841557 +0800
++++ task_manager/include/task_manager/external_task.hpp	2026-11-13 15:11:24.356187199 +0800
+@@ -8,13 +8,17 @@
+ #include <optional>
+ #include <string>
+ #include <utility>
++#include <vector>
+ 
+ namespace task_manager {
+ 
+ // Spec 3.4.2: the task position is the target object. Stand `standoff` m in front of it facing it; the PTZ looks at it at `target_z`.
+ // Without the robot pose (TF not ready) stand on the target with yaw 0.
++// `tasks`（2026-11-13，CBBA 的 current_task.spec 解析出來的，parseSpecTasks）：有給就照它做、最後補 report_result；
++// 沒給（舊型任務、平板）照舊 [ptz_inspect, report_result]。站的位置兩者一樣
+ inline Waypoint makeExternalWaypoint(const char* prefix, uint64_t task_id, double tx, double ty,
+-                                     std::optional<std::pair<double, double>> p_now, double standoff, double target_z) {
++                                     std::optional<std::pair<double, double>> p_now, double standoff, double target_z,
++                                     const std::vector<Task>* tasks = nullptr) {
+   Waypoint w;
+   w.id = prefix + std::to_string(task_id);
+   w.x = tx; w.y = ty; w.yaw = 0;
+@@ -31,7 +35,12 @@
+   ptz.params = {{"target.x", std::to_string(tx)}, {"target.y", std::to_string(ty)}, {"target.z", std::to_string(target_z)}, {"snapshots", "1"}};
+   Task rep; rep.action = "report_result";
+   rep.params = {{"task_id", std::to_string(task_id)}};
+-  w.tasks = {ptz, rep};
++  if (tasks) {
++    w.tasks = *tasks;
++    w.tasks.push_back(rep);
++  } else {
++    w.tasks = {ptz, rep};
++  }
+   return w;
+ }
+ 
+@@ -95,7 +104,8 @@
+ inline uint8_t failureReason(bool success, const std::string& detail) {
+   if (success) return reason::NONE;
+   auto starts = [&](const char* p) { return detail.rfind(p, 0) == 0; };
+-  if (starts("NAV_FAILED(204)") || starts("NAV_FAILED(208)") || starts("PTZ_OUT_OF_RANGE")) return reason::PERMANENT;
++  // BAD_SPEC（2026-11-13）：current_task.spec 解析不了或有這台不支援的 action，換幾次都一樣
++  if (starts("NAV_FAILED(204)") || starts("NAV_FAILED(208)") || starts("PTZ_OUT_OF_RANGE") || starts("BAD_SPEC")) return reason::PERMANENT;
+   if (starts("PREEMPTED_BY_MANUAL")) return reason::PREEMPTED;
+   for (const char* s : {"OPERATOR_STOP", "EMERGENCY", "MISSION_TIMEOUT", "SHUTDOWN", "POLICY_ABORT", "INTERNAL_ERROR"})
+     if (starts(s)) return reason::STOPPED;
+diff -ruN task_manager.before/include/task_manager/mission_loader.hpp task_manager/include/task_manager/mission_loader.hpp
+--- task_manager.before/include/task_manager/mission_loader.hpp	2026-10-07 18:38:53.000000000 +0800
++++ task_manager/include/task_manager/mission_loader.hpp	2026-11-13 15:11:12.294150627 +0800
+@@ -35,6 +35,88 @@
+ // Action whitelist; keep in sync with the Switch cases in bt/mission.xml
+ inline const std::vector<std::string> kValidActions = {"ptz_inspect"};
+ 
++// One `tasks` list → Task (action + flattened params), validated against kValidActions. Shared by the mission file and
++// CBBA's current_task.spec (2026-11-13). `owner` prefixes the error messages ("waypoint 'B' 的", "spec 的"); throws std::runtime_error
++inline std::vector<Task> parseTasks(const YAML::Node& tasks, const std::string& owner) {
++  std::vector<Task> out;
++  int ti = 0;
++  for (auto t : tasks) {
++    ++ti;
++    Task task;
++    task.action = req(t, "action", owner + " task " + std::to_string(ti)).as<std::string>();
++
++    // reject unknown actions at load time
++    if (task.action.empty() ||
++        std::find(kValidActions.begin(), kValidActions.end(), task.action) ==
++            kValidActions.end()) {
++      std::string valid;
++      for (const auto& a : kValidActions)
++        valid += (valid.empty() ? "" : ", ") + a;
++      throw std::runtime_error(
++          owner + "第 " + std::to_string(ti) +
++          " 個 task（從 1 數起）：" +
++          (task.action.empty() ? std::string("action 是空字串")
++                               : "action '" + task.action + "' 不認得") +
++          "（合法：" + valid + "）");
++    }
++
++    for (auto kv : t) {
++      auto k = kv.first.as<std::string>();
++      if (k == "action") continue;
++      const std::string where = owner + "第 " + std::to_string(ti) + " 個 task：";
++      // flatten one-level maps: target: {x, y, z} -> target.x, target.y, target.z
++      if (kv.second.IsMap()) {
++        for (auto sub : kv.second) {
++          const std::string sk = k + "." + sub.first.as<std::string>();
++          if (!sub.second.IsScalar())
++            throw std::runtime_error(where + sk + " 只能是數字或字串");
++          task.params[sk] = sub.second.as<std::string>();
++        }
++      } else if (kv.second.IsScalar()) {
++        task.params[k] = kv.second.as<std::string>();
++      } else {
++        throw std::runtime_error(where + k + " 只能是數字、字串，或一層的表（像 target: {x, y, z}）");
++      }
++    }
++
++    // validate ptz params at load time with the same function the node uses
++    if (task.action == "ptz_inspect") {
++      PtzInspectAction::Goal probe;
++      std::string why;
++      if (!fillPtzGoal(task, probe, why)) {
++        throw std::runtime_error(
++            owner + "第 " + std::to_string(ti) +
++            " 個 task（從 1 數起）：ptz_inspect 的參數不合法 —— " + why);
++      }
++    }
++
++    // per-task on_fail override
++    const auto of = task.params.find("on_fail");
++    if (of != task.params.end() &&
++        of->second != "skip_task" && of->second != "abort") {
++      throw std::runtime_error(
++          owner + "第 " + std::to_string(ti) +
++          " 個 task（從 1 數起）：on_fail '" + of->second +
++          "' 不認得（合法：skip_task, abort）");
++    }
++    out.push_back(task);
++  }
++  return out;
++}
++
++// current_task.spec (2026-11-13, CBBA 協定版本 4)：外部任務要做的事，格式同任務檔 waypoints[].tasks（MISSION_FORMAT.md）：
++//   {"tasks": [{"action": "ptz_inspect", "target": {"x": 3, "y": 1, "z": 1.5}, "snapshots": 1}, ...]}
++// JSON 或 yaml 都行。report_result 不寫，makeExternalWaypoint 自己補在最後。不合法時丟 std::runtime_error（呼叫端回 BAD_SPEC）
++inline std::vector<Task> parseSpecTasks(const std::string& spec) {
++  YAML::Node doc;
++  try { doc = YAML::Load(spec); }
++  catch (const YAML::Exception& e) { throw std::runtime_error(std::string("spec 不是合法的 JSON／yaml：") + e.what()); }
++  if (!doc.IsMap() || !doc["tasks"] || !doc["tasks"].IsSequence())
++    throw std::runtime_error("spec 要有 tasks 陣列");
++  try { return parseTasks(doc["tasks"], "spec 的"); }
++  catch (const YAML::Exception& e) { throw std::runtime_error(std::string("spec：") + e.what()); }
++}
++
+ inline Mission loadMissionImpl(const std::string& path) {
+   auto doc = YAML::LoadFile(path);
+   Mission m;
+@@ -62,68 +144,7 @@
+                                  "' 不認得（合法：skip_waypoint, abort）");
+     }
+ 
+-    int ti = 0;
+-    for (auto t : n["tasks"]) {
+-      ++ti;
+-      Task task;
+-      task.action = req(t, "action", "waypoint '" + wp.id + "' task " + std::to_string(ti)).as<std::string>();
+-
+-      // reject unknown actions at load time
+-      if (task.action.empty() ||
+-          std::find(kValidActions.begin(), kValidActions.end(), task.action) ==
+-              kValidActions.end()) {
+-        std::string valid;
+-        for (const auto& a : kValidActions)
+-          valid += (valid.empty() ? "" : ", ") + a;
+-        throw std::runtime_error(
+-            "waypoint '" + wp.id + "' 的第 " + std::to_string(ti) +
+-            " 個 task（從 1 數起）：" +
+-            (task.action.empty() ? std::string("action 是空字串")
+-                                 : "action '" + task.action + "' 不認得") +
+-            "（合法：" + valid + "）");
+-      }
+-
+-      for (auto kv : t) {
+-        auto k = kv.first.as<std::string>();
+-        if (k == "action") continue;
+-        const std::string where = "waypoint '" + wp.id + "' 的第 " + std::to_string(ti) + " 個 task：";
+-        // flatten one-level maps: target: {x, y, z} -> target.x, target.y, target.z
+-        if (kv.second.IsMap()) {
+-          for (auto sub : kv.second) {
+-            const std::string sk = k + "." + sub.first.as<std::string>();
+-            if (!sub.second.IsScalar())
+-              throw std::runtime_error(where + sk + " 只能是數字或字串");
+-            task.params[sk] = sub.second.as<std::string>();
+-          }
+-        } else if (kv.second.IsScalar()) {
+-          task.params[k] = kv.second.as<std::string>();
+-        } else {
+-          throw std::runtime_error(where + k + " 只能是數字、字串，或一層的表（像 target: {x, y, z}）");
+-        }
+-      }
+-
+-      // validate ptz params at load time with the same function the node uses
+-      if (task.action == "ptz_inspect") {
+-        PtzInspectAction::Goal probe;
+-        std::string why;
+-        if (!fillPtzGoal(task, probe, why)) {
+-          throw std::runtime_error(
+-              "waypoint '" + wp.id + "' 的第 " + std::to_string(ti) +
+-              " 個 task（從 1 數起）：ptz_inspect 的參數不合法 —— " + why);
+-        }
+-      }
+-
+-      // per-task on_fail override
+-      const auto of = task.params.find("on_fail");
+-      if (of != task.params.end() &&
+-          of->second != "skip_task" && of->second != "abort") {
+-        throw std::runtime_error(
+-            "waypoint '" + wp.id + "' 的第 " + std::to_string(ti) +
+-            " 個 task（從 1 數起）：on_fail '" + of->second +
+-            "' 不認得（合法：skip_task, abort）");
+-      }
+-      wp.tasks.push_back(task);
+-    }
++    wp.tasks = parseTasks(n["tasks"], "waypoint '" + wp.id + "' 的");
+     m.waypoints->push_back(wp);
+   }
+   return m;
+diff -ruN task_manager.before/src/task_manager_node.cpp task_manager/src/task_manager_node.cpp
+--- task_manager.before/src/task_manager_node.cpp	2026-11-12 02:42:36.413085758 +0800
++++ task_manager/src/task_manager_node.cpp	2026-11-13 15:11:40.334881138 +0800
+@@ -292,9 +292,11 @@
+   }
+ 
+   // Shared tail of callback A / B: queue it at the head, let the sentinel halt what runs, draw it
+-  void dispatchExternal(const char* prefix, uint64_t task_id, double tx, double ty, const Waypoint* active, uint64_t& cur) {
++  // tasks：current_task.spec 解析出來的（2026-11-13）；nullptr = 照舊 [ptz_inspect, report_result]
++  void dispatchExternal(const char* prefix, uint64_t task_id, double tx, double ty, const Waypoint* active, uint64_t& cur,
++                        const std::vector<Task>* tasks = nullptr) {
+     const auto pose = currentPose();
+-    const Waypoint wp = makeExternalWaypoint(prefix, task_id, tx, ty, pose, standoff_, target_z_);
++    const Waypoint wp = makeExternalWaypoint(prefix, task_id, tx, ty, pose, standoff_, target_z_, tasks);
+     insertExternal(*waypoints_, active, wp, task_id, cur);
+     tree_->rootBlackboard()->set("current_task_id", cur);
+     marker_wps_.push_back(wp);
+@@ -326,8 +328,24 @@
+       return;
+     }
+     if (g_ctx.manual_active) { RCLCPP_WARN(get_logger(), "人工接管中，忽略 CBBA 任務 %llu", static_cast<unsigned long long>(t.task_id)); return; }
++    // current_task.spec（2026-11-13，CBBA 協定版本 4）：外部 task manager 給的 tasks（格式同任務檔，mission_loader.hpp 的
++    // parseSpecTasks）。空 = 舊型任務，照舊 [ptz_inspect, report_result]。解析不了、有不認得的 action → 不執行，
++    // 回 BAD_SPEC（PERMANENT：CBBA 不再派給這台）；手上原本的 CBBA 點 CBBA 已經換掉了，一起拿掉
++    std::optional<std::vector<Task>> spec_tasks;
++    if (!t.spec.empty()) {
++      try { spec_tasks = parseSpecTasks(t.spec); }
++      catch (const std::exception& e) {
++        if (cancelExternal(*waypoints_, active, "cbba_", cur)) { bb->set("current_task_id", cur); kick(); }
++        g_ctx.task_result_pub(t.task_id, false, std::string("BAD_SPEC: ") + e.what());
++        RCLCPP_ERROR(get_logger(), "CBBA 任務 %llu 的 spec 不能用 → 回 BAD_SPEC 交還：%s",
++                     static_cast<unsigned long long>(t.task_id), e.what());
++        return;
++      }
++      RCLCPP_INFO(get_logger(), "CBBA 任務 %llu 帶 spec：%zu 個 task", static_cast<unsigned long long>(t.task_id), spec_tasks->size());
++    }
+     last_task_ = t;   // spec §3.4.8: kept for a replay after a rebuild
+-    dispatchExternal("cbba_", t.task_id, t.position.x, t.position.y, active, cur);   // another cbba point in hand is simply replaced: CBBA knows
++    dispatchExternal("cbba_", t.task_id, t.position.x, t.position.y, active, cur,
++                     spec_tasks ? &*spec_tasks : nullptr);   // another cbba point in hand is simply replaced: CBBA knows
+   }
+ 
+   // callback B: /<ns>/manual_override (spec §3.4.6)
+diff -ruN task_manager.before/test/test_tree.cpp task_manager/test/test_tree.cpp
+--- task_manager.before/test/test_tree.cpp	2026-11-12 02:42:36.407219346 +0800
++++ task_manager/test/test_tree.cpp	2026-11-13 15:12:11.334960629 +0800
+@@ -1038,3 +1038,67 @@
+   for (const auto& [in, want] : rows)
+     EXPECT_EQ(failureReason(in.first, in.second), want) << "detail '" << in.second << "'";
+ }
++
++// ───────────────── current_task.spec（2026-11-13，CBBA 協定版本 4）─────────────────
++
++// spec 照任務檔的 tasks 格式：解析成 Task（參數攤平），外部點照它做、最後補 report_result；站的位置和沒有 spec 時一樣
++TEST_F(TreeTest, SpecTasksReplaceTheFixedPtzInspect) {
++  const auto tasks = parseSpecTasks(
++      R"({"tasks": [{"action": "ptz_inspect", "target": {"x": 4, "y": 1, "z": 1.5}, "snapshots": 2},
++                    {"action": "ptz_inspect", "target": {"x": 5, "y": 1, "z": 0.5}}]})");
++  ASSERT_EQ(tasks.size(), 2u);
++  EXPECT_EQ(tasks[0].get("target.z"), "1.5");
++  EXPECT_EQ(tasks[0].get("snapshots"), "2");
++  auto w = makeExternalWaypoint("cbba_", 77, 3.0, 0.0, std::make_pair(0.0, 0.0), 1.5, 1.0, &tasks);
++  EXPECT_NEAR(w.x, 1.5, 1e-9); EXPECT_NEAR(w.yaw, 0.0, 1e-9);
++  ASSERT_EQ(w.tasks.size(), 3u);
++  EXPECT_EQ(w.tasks[0].get("target.x"), "4");
++  EXPECT_EQ(w.tasks[1].get("target.x"), "5");
++  EXPECT_EQ(w.tasks[2].action, "report_result");
++  EXPECT_EQ(w.tasks[2].get("task_id"), "77");
++  // yaml 也行；tasks 是空的 = 走到點就回報
++  EXPECT_TRUE(parseSpecTasks("tasks: []").empty());
++}
++
++// 不能用的 spec：丟例外（node 回 BAD_SPEC，reason PERMANENT）
++TEST_F(TreeTest, BadSpecIsRejected) {
++  EXPECT_THROW(parseSpecTasks("{not json"), std::runtime_error);
++  EXPECT_THROW(parseSpecTasks(R"({"steps": []})"), std::runtime_error);                  // 沒有 tasks
++  EXPECT_THROW(parseSpecTasks(R"({"tasks": [{"action": "fly"}]})"), std::runtime_error);  // 不在 kValidActions
++  EXPECT_THROW(parseSpecTasks(R"({"tasks": [{"action": "report_result"}]})"), std::runtime_error);   // 自動補的，不能寫
++  EXPECT_THROW(parseSpecTasks(R"({"tasks": [{"action": "ptz_inspect"}]})"), std::runtime_error);     // 缺 target
++  EXPECT_EQ(failureReason(false, "BAD_SPEC: spec 要有 tasks 陣列"), reason::PERMANENT);
++}
++
++// 帶 spec 的 cbba 點整個跑完：照 spec 的兩個 ptz_inspect、回報成功
++TEST_F(TreeTest, SpecWaypointRunsAndReports) {
++  build(); captureReports();
++  const auto tasks = parseSpecTasks(
++      R"({"tasks": [{"action": "ptz_inspect", "target": {"x": 9, "y": 9, "z": 1}},
++                    {"action": "ptz_inspect", "target": {"x": 9, "y": 8, "z": 1}}]})");
++  auto bb = tree_->rootBlackboard();
++  auto q  = bb->get<std::shared_ptr<std::deque<Waypoint>>>("waypoints");
++  uint64_t cur = 0;
++  insertExternal(*q, nullptr, makeExternalWaypoint("cbba_", 5, 9, 9, std::nullopt, 1.5, 1.0, &tasks), 5, cur);
++  bb->set("current_task_id", cur);
++  EXPECT_EQ(tree_->tickOnce(), BT::NodeStatus::FAILURE);   // 哨兵第一拍抄 id
++  EXPECT_EQ(runToEnd(), BT::NodeStatus::SUCCESS);
++  ASSERT_EQ(reports_.size(), 1u);
++  EXPECT_EQ(reports_[0].id, 5u); EXPECT_TRUE(reports_[0].ok);
++  EXPECT_EQ(outcomes()[0], "cbba_5/goto/OK");
++  EXPECT_EQ(outcomes()[1], "cbba_5/ptz_inspect/OK");
++  EXPECT_EQ(outcomes()[2], "cbba_5/ptz_inspect/OK");
++  EXPECT_EQ(outcomes()[3], "cbba_5/report_result/OK");
++}
++
++// 任務檔照舊能讀（解析抽成 parseTasks 之後）：不認得的 action 一樣擋，訊息帶點名
++TEST_F(TreeTest, MissionFileStillRejectsUnknownAction) {
++  const auto bad = variantYaml("spec_refactor", "ptz_inspect", "fly");
++  try {
++    loadMission(bad);
++    FAIL() << "應該丟例外";
++  } catch (const std::runtime_error& e) {
++    EXPECT_NE(std::string(e.what()).find("waypoint '"), std::string::npos) << e.what();
++    EXPECT_NE(std::string(e.what()).find("'fly' 不認得"), std::string::npos) << e.what();
++  }
++}

@@ -42,6 +42,7 @@ case "${1:-}" in
         mkdir -p "${DOG_WS}"
         cd "${DOG_WS}"
         # --base-paths 直接指到 handoff，不複製；2026-11-11 起他的介接層 task_id 改 uint64（docker/dog/task_manager_uint64.patch），
+        # 2026-11-13 起讀 current_task.spec（docker/dog/task_manager_spec.patch，要先套 uint64 的），
         # 他更新時覆蓋 handoff、照 patch 開頭的說明重套，再 build 一次
         python3 -m colcon build --base-paths "${HANDOFF}" \
             --build-base "${DOG_WS}/build" --install-base "${DOG_WS}/install" \
