@@ -19,7 +19,7 @@
       Unavailable，每一格是當下的狀態）、Battery (%)（同一個顏色）、旗子的圖例
   最後一格（demo_final.png）：加上 UAV 的完整航跡（UAV1 實線、UAV2 虛線、UAV3 點線，航跡上標名字）、Makespan、Final Battery (%)
   不顯示任務數量（使用者 2026-11-06）；狗巡邏時顯示巡檢點（dog1 A1～、dog2 B1～、dog3 C1～，2026-11-07，demo_plan.json 的 dog[].patrol；
-  到點 ptz_inspect 時 Executing），地面任務 F、人工指派 M 優先
+  到點 inspect 時 Executing），地面任務 F、人工指派 M 優先
   --at 秒：只畫那一格（demo_at.png，看版面用）；--final-only：只重畫最後一格
 """
 import argparse
@@ -424,7 +424,7 @@ def main():
         return "—", "—"
 
     # 狗的日常巡檢（2026-11-07 使用者：狗也要有任務變化）：itest 的 demo_plan.json 的 dog[].patrol（dog1 A1～、dog2 B1～、
-    # dog3 C1～，到點後 ptz_inspect 看最近的設備；每隻狗各自一條巡檢線）。現在在哪個巡檢點照伯宇 BT 的 log
+    # dog3 C1～，到點後 inspect 看最近的設備；每隻狗各自一條巡檢線）。現在在哪個巡檢點照伯宇 BT 的 log
     # （dog_bt_<ns>.log 的「去 B2」→ En Route、「✓ 抵達 B2」→ Executing）：被 CBBA 任務打斷後他會接回被打斷的那個點，
     # 原本用位置推算（到點再離開就換下一個）會跳到下一個點，和實際不同步（2026-11-07）
     patrol_of = {u["id"]: u.get("patrol") or [] for u in (plan.get("dog") or [])} if plan else {}

@@ -265,13 +265,14 @@ CBBA 不自己刪減角色，所以 optional 角色什麼時候「不做了」�
 
 ExecuteSteps（伯宇）從 `current_task.spec` 取 steps；CBBA 不解析 steps。
 
-**TaskSpec 的格式與 BT 的接口（使用者 2026-11-13）**：外部 task manager（閘道）把每一種突發任務要做的事先固定成一套 tasks，
-注入時放進 spec；BT 收到後照它建外部點的 tasks 清單，交給現有的 SplitTask、Switch 依 action 分派（＝2-1b 的 ExecuteSteps 雛形）。
-spec 的格式直接沿用狗 BT 任務檔的 `waypoints[].tasks`（伯宇的 `config/MISSION_FORMAT.md`），外面包一層 `tasks`：
-`{"tasks": [{"action": "ptz_inspect", "target": {"x": 12, "y": 5, "z": 1.5}, "snapshots": 2}]}`。站的位置用
-`current_task.position`（spec 不寫 go_to）；`report_result` 由 BT 補；spec 空的照舊型流程；spec 不能用回 `BAD_SPEC`（PERMANENT）。
-狗：`docker/dog/task_manager_spec.patch`；無人機的骨架副本之後照同樣做。cbba_node 只在快取裡有這個 revision 的
-TaskSpec（或任務沒有 TaskSpec）時才發 current_task，所以 BT 拿到的任務一定有完整的 steps（第二節「TaskSpec 的傳送」）。
+**TaskSpec 的格式與 BT 的接口（使用者 2026-11-13）**：外部 task manager（閘道、規劃器、Node-RED 積木編輯器）把每一種突發任務
+要做的事寫成 2-1b 的**通用 steps**（`step.action`，註冊表 `actions.yaml` 的名稱，**狗和無人機用同一套**），注入時放進 spec：
+`{"steps": [{"action": "go_to", "location": {"x": 12, "y": 5}}, {"action": "inspect", "location": {"x": 12, "y": 6, "z": 1.5}},
+{"action": "speak", "params": {"text": "…"}}]}`（每步 action、location、object、params）。各平台的 BT 介接層把 steps 翻成自己的做法：
+狗翻成外部點的 tasks、交給現有的 SplitTask＋Switch（第一步 go_to 是站的位置；inspect 的 location → 雲台 target；
+`docker/dog/task_manager_spec.patch`），無人機由 uav_adapter 翻成 `/MAV1/api/*`（之後做）。動作名稱統一：狗原本的
+`ptz_inspect` 改叫 `inspect`。`report_result` 由 BT 補；spec 空的照舊型流程；這台不支援的 action、spec 不能用 → `BAD_SPEC`（PERMANENT）。
+同一個事件要狗和無人機一起做時，拆成兩個角色（同一個 group_id、各自的 platform 與 steps），CBBA 分別派
 
 ---
 

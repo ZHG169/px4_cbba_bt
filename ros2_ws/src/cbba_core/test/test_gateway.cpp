@@ -259,7 +259,7 @@ struct Revisable
         dog->takeRequests();
         dog_publishes += dog->takeAssignedChanged() ? 1 : 0;
       });
-    req.spec = "{\"tasks\":[{\"action\":\"ptz_inspect\"}]}";
+    req.spec = "{\"steps\":[{\"action\":\"inspect\"}]}";
     req.expires_sec = expires_sec;
     req.task.ext.commit_radius = commit_radius;
     const InjectResult r = gw.inject(req, swarm.now());
@@ -283,7 +283,7 @@ TEST(Revision, ContentChangeKeepsAssignmentAndRepublishes)
 
   t.req.revision = 2;
   t.req.task.position = {14.0, 1.0, 0.0};
-  t.req.spec = "{\"tasks\":[{\"action\":\"ptz_inspect\"},{\"action\":\"ptz_inspect\"}]}";
+  t.req.spec = "{\"steps\":[{\"action\":\"inspect\"},{\"action\":\"inspect\"}]}";
   const InjectResult r = t.gw.inject(t.req, t.swarm.now());
   ASSERT_EQ(r.status, InjectStatus::REVISED) << r.reason;
   EXPECT_EQ(r.task_id, t.id);
@@ -338,7 +338,7 @@ TEST(Revision, LaggingNodeCatchesUp)
   t.swarm.block(50, 1, PacketType::TASK_ANNOUNCE);
   t.req.revision = 2;
   t.req.task.position = {15.0, 0.0, 0.0};
-  t.req.spec = "{\"tasks\":[]}";
+  t.req.spec = "{\"steps\":[]}";
   ASSERT_EQ(t.gw.inject(t.req, t.swarm.now()).status, InjectStatus::REVISED);
   t.swarm.run(3.0);
   const Task & got = t.swarm.node(1).agent().tasks().at(t.id);

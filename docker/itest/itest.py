@@ -2797,7 +2797,7 @@ class DemoSuite(UavSuite):
                 if bt and route:
                     # 巡邏（2026-11-05）：照伯宇的巡檢線產生任務檔（他的格式，config/MISSION_FORMAT.md），loop 一直巡。
                     # 日常巡檢的內容（2026-11-07 使用者：狗也要有任務定義，Live Agent Status 才看得到變化）：每個巡檢點
-                    # 到點後 ptz_inspect 雲台看最近的設備頂面、拍 1 張（伯宇的 BT 唯一的到點動作；方塊身體的假雲台等
+                    # 到點後 inspect（2026-11-13 前叫 ptz_inspect）雲台看最近的設備頂面、拍 1 張（伯宇的 BT 唯一的到點動作；方塊身體的假雲台等
                     # dog.ptz_sec 秒回 OK）。沒有設備清單時照舊只走路
                     name = f"dog_mission_{u['ns']}.yaml"
                     ptz_sec = float(dog.get("ptz_sec", 5.0))
@@ -2808,7 +2808,7 @@ class DemoSuite(UavSuite):
                     for k, (px, py) in enumerate(route):
                         e = min(self.equip, key=lambda q: math.hypot(q["x"] - px, q["y"] - py)) if self.equip else None
                         tasks = ("    tasks: []\n" if e is None else
-                                 "    tasks:\n      - action: ptz_inspect\n"
+                                 "    tasks:\n      - action: inspect\n"
                                  f"        target: {{ x: {e['x']:g}, y: {e['y']:g}, z: {e['top']:g} }}\n"
                                  f"        snapshots: 1\n        timeout: {ptz_sec + 10:g}\n")
                         wps.append(f"  - id: {letter}{k + 1}\n    goto: {{ x: {px:g}, y: {py:g}, yaw: 0.0 }}\n" + tasks)

@@ -11,7 +11,8 @@
 |---|---|---|
 | task_id 改 **uint64**（`Task`、`TaskResult`、`Bid`；建立者｜世代｜流水號） | `task_manager` 約 12 處 `uint32_t task_id`（`externalTaskId`、`current_task_id`、埠、task_result）要改，否則回報的 task_id 會被截斷 | `docker/dog/task_manager_uint64.patch` |
 | `Task.msg` 加 `revision`、`spec` | 不讀新欄位也能跑；但 DDS 型別雜湊變了，**沒重編的程式收不到** | 用到 `swarm_interfaces` 的全部重編 |
-| `current_task.spec`：外部 task manager（閘道）給這個任務要做的 tasks（格式同你的任務檔 `waypoints[].tasks`） | 不套的話照舊 `[ptz_inspect, report_result]`（spec 被忽略） | `docker/dog/task_manager_spec.patch`（`mission_loader` 的 `parseTasks`／`parseSpecTasks`、`makeExternalWaypoint` 多一個 tasks、`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
+| `current_task.spec`：外部 task manager（閘道、Node-RED）給的通用 steps（`{"steps": [{"action": "go_to"…}, {"action": "inspect"…}]}`，狗和無人機同一套名稱） | 不套的話照舊固定做一次雲台（spec 被忽略） | `docker/dog/task_manager_spec.patch`（`parseSpecSteps`：第一步 go_to 當站的位置、inspect 的 location → 雲台 target；`makeExternalWaypoint` 多一個 tasks、`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
+| 動作名稱統一：`ptz_inspect` 改叫 **`inspect`** | Switch 的 case、`kValidActions`、你的任務檔（`action: inspect`）都要改；雲台的 ROS action（`/ptz_inspect`、`PtzInspect.action`）不變 | 同上的 patch；新版的任務檔、新葉節點的 case 名稱請用通用名稱（`go_to`、`track`、`wait`、`speak`、`return_to_dock`、`alert_operator`） |
 | 改版：同一個 task_id、較大的 `revision`（例如目標移動） | `onCurrentTask` 的 `if (t.task_id == cur) return;` 會當成重送，照舊版做完 | **還沒做，要和你對**：同 task_id、revision 變大時先取消再插入 |
 | 新增葉節點（Track、Wait、Speak…） | spec 裡能用的 action 要同時在 `kValidActions` 和 Switch 的 case | 你新版加 case 時一起加 `kValidActions` |
 
