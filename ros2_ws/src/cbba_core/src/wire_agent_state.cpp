@@ -23,6 +23,7 @@ constexpr std::uint8_t kPreemptible = 1u << 1;
 constexpr std::uint8_t kHasActive = 1u << 2;
 constexpr std::uint8_t kHasQueued = 1u << 3;
 constexpr std::uint8_t kWaitingSpec = 1u << 4;
+constexpr std::uint8_t kCommitted = 1u << 5;
 
 // 閘道（0）不是載具：沒有能力、不出價（2026-11-13）
 bool validVehicle(const AgentStateBody & b)
@@ -82,7 +83,8 @@ std::vector<std::uint8_t> encodeAgentState(Header header, const AgentStateBody &
   w.f32(b.progress);
   w.u8(b.execution_state);
   w.u8(static_cast<std::uint8_t>((b.exec_known ? kExecKnown : 0) | (b.preemptible ? kPreemptible : 0) |
-    (b.has_active ? kHasActive : 0) | (b.has_queued ? kHasQueued : 0) | (b.waiting_spec ? kWaitingSpec : 0)));
+    (b.has_active ? kHasActive : 0) | (b.has_queued ? kHasQueued : 0) | (b.waiting_spec ? kWaitingSpec : 0) |
+    (b.committed ? kCommitted : 0)));
   w.f32(b.remaining_time);
   w.u64(b.active_task);
   w.u64(b.active_version);
@@ -123,6 +125,7 @@ std::optional<AgentStateBody> decodeAgentState(const std::uint8_t * data, std::s
   b.has_active = (exec_flags & kHasActive) != 0;
   b.has_queued = (exec_flags & kHasQueued) != 0;
   b.waiting_spec = (exec_flags & kWaitingSpec) != 0;
+  b.committed = (exec_flags & kCommitted) != 0;
   b.remaining_time = r.f32();
   b.active_task = r.u64();
   b.active_version = r.u64();

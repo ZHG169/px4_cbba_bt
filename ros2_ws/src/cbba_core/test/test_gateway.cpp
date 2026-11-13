@@ -247,7 +247,7 @@ struct Revisable
   InjectRequest req = groundRequest("move-1");
   TaskId id{0};
 
-  explicit Revisable(double expires_sec = 0.0)
+  explicit Revisable(double expires_sec = 0.0, double commit_radius = 0.0)
   {
     AssignmentConfig c;
     c.require_accept = false;
@@ -261,6 +261,7 @@ struct Revisable
       });
     req.spec = "{\"tasks\":[{\"action\":\"ptz_inspect\"}]}";
     req.expires_sec = expires_sec;
+    req.task.ext.commit_radius = commit_radius;
     const InjectResult r = gw.inject(req, swarm.now());
     EXPECT_EQ(r.status, InjectStatus::CREATED) << r.reason;
     id = r.task_id;
@@ -415,4 +416,90 @@ TEST(Expiry, NoExpiresNeverExpires)
   EXPECT_TRUE(t.swarm.node(50).taskOpen(t.id));
   EXPECT_FALSE(t.swarm.node(50).expired(t.id, t.swarm.now()));
   EXPECT_TRUE(t.dog->active());
+}
+
+// ===========================================================================
+// 搶占與接手（4d，2026-11-13）
+// ===========================================================================
+TEST(Preempt, MaskAndLegacyRule)
+{
+  // 舊型：火警（P0）可以搶巡檢（P3），反過來、同級不行。新型：預設搶比自己低的級；遮罩可以指定（含同級）
+  Task fire;
+  fire.type = TaskType::GROUND_INTERVENTION;
+  Task patrol;
+  patrol.type = TaskType::PATROL;
+  EXPECT_TRUE(mayPreempt(fire, patrol));
+  EXPECT_FALSE(mayPreempt(patrol, fire));
+  EXPECT_FALSE(mayPreempt(fire, fire));
+
+  Task p1;
+  p1.type = TaskType::NONE;
+  p1.priority = 1;
+  Task p0 = p1;
+  p0.priority = 0;
+  Task p3 = p1;
+  p3.priority = 3;
+  EXPECT_TRUE(mayPreempt(p1, p3));
+  EXPECT_FALSE(mayPreempt(p1, p1));
+  EXPECT_FALSE(mayPreempt(p1, p0));
+  p1.ext.can_preempt = 0b0010;   // 只搶 P1（同級）
+  EXPECT_TRUE(mayPreempt(p1, p1));
+  EXPECT_FALSE(mayPreempt(p1, p3));
+}
+
+TEST(Takeover, LimitFollowsPriority)
+{
+  // 持有者失聯後依優先級撤銷：P1 15 s（P0 10 s、P2／P3 30 s）。狗離線 → 閘道約 1.5 + 15 s 後撤銷它的指派
+  Revisable t;
+  ASSERT_TRUE(t.dog->active());
+  EXPECT_DOUBLE_EQ(t.swarm.node(kGateway).takeoverLimit(t.id), 15.0);
+  t.swarm.setOnline(50, false);
+  t.swarm.run(12.0);
+  EXPECT_EQ(t.swarm.node(kGateway).assignment(t.id).assignee, 50);   // 還鎖著（寧可等）
+  t.swarm.run(7.0);
+  EXPECT_EQ(t.swarm.node(kGateway).assignment(t.id).assignee, kNoAgent);
+  EXPECT_GE(t.swarm.node(kGateway).stats().takeovers, 1);
+}
+
+TEST(Commit, NearTargetCannotBePreempted)
+{
+  // 執行中任務的 commit_radius 內（狗 (5,0)、目標 (12,0)、半徑 10）：P0 的新任務搶不到，沒人接；
+  // 狗離開 1.5 倍半徑後解除，P0 搶占成功。AGENT_STATE 帶「已接近」
+  Revisable t(0.0, 10.0);
+  ASSERT_TRUE(t.dog->active());
+  t.swarm.run(1.0);
+  EXPECT_TRUE(t.swarm.node(kGateway).neighbors().at(50).committed);
+
+  InjectRequest urgent = groundRequest("fire-9");
+  urgent.task.priority = 0;
+  urgent.task.position = {6.0, 1.0, 0.0};
+  const InjectResult u = t.gw.inject(urgent, t.swarm.now());
+  ASSERT_EQ(u.status, InjectStatus::CREATED) << u.reason;
+  t.swarm.run(2.0);
+  EXPECT_EQ(t.dog->active()->task, t.id);
+  EXPECT_EQ(t.swarm.node(kGateway).agent().winner(u.task_id), kNoAgent);
+
+  AgentState far = t.swarm.node(50).agent().state();
+  far.position = {30.0, 0.0, 0.0};   // 離目標 18 m > 15 m
+  t.swarm.node(50).setState(far);
+  t.swarm.run(3.0);
+  EXPECT_FALSE(t.swarm.node(kGateway).neighbors().at(50).committed);
+  ASSERT_TRUE(t.dog->active());
+  EXPECT_EQ(t.dog->active()->task, u.task_id);
+}
+
+TEST(Commit, WithoutRadiusHigherPriorityPreempts)
+{
+  // 對照：沒有 commit_radius 時，P0 搶占執行中的 P1
+  Revisable t;
+  ASSERT_TRUE(t.dog->active());
+  InjectRequest urgent = groundRequest("fire-10");
+  urgent.task.priority = 0;
+  urgent.task.position = {6.0, 1.0, 0.0};
+  const InjectResult u = t.gw.inject(urgent, t.swarm.now());
+  ASSERT_EQ(u.status, InjectStatus::CREATED) << u.reason;
+  t.swarm.run(3.0);
+  ASSERT_TRUE(t.dog->active());
+  EXPECT_EQ(t.dog->active()->task, u.task_id);
+  EXPECT_FALSE(t.swarm.node(kGateway).neighbors().at(50).committed);
 }

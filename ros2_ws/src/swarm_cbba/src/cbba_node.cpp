@@ -281,9 +281,21 @@ public:
 
     CommConfig comm;
     comm.lost_timeout = declare_parameter<double>("lost_timeout", comm.lost_timeout);
-    // 失聯接手：持有者失聯後多久撤銷它已接受的任務、重新競標（火警寧可重複、巡檢寧可等）。全隊要一樣
-    comm.takeover_fire = declare_parameter<double>("takeover_fire", comm.takeover_fire);
-    comm.takeover_patrol = declare_parameter<double>("takeover_patrol", comm.takeover_patrol);
+    // 失聯接手：持有者失聯後多久撤銷它已接受的任務、重新競標，依優先級 P0～P3（2026-11-13；P0 寧可重複、P2／P3 寧可等）。
+    // 全隊要一樣。舊參數 takeover_fire（= P0）、takeover_patrol（= P1～P3）保留相容：takeover_by_priority 的預設由它們來
+    const double fire = declare_parameter<double>("takeover_fire", comm.takeover_by_priority[0]);
+    const double patrol = declare_parameter<double>("takeover_patrol", comm.takeover_by_priority[3]);
+    std::vector<double> by_priority{fire, comm.takeover_by_priority[1], patrol, patrol};
+    if (patrol != comm.takeover_by_priority[3]) {
+      by_priority[1] = patrol;   // 只給舊的巡檢時限：P1～P3 都用它（和原本「火警以外都是 takeover_patrol」一樣）
+    }
+    by_priority = declare_parameter<std::vector<double>>("takeover_by_priority", by_priority);
+    if (by_priority.size() != 4) {
+      throw std::invalid_argument("takeover_by_priority needs 4 values (P0..P3)");
+    }
+    for (std::size_t p = 0; p < 4; ++p) {
+      comm.takeover_by_priority[p] = by_priority[p];
+    }
     comm.max_packet = static_cast<std::size_t>(
       declare_parameter<int>("max_packet", static_cast<int>(comm.max_packet)));
     // 補發（協定版本 3，cbba_core/doc/protocol_v3_sync.md）：摘要比對 → 缺口請求 → 限速的分批回覆

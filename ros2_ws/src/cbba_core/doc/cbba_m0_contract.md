@@ -380,6 +380,14 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | 建立者關閉 | 建立者（閘道）送 TASK_CLOSE reason 3（`expired_closes`）；建立者離線期間過期的，回來後看到就送。在那之前任務開著、沒人出價（不當成孤兒任務） |
 | 節點 | log「任務 … 過期（expires 到了）」「任務 … 已過期（建立者關閉，reason 3）」；孤兒任務檢查略過過期的 |
 
+### 實作（2026-11-13，第 4d 步：搶占與失聯接手）
+
+| 項目 | 程式 |
+|---|---|
+| can_preempt | `types.hpp` 的 `mayPreempt(by, victim)`：新型任務看自己的遮罩（0 = 預設比自己低的級），舊型照原本（優先級較高）；`CbbaAgent::canPreempt` 和「搶占時不算被搶占任務的延後」都改用它。同級要遮罩明確包含自己那一級；`preempt_margin`（同級要好多少）還沒用 |
+| commit_radius | `AssignmentManager::updateCommitted`：執行中任務有 commit_radius 時，用 robot_state 的位置算水平距離，進到半徑內 → 已接近、不可再被搶占（ExecConstraints.preemptible = false）；離開 1.5 倍才解除。AGENT_STATE exec_flags bit 5「已接近」（`NeighborInfo::committed`；不認得的位元舊節點忽略，不用改協定） |
+| 失聯接手 | `CommConfig::takeover_by_priority`（[10, 15, 30, 30] s，P0～P3）；舊型火警是 P0、巡檢是 P3，和原本的 10／30 s 相同。節點參數 `takeover_by_priority`（舊的 `takeover_fire`／`takeover_patrol` 當成預設，相容） |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

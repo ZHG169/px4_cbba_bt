@@ -554,8 +554,8 @@ bool CbbaAgent::canPreempt(const Task & task) const
   if (head == tasks_.end()) {
     return true;
   }
-  const bool higher = taskPriority(task) > taskPriority(head->second);
-  return exec_.active_pinned ? exec_.preemptible && higher : higher;
+  const bool allowed = mayPreempt(task, head->second);   // 優先級＋任務的 can_preempt 遮罩
+  return exec_.active_pinned ? exec_.preemptible && allowed : allowed;
 }
 
 // path：插入前的路徑（釘住的任務在最前面）
@@ -573,8 +573,7 @@ InsertionLimits CbbaAgent::limitsFor(
   limits.min_position = canPreempt(task) ? 0 : pinned_in_path;
   // 真的會搶占（路徑第一個是執行中、可中斷、優先級較低的任務）：評分時不算延後它的損失
   limits.preempt_drops_head = active_head && exec_.preemptible && !exec_.pinned.empty() &&
-    tasks_.count(exec_.pinned.front()) > 0 &&
-    taskPriority(task) > taskPriority(tasks_.at(exec_.pinned.front()));
+    tasks_.count(exec_.pinned.front()) > 0 && mayPreempt(task, tasks_.at(exec_.pinned.front()));
 
   const ExecConstraints exec = exec_;
   const bool fire = taskPriority(task) >= kPriorityFire;

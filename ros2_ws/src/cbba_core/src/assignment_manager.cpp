@@ -1,6 +1,7 @@
 #include "cbba_core/assignment_manager.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace cbba_core
@@ -92,7 +93,8 @@ void AssignmentManager::updateConstraints(double now)
     c.pinned.push_back(reserved_->task);
   }
   c.active_pinned = active_.has_value();
-  c.preemptible = no_bt || (exec_.fresh && exec_.preemptible);
+  const bool committed = updateCommitted();   // 先算（不能放在 && 後面被短路）
+  c.preemptible = (no_bt || (exec_.fresh && exec_.preemptible)) && !committed;
   c.active_remaining = exec_.fresh ? exec_.remaining_time : -1.0;
   c.max_queued_fires = config_.max_queued_fires;
   c.max_queue_wait = config_.max_queue_wait;
@@ -107,7 +109,32 @@ void AssignmentManager::updateConstraints(double now)
   c.queue_behind_active = !overrun;
   comm_.setExecConstraints(c, now);
   comm_.setExecReport(ExecReport{exec_.fresh, exec_.execution_state, exec_.preemptible,
-      exec_.remaining_time});
+      exec_.remaining_time, committed_});
+}
+
+// commit_radius（2026-11-13，合約第三節「搶占」）：執行中的任務有 commit_radius 時，用自己目前的位置（robot_state）算水平距離，
+// 進到半徑內就「已接近」，不可再被搶占；離開 1.5 倍半徑才解除（遲滯，在邊界附近不會來回切換）。換任務、沒有執行中的任務時解除
+bool AssignmentManager::updateCommitted()
+{
+  bool committed = false;
+  TaskId task = 0;
+  if (active_) {
+    const auto it = comm_.agent().tasks().find(active_->task);
+    if (it != comm_.agent().tasks().end() && it->second.ext.commit_radius > 0.0) {
+      task = active_->task;
+      const Vec3 & p = comm_.agent().state().position;
+      const double d = std::hypot(p.x - it->second.position.x, p.y - it->second.position.y);
+      const double r = it->second.ext.commit_radius;
+      committed = committed_ && committed_task_ == task ? d <= 1.5 * r : d < r;
+    }
+  }
+  if (committed != committed_) {
+    info(committed ? "接近 " + taskName(task) + "（commit_radius 內）：不可再被搶占" :
+      "離開 commit_radius 或換了任務：可以被搶占");
+  }
+  committed_ = committed;
+  committed_task_ = task;
+  return committed_;
 }
 
 // 開始執行：記下預估的完成時刻（從目前位置前往＋停留＋overrun_margin）

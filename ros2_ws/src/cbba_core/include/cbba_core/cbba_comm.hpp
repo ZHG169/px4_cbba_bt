@@ -37,7 +37,7 @@
 //   版本放在 CBBA_STATE 的紀錄裡傳遍全隊，各節點取（版本, 執行者, 狀態）較大的那筆。X→Y→X 時 X 第二次的版本一定比第一次大。
 //   鎖定：別台「保留」或「執行中」的任務不出價（待接受不鎖）。持有者撤銷 → 重新開放；完成、取消 → 永久結束；
 //   持有者失聯 → 先照樣鎖著（lockedByLostAgents() 列出來待確認），避免原載具還在執行；
-//   失聯超過 takeover 時限（火警 takeover_fire、其他 takeover_patrol）才撤銷（失聯接手，見下面）。
+//   失聯超過 takeover 時限（依優先級 takeover_by_priority）才撤銷（失聯接手，見下面）。
 //   回報（reportResult）要帶版本，必須是自己目前的正式指派；完成宣告、TASK_CLOSE 也帶版本，
 //   收到的節點知道更新的版本就拒絕（ACK status 2、不結束任務）。
 //   執行失敗：撤銷指派、任務保留，由 CBBA 重新分配；不送 TASK_CLOSE。
@@ -49,8 +49,8 @@
 //
 // 失聯接手（2026-10-11 定案、2026-10-12 實作）
 //   「通訊斷了但還在做」和「墜毀」從外面分不出來，所以已接受（保留、執行中）的任務在持有者失聯後先鎖著，
-//   失聯（s + lost_timeout）之後再過 takeover_fire（GROUND_INTERVENTION，預設 10 s，寧可重複）或
-//   takeover_patrol（其他，30 s，寧可等）才撤銷：產生新版本（執行者 0、狀態「無」），和持有者自己撤銷一樣，
+//   失聯（s + lost_timeout）之後再過 takeover_by_priority[P]（2026-11-13 起依優先級：P0 10 s 寧可重複 … P2／P3 30 s
+//   寧可等；舊型的火警是 P0、巡檢是 P3，和原本的 10／30 s 相同）才撤銷：產生新版本（執行者 0、狀態「無」），和持有者自己撤銷一樣，
 //   各機各自判定、產生的紀錄相同（版本取大的），任務重新競標。
 //   失聯的持有者照樣把手上的做完；恢復連線後收到新版本，它的指派被取代（AssignmentManager 撤下），
 //   它的回報、完成宣告帶舊版本，被拒絕（ACK status 2），不會把已改派的任務關掉。
@@ -61,6 +61,7 @@
 // 時間一律是系統時鐘的秒數（各機需對時）。
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -94,8 +95,9 @@ struct CommConfig
   double min_gap{0.01};           // 立即發送的最短間隔
   double neighbor_timeout{1.5};   // 多久沒收到某台的封包就不算直接鄰居
   double lost_timeout{1.5};       // 多久沒有某台的新資訊視為失聯（規格：1.5 s）
-  double takeover_fire{10.0};     // 失聯接手：持有者失聯後多久撤銷它已接受的火警（GROUND_INTERVENTION）
-  double takeover_patrol{30.0};   // 失聯接手：其他任務（巡檢）
+  // 失聯接手：持有者失聯後多久撤銷它已接受的任務，依優先級 P0～P3（合約第三節；原本的 takeover_fire 10 s＝P0、
+  // takeover_patrol 30 s＝P3）
+  std::array<double, 4> takeover_by_priority{{10.0, 15.0, 30.0, 30.0}};
   double completion_retry{1.0};   // 完成宣告的重送間隔
   int completion_max{10};         // 完成宣告最多重送幾次
   double resend_gap{1.0};         // 同一個任務重送（保底重播、直接推送）的最短間隔
@@ -172,6 +174,7 @@ struct ExecReport
   std::uint8_t execution_state{0};
   bool preemptible{false};
   double remaining_time{-1.0};
+  bool committed{false};   // 執行中的任務已接近（commit_radius 內），不可再被搶占（AssignmentManager 算）
 };
 
 // reportResult、cancelTask 的結果
@@ -222,6 +225,7 @@ struct NeighborInfo
   bool has_status{false};
   bool gateway{false};               // 它是閘道（AGENT_STATE 的 vehicle_type = 0）：不是載具，不算進能力統計
   bool waiting_spec{false};          // 它排第一的任務在等 TaskSpec（版本 4 的 AGENT_STATE）
+  bool committed{false};             // 它執行中的任務已接近目標（commit_radius 內），不可再被搶占
   std::uint32_t status_seq{0};
   wire::StateFlags flags;
   AgentType vehicle_type{AgentType::UAV};   // 載具的平台（閘道時沒有意義）
@@ -339,7 +343,7 @@ public:
   Assignment assignment(TaskId id) const;
   // 鎖著、但持有者失聯（s 超過 lost_timeout 沒更新）的任務：任務 → 持有者。只列出、不處理
   std::vector<std::pair<TaskId, AgentId>> lockedByLostAgents(double now) const;
-  // 失聯接手的時限（秒）：火警 takeover_fire，其他 takeover_patrol
+  // 失聯接手的時限（秒）：takeover_by_priority[任務的優先級]
   double takeoverLimit(TaskId id) const;
   // 上次呼叫之後，因失聯接手撤銷的任務（任務 → 原持有者），給節點印 log
   std::vector<std::pair<TaskId, AgentId>> takeTakeovers();

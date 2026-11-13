@@ -222,9 +222,8 @@ std::vector<std::pair<TaskId, AgentId>> CbbaComm::lockedByLostAgents(double now)
 double CbbaComm::takeoverLimit(TaskId task_id) const
 {
   const auto task = agent_.tasks().find(task_id);
-  // 火警（P0，2026-11-11 起看優先級；舊型的 GROUND_INTERVENTION 就是 P0）。依優先級分級的時限是之後的 takeover_by_priority
-  const bool fire = task != agent_.tasks().end() && taskPriority(task->second) >= kPriorityFire;
-  return fire ? config_.takeover_fire : config_.takeover_patrol;
+  const std::uint8_t level = task != agent_.tasks().end() ? priorityLevel(task->second) : 3;
+  return config_.takeover_by_priority[level];
 }
 
 std::vector<std::pair<TaskId, AgentId>> CbbaComm::takeTakeovers()
@@ -643,6 +642,7 @@ wire::AgentStateBody CbbaComm::agentStateBody(double now) const
   b.preemptible = exec_report_.preemptible;
   b.remaining_time = static_cast<float>(exec_report_.remaining_time);
   b.waiting_spec = waiting_spec_ != 0;
+  b.committed = exec_report_.committed;
   for (const auto & [task_id, a] : assignments_) {
     if (a.assignee != id() || !isOpen(task_id)) {
       continue;
@@ -714,6 +714,7 @@ void CbbaComm::onAgentState(const wire::Header & h, const Bytes & bytes)
   n.preemptible = b->preemptible;
   n.remaining_time = b->remaining_time;
   n.waiting_spec = b->waiting_spec;
+  n.committed = b->committed;
   n.active.reset();
   n.queued.reset();
   if (b->has_active) {

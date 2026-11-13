@@ -23,7 +23,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `cost_ref` | 50 m | 換場地時，取場地半寬左右 |
 | `battery_weight` | 1.0 | 只在 0～2 之間調；超過 2 沒有額外效果 |
 | `lost_timeout` | 1.5 s | 網路很差、常誤判失聯時加大（全隊要一樣） |
-| `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他）。第 5 週弱網量測後調整（全隊要一樣） |
+| `takeover_by_priority` | [10, 15, 30, 30] s | 失聯接手：已接受任務的持有者失聯後多久重新競標，依優先級 P0～P3（2026-11-13；舊的 `takeover_fire`＝P0、`takeover_patrol`＝P1～P3 仍可用，當成它的預設）。全隊要一樣 |
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
 | `failure_exclude_sec` | 60 s | task_result 失敗且 reason 是 TRANSIENT、STOPPED 時，這台多久不再對同一個任務出價（PERMANENT 永久；PREEMPTED 看 `preempt_exclude_sec`） |
 | `preempt_exclude_sec` | = `failure_exclude_sec` | reason 是 PREEMPTED（被接管 PREEMPTED_BY_MANUAL）時的排除時間。狗、無人機的 yaml 都設 5 s（2026-10-17）：只擋「回報先到、mode = MANUAL 晚到」的空檔；接管期間靠 MANUAL 不出價，做完回到 AUTO 就能接回（任務還沒人接時） |
@@ -125,8 +125,8 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 | 參數 | 預設 | 說明 |
 |---|---|---|
 | `lost_timeout` | 1.5 s | 某台的時間戳 s 這麼久沒更新就判定失聯，釋放它的任務重新分配（規格的 1.5 s）。CBBA_STATE 每 200 ms 一則，1.5 s 約 7 則都沒收到才判定。**全隊要一樣**，否則對同一台的判斷會不一致 |
-| `takeover_fire` | 10 s | 失聯接手（2026-10-12）：火警（GROUND_INTERVENTION）的持有者已接受（保留、執行中）、失聯後再過這麼久才撤銷、重新競標。「通訊斷了但還在做」和「墜毀」分不出來，火警寧可重複。**全隊要一樣**（各機自己撤銷） |
-| `takeover_patrol` | 30 s | 同上，其他任務（巡檢）：寧可等，避免兩台做同一個巡檢 |
+| `takeover_by_priority` | [10, 15, 30, 30] s | 失聯接手（2026-10-12；2026-11-13 改成依優先級）：持有者已接受（保留、執行中）、失聯後再過 [P0, P1, P2, P3] 秒才撤銷、重新競標。「通訊斷了但還在做」和「墜毀」分不出來：P0（舊型火警）寧可重複、P2／P3（舊型巡檢是 P3）寧可等。**全隊要一樣**（各機自己撤銷） |
+| `takeover_fire`、`takeover_patrol` | 10 s、30 s | 舊參數（相容）：`takeover_by_priority` 的預設，P0 ＝ fire、P1～P3 ＝ patrol（只改 patrol 時 P1 也跟著改） |
 | `max_packet` | 1200 B | CBBA_STATE 每批（整個 UDP 封包）的上限。任務多時分批，每批 (1200 − 37 − 14 × 建立者數（帶摘要時） − 6 × 機數) / 21 筆；依 mesh 的 MTU 調整 |
 | `resend_gap` | 1.0 s | 同一個任務直接推送（最近新增、結束的）、保底重播的最短間隔（協定版本 3；`repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period` 也是參數，見第二節「補發」） |
 | `completion_retry`、`completion_max` | 1.0 s、10 次 | 完成宣告沒收齊確認時的重送間隔、次數；超過次數就以收到的確認送出 TASK_CLOSE（2026-11-04 開成參數）。高掉包時「完成 → 全隊確認」大約是 `completion_retry × completion_max`：2026-11-03 量到 70% 掉包 11.1 s |
@@ -253,7 +253,7 @@ BT（或 `cbba_task.sh`）建立任務時給的值，也是出價的一部分：
 
 | 一致的範圍 | 參數 | 不一致會怎樣 |
 |---|---|---|
-| 全隊（含機器狗） | `udp_group`、`udp_port`、`lost_timeout`、`takeover_fire`、`takeover_patrol`、`cancel_authorities`、協定版本 | 收不到彼此、對同一台的失聯判斷不同、有的節點拒絕取消；版本 1 和版本 2 的節點互相拒收 |
+| 全隊（含機器狗） | `udp_group`、`udp_port`、`lost_timeout`、`takeover_by_priority`、`cancel_authorities`、協定版本 | 收不到彼此、對同一台的失聯判斷不同、有的節點拒絕取消；版本 1 和版本 2 的節點互相拒收 |
 | 全隊 | 機號不重複 | 兩台宣布同一個 task_id（log 會印「task_id 衝突」） |
 | 每台的 CBBA 與執行者 | `cruise_speed` ↔ 執行者速度 | 到達時間估錯，期限判斷不準 |
 | 每台的 CBBA 與執行者 | `recon_altitude` ↔ 執行者飛行高度 | 距離、耗電估錯 |

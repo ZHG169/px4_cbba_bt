@@ -68,7 +68,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period`、`resend_gap` | 8000 B/s、10 s、0.5 s、1 s、1 s | 補發（機間協定版本 3，2026-10-28，`cbba_core/doc/protocol_v3_sync.md`）：壓縮摘要 → 缺口請求 → 限速的分批回覆。全隊要一起升到版本 3（和版本 2 互相拒收）；BT、話題不受影響 |
 | `completion_retry`、`completion_max` | 1 s、10 次 | 完成確認沒收齊時的重送間隔、次數（2026-11-04 開成參數；全隊應該一樣） |
 | `stats_log_sec` | 10 s | 每隔多久印一次「封包統計」：送出的 kB/s、各種封包的則數與位元組、缺口請求、補發筆數（0 = 不印） |
-| `takeover_fire`、`takeover_patrol` | 10 s、30 s | 失聯接手：已接受任務的持有者失聯後多久重新競標（火警／其他，全隊要一樣） |
+| `takeover_by_priority` | [10, 15, 30, 30] s | 失聯接手：已接受任務的持有者失聯後多久重新競標，依優先級 P0～P3（全隊要一樣；舊的 `takeover_fire`＝P0、`takeover_patrol`＝P1～P3 仍可用） |
 | `recon_altitude` | 5.0 m | AIR_RECON 的巡檢高度 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | UAV：5、0.5、0.2、20；UGV：1、0.1、0.05、20 | 能量模型（狗的是佔位值，見 `cbba_core/doc/ugv_tuning.md`） |
 | `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式，**全隊要一樣**（見 `cbba_core/doc/parameters.md`） |

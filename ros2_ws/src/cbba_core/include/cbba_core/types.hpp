@@ -110,6 +110,24 @@ inline int taskPriority(const Task & task)
   return 3 - static_cast<int>(priorityLevel(task));
 }
 
+// by 可不可以搶占執行中的 victim（2026-11-13，合約第三節「搶占」）：新型任務看自己的 can_preempt 遮罩（位元 p = 可以搶 Pp），
+// 0 = 預設「比自己低的級」；舊型任務照原本（優先級較高才能搶）。同級要遮罩明確包含自己那一級才行
+//（合約的 preempt_margin「同級要好多少」還沒用：遮罩有開就允許）
+inline bool mayPreempt(const Task & by, const Task & victim)
+{
+  const unsigned own = priorityLevel(by);
+  const unsigned target = priorityLevel(victim);
+  unsigned mask = 0;
+  if (by.type == TaskType::NONE && by.ext.can_preempt != 0) {
+    mask = by.ext.can_preempt & 0x0Fu;
+  } else {
+    for (unsigned p = own + 1; p <= 3; ++p) {
+      mask |= 1u << p;
+    }
+  }
+  return ((mask >> target) & 1u) != 0;
+}
+
 // ===========================================================================
 // task_id（協定版本 4）
 // ===========================================================================

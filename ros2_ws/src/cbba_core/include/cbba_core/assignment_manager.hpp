@@ -151,6 +151,7 @@ private:
   void startActive(const HeldAssignment & a, double now);
   void abandonPending(const std::string & why);
   void updateConstraints(double now);
+  bool updateCommitted();   // 回傳：執行中的任務是否已接近（commit_radius）
   bool inPath(TaskId task) const;
   std::string name(TaskId task, std::uint64_t version) const;
   void info(const std::string & text) {log_(0, text);}
@@ -167,7 +168,9 @@ private:
   std::optional<HeldAssignment> reserved_;
   std::optional<Pending> pending_;
   double active_since_{0.0};
-  std::uint16_t active_revision_{0};   // 發給 BT 的 current_task 是哪個 revision（改版時重發）
+  std::uint16_t active_revision_{0};
+  bool committed_{false};       // 執行中的任務已接近（commit_radius 內），不可再被搶占
+  TaskId committed_task_{0};   // 發給 BT 的 current_task 是哪個 revision（改版時重發）
   double active_expected_{0.0};    // 執行中任務預估的完成時刻（開始時估）
   bool overrun_{false};
   double last_mismatch_warn_{-1e9};
