@@ -129,8 +129,17 @@ TEST(WireCompletion, RejectsInvalid)
   EXPECT_FALSE(decodeCompletionAck(announce_bytes));
 
   TaskCloseBody b = close();
-  b.reason = 3;
+  b.reason = 5;   // 1～4 合法（3 過期、4 略過，2026-11-13）
   EXPECT_THROW(encodeTaskClose(makeHeader(), b), std::invalid_argument);
+  b.reason = 0;
+  EXPECT_THROW(encodeTaskClose(makeHeader(), b), std::invalid_argument);
+  for (std::uint8_t r : {kCloseExpired, kCloseOptionalDropped}) {
+    b = close();
+    b.reason = r;
+    const auto d = decodeTaskClose(encodeTaskClose(makeHeader(), b));
+    ASSERT_TRUE(d);
+    EXPECT_EQ(d->reason, r);
+  }
   b = close();
   b.acks[0].agent_id = 0;
   EXPECT_THROW(encodeTaskClose(makeHeader(), b), std::invalid_argument);

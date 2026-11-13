@@ -283,6 +283,9 @@ struct CommStats
   int reauctions{0};            // 其中改了平台、能力、優先級，重新競標的
   int rejected_revisions{0};    // 不是建立者送的改版（不套用、不轉送）
   int revision_pulls{0};        // 看到鄰居的紀錄是較新的 revision，向它要任務定義的次數
+  // 過期（2026-11-13）
+  int expired_local{0};         // 本機判定過期（停止出價、撤銷自己的指派）
+  int expired_closes{0};        // 自己是建立者、送出過期的 TASK_CLOSE
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -356,6 +359,14 @@ public:
 
   // 取消任務：只有建立者或 cancel_authorities 裡的機號能發。送 TASK_CLOSE（reason = 取消）
   ReportCheck cancelTask(TaskId id, double now);
+
+  // 過期（2026-11-13，合約第三節「過期」）：任務的 expires 到了（絕對時刻，全隊結果一樣，不靠建立者在線）。
+  // 各節點本機：永久不再出價、撤銷自己的指派（已回報完成、在等確認的不撤）；建立者另外送 TASK_CLOSE（reason 3 = 過期），
+  // 建立者不在線時任務先開著、沒人出價，建立者回來後看到就關。poll() 裡判斷
+  bool expired(TaskId id, double now) const;
+  std::vector<TaskId> takeExpired();   // 上次呼叫之後本機判定過期的（給節點印 log）
+  // 已結束任務的 TASK_CLOSE reason（1 完成、2 取消、3 過期、4 略過）；還開著、或不知道原因時 nullopt
+  std::optional<std::uint8_t> closeReason(TaskId id) const;
 
   void receive(const std::uint8_t * data, std::size_t size, double now);
   void receive(const Bytes & packet, double now) {receive(packet.data(), packet.size(), now);}
@@ -493,6 +504,11 @@ private:
   bool allAcked(const PendingCompletion & pc, double now) const;
   void finishCompletion(TaskId id, double now);
   void markClosed(TaskId id, std::uint8_t reason, double now);
+  void sendClose(TaskId id, std::uint8_t reason, double now);   // 自己發的取消、過期、略過
+  void expireTasks(double now);
+  std::set<TaskId> expired_;          // 本機判定過期、還開著的（建立者要送 TASK_CLOSE）
+  std::vector<TaskId> newly_expired_;
+  double next_expiry_check_{0.0};
   bool mergeAssignment(TaskId id, const Assignment & a);
   bool closeAllowed(const wire::TaskCloseBody & close) const;
   bool canCancel(AgentId actor, TaskId id) const;

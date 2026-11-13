@@ -371,6 +371,15 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | 執行端 | `AssignmentManager`：執行中的任務改版（指派保留）且新 revision 的 TaskSpec 收齊 → 重發 current_task（同一個 task_id、新的 revision）；收齊前 BT 照舊版繼續 |
 | 還沒做 | BT 收到同一個 task_id、新 revision 的 current_task：狗的 BT（`if (t.task_id == cur) return;`）和無人機骨架目前都當成重送忽略、照舊版做完。要換目標時要中斷再插入，和伯宇對 |
 
+### 實作（2026-11-13，第 4c 步：過期）
+
+| 項目 | 程式 |
+|---|---|
+| 封包 | TASK_CLOSE 的 reason 收 1～4：3 = 過期、4 = optional 略過（4e 用，先一起開放，4e 不用再改協定）。3、4 在本機的狀態是 CANCELLED（`Task.msg` 只有 DONE／CANCELLED），原因用 `CbbaComm::closeReason()` 查。權限同取消（建立者或 `cancel_authorities`） |
+| 本機判定 | `CbbaComm::expireTasks`（poll 裡每 0.1 s）：開著、`ext.expires` 到了 → 永久不再出價（`excludeTask`）、撤銷自己的指派（已回報完成、在等確認的不撤）；`expired()`、`takeExpired()`（`expired_local`） |
+| 建立者關閉 | 建立者（閘道）送 TASK_CLOSE reason 3（`expired_closes`）；建立者離線期間過期的，回來後看到就送。在那之前任務開著、沒人出價（不當成孤兒任務） |
+| 節點 | log「任務 … 過期（expires 到了）」「任務 … 已過期（建立者關閉，reason 3）」；孤兒任務檢查略過過期的 |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

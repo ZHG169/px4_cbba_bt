@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -347,11 +348,17 @@ ReportCheck CbbaComm::cancelTask(TaskId task_id, double now)
   if (!canCancel(id(), task_id)) {
     return ReportCheck::NOT_AUTHORIZED;
   }
+  sendClose(task_id, wire::kCloseCancelled, now);
+  return ReportCheck::ACCEPTED;
+}
+
+void CbbaComm::sendClose(TaskId task_id, std::uint8_t reason, double now)
+{
   const wire::Header h = newHeader(PacketType::TASK_CLOSE);
   wire::TaskCloseBody close;
   close.relay = wire::originOf(h);
   close.task_id = task_id;
-  close.reason = wire::kCloseCancelled;
+  close.reason = reason;
   close.actor_id = id();
   close.round_key = roundKey();
   close.assign_version = assignment(task_id).version;
@@ -359,8 +366,64 @@ ReportCheck CbbaComm::cancelTask(TaskId task_id, double now)
   closes_[task_id] = close;
   completions_.erase(task_id);
   send(wire::encodeTaskClose(h, close), PacketType::TASK_CLOSE);
-  markClosed(task_id, wire::kCloseCancelled, now);
-  return ReportCheck::ACCEPTED;
+  markClosed(task_id, reason, now);
+}
+
+bool CbbaComm::expired(TaskId task_id, double now) const
+{
+  const auto it = agent_.tasks().find(task_id);
+  return it != agent_.tasks().end() && it->second.status == TaskStatus::OPEN && it->second.ext.expires > 0.0 &&
+         now >= it->second.ext.expires;
+}
+
+std::vector<TaskId> CbbaComm::takeExpired()
+{
+  std::vector<TaskId> out;
+  out.swap(newly_expired_);
+  return out;
+}
+
+std::optional<std::uint8_t> CbbaComm::closeReason(TaskId task_id) const
+{
+  if (isOpen(task_id)) {
+    return std::nullopt;
+  }
+  const auto it = closes_.find(task_id);
+  return it != closes_.end() ? std::optional<std::uint8_t>(it->second.reason) : std::nullopt;
+}
+
+// 過期：每 0.1 s 檢查一次（已結束的任務一直留著，不要每個 tick 掃）
+void CbbaComm::expireTasks(double now)
+{
+  if (now < next_expiry_check_) {
+    return;
+  }
+  next_expiry_check_ = now + 0.1;
+  std::vector<TaskId> due;
+  for (const auto & [task_id, task] : agent_.tasks()) {
+    if (expired_.count(task_id) == 0 && expired(task_id, now)) {
+      due.push_back(task_id);
+    }
+  }
+  for (const TaskId task_id : due) {
+    expired_.insert(task_id);
+    newly_expired_.push_back(task_id);
+    ++stats_.expired_local;
+    markChanged(agent_.excludeTask(task_id, now, kInf));
+    const Assignment a = assignment(task_id);
+    if (a.assignee == id() && a.state != AssignState::NONE && !completionPending(task_id)) {
+      endAssignment(task_id);
+    }
+  }
+  // 建立者：還開著的過期任務送 TASK_CLOSE（剛判定的，或建立者離線期間過期、回來才看到的都在 expired_ 裡）
+  for (auto it = expired_.begin(); it != expired_.end(); ) {
+    const TaskId task_id = *it;
+    if (taskCreator(task_id) == id() && isOpen(task_id) && completions_.count(task_id) == 0) {
+      sendClose(task_id, wire::kCloseExpired, now);
+      ++stats_.expired_closes;
+    }
+    it = isOpen(task_id) ? std::next(it) : expired_.erase(it);   // 結束了就不用再看
+  }
 }
 
 // ===========================================================================
@@ -448,6 +511,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
   releaseConflicts(now);
   pullSpecs(now);
   pullRevisions(now);
+  expireTasks(now);
   forgetSpecs(now);
 
   // 依目前位置、電量重新評估
@@ -2001,7 +2065,7 @@ void CbbaComm::markClosed(TaskId task_id, std::uint8_t reason, double now)
     return;
   }
   Task done = agent_.tasks().at(task_id);
-  done.status = reason == wire::kCloseCancelled ? TaskStatus::CANCELLED : TaskStatus::DONE;
+  done.status = reason == wire::kCloseDone ? TaskStatus::DONE : TaskStatus::CANCELLED;   // 取消、過期、略過
   done.status_stamp = now;
   markChanged(agent_.onTask(done, now));
   closed_at_[task_id] = now;
@@ -2151,7 +2215,7 @@ bool CbbaComm::closeAllowed(const wire::TaskCloseBody & close) const
   if (close.actor_id != close.relay.origin_id) {
     return false;
   }
-  if (close.reason == wire::kCloseCancelled) {
+  if (close.reason != wire::kCloseDone) {   // 取消、過期、略過：建立者或授權的管理端
     return canCancel(close.actor_id, close.task_id);
   }
   return !newerThan(assignment(close.task_id),

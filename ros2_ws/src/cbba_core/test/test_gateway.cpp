@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -246,7 +247,7 @@ struct Revisable
   InjectRequest req = groundRequest("move-1");
   TaskId id{0};
 
-  Revisable()
+  explicit Revisable(double expires_sec = 0.0)
   {
     AssignmentConfig c;
     c.require_accept = false;
@@ -259,6 +260,7 @@ struct Revisable
         dog_publishes += dog->takeAssignedChanged() ? 1 : 0;
       });
     req.spec = "{\"tasks\":[{\"action\":\"ptz_inspect\"}]}";
+    req.expires_sec = expires_sec;
     const InjectResult r = gw.inject(req, swarm.now());
     EXPECT_EQ(r.status, InjectStatus::CREATED) << r.reason;
     id = r.task_id;
@@ -361,4 +363,56 @@ TEST(Revision, OnlyCreatorRevisesAndRolesStay)
   grouped.revision = 2;
   grouped.task.ext.role_count = 3;
   EXPECT_EQ(t.gw.inject(grouped, t.swarm.now()).status, InjectStatus::REJECTED);
+}
+
+// ===========================================================================
+// 過期（4c，2026-11-13）
+// ===========================================================================
+TEST(Expiry, CreatorClosesExpiredTask)
+{
+  // expires 到了：狗停止出價、撤銷自己的指派；建立者（閘道）送 TASK_CLOSE reason 3，全隊關掉（狀態 CANCELLED）
+  Revisable t(3.0);
+  ASSERT_TRUE(t.dog->active());
+  t.swarm.run(2.0);
+  EXPECT_FALSE(t.dog->active());
+  for (AgentId a : {kGateway, AgentId{1}, AgentId{50}}) {
+    EXPECT_EQ(t.swarm.node(a).agent().tasks().at(t.id).status, TaskStatus::CANCELLED) << a;
+    EXPECT_EQ(t.swarm.node(a).closeReason(t.id), std::optional<std::uint8_t>(wire::kCloseExpired)) << a;
+  }
+  EXPECT_EQ(t.swarm.node(kGateway).stats().expired_closes, 1);
+  EXPECT_EQ(t.swarm.node(kGateway).stats().rejected_closes, 0);
+  EXPECT_EQ(t.swarm.node(50).stats().rejected_closes, 0);
+}
+
+TEST(Expiry, WithoutCreatorStopsLocallyThenClosesOnReturn)
+{
+  // 建立者離線時：狗照樣在 expires 停止、撤銷指派，任務先開著（沒人出價）；建立者回來後送 TASK_CLOSE reason 3
+  Revisable t(3.0);
+  ASSERT_TRUE(t.dog->active());
+  t.swarm.setOnline(kGateway, false);
+  t.swarm.run(2.0);
+  EXPECT_FALSE(t.dog->active());
+  EXPECT_TRUE(t.swarm.node(50).taskOpen(t.id));
+  EXPECT_TRUE(t.swarm.node(50).expired(t.id, t.swarm.now()));
+  EXPECT_EQ(t.swarm.node(50).assignment(t.id).assignee, kNoAgent);
+  EXPECT_EQ(t.swarm.node(50).agent().winner(t.id), kNoAgent);
+  EXPECT_EQ(t.swarm.node(1).agent().winner(t.id), kNoAgent);
+  EXPECT_EQ(t.swarm.node(50).stats().expired_local, 1);
+
+  t.swarm.setOnline(kGateway, true);
+  t.swarm.run(3.0);
+  for (AgentId a : {AgentId{1}, AgentId{50}}) {
+    EXPECT_FALSE(t.swarm.node(a).taskOpen(t.id)) << a;
+    EXPECT_EQ(t.swarm.node(a).closeReason(t.id), std::optional<std::uint8_t>(wire::kCloseExpired)) << a;
+  }
+}
+
+TEST(Expiry, NoExpiresNeverExpires)
+{
+  // 沒設 expires 的任務（舊型任務都是）照常
+  Revisable t;
+  t.swarm.run(5.0);
+  EXPECT_TRUE(t.swarm.node(50).taskOpen(t.id));
+  EXPECT_FALSE(t.swarm.node(50).expired(t.id, t.swarm.now()));
+  EXPECT_TRUE(t.dog->active());
 }

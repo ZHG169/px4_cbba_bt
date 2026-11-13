@@ -18,7 +18,9 @@
 //   view            宣告者（確認者）認為目前存活的機號。版本 1 是 8 個位元，只放得下機號 1～8；
 //                   版本 2 改成機號清單，機號超過 8 的載具（狗 50）也會被等待確認
 //   status          1 = 接受；0 = 拒絕：不認得這個任務；2 = 拒絕：指派已過期（知道更新的版本）
-//   reason          1 = 完成（DONE）、2 = 取消（CANCELLED），和 TaskStatus 相同
+//   reason          1 = 完成（DONE）、2 = 取消（CANCELLED），和 TaskStatus 相同；
+//                   3 = 過期（EXPIRED，任務的 expires 到了，建立者送；2026-11-13）、4 = 略過（OPTIONAL_DROPPED，閘道關掉沒人做的
+//                   optional 角色，第 4e 步）。3、4 在本機的任務狀態是 CANCELLED（Task.msg 只有 DONE／CANCELLED），原因另外記
 //   actor_id        結束任務的機號：完成時是執行者，取消時是發起者。必須等於 origin_id（自己發的）
 //   acks            完成時：每筆是確認者，以及那則 COMPLETION_ACK 的 origin_seq
 //
@@ -53,6 +55,9 @@ namespace cbba_core::wire
 
 constexpr std::uint8_t kCloseDone = 1;
 constexpr std::uint8_t kCloseCancelled = 2;
+constexpr std::uint8_t kCloseExpired = 3;
+constexpr std::uint8_t kCloseOptionalDropped = 4;
+inline bool validCloseReason(std::uint8_t r) {return r >= kCloseDone && r <= kCloseOptionalDropped;}
 
 constexpr std::size_t completionSize(std::size_t view)
 {

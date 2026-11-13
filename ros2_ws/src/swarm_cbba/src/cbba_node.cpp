@@ -630,8 +630,13 @@ private:
     for (const auto & [id, task] : agent.tasks()) {
       const AgentId winner = agent.winner(id);
       const AgentId assignee = comm_->assignment(id).assignee;
-      if (task.status != TaskStatus::OPEN || winner != kNoAgent || assignee != kNoAgent) {
-        if (orphan_warned_.erase(id) > 0 && task.status == TaskStatus::OPEN) {
+      // 過期的任務（2026-11-13）：沒人出價是正常的，等建立者關掉，不算孤兒
+      if (task.status != TaskStatus::OPEN || winner != kNoAgent || assignee != kNoAgent ||
+        comm_->expired(id, now))
+      {
+        if (orphan_warned_.erase(id) > 0 && task.status == TaskStatus::OPEN &&
+          (winner != kNoAgent || assignee != kNoAgent))
+        {
           RCLCPP_INFO(get_logger(), "任務 %s 有人得標了（agent %u），不再是孤兒任務", taskName(id).c_str(),
             winner != kNoAgent ? winner : assignee);
         }
@@ -972,7 +977,12 @@ private:
         continue;
       }
       closed_pub_->publish(toMsg(task));
-      if (task.status != TaskStatus::DONE) {
+      const auto reason = comm_->closeReason(id);
+      if (reason == wire::kCloseExpired) {
+        RCLCPP_INFO(get_logger(), "任務 %s 已過期（建立者關閉，reason 3）", taskName(id).c_str());
+      } else if (reason == wire::kCloseOptionalDropped) {
+        RCLCPP_INFO(get_logger(), "任務 %s 已略過（optional 角色，reason 4）", taskName(id).c_str());
+      } else if (task.status != TaskStatus::DONE) {
         RCLCPP_INFO(get_logger(), "任務 %s 已取消", taskName(id).c_str());
       } else if (const auto it = reported_at_.find(id); it != reported_at_.end()) {
         RCLCPP_INFO(get_logger(), "任務 %s 已確認完成（回報後 %.2f s）",
@@ -1011,6 +1021,10 @@ private:
         }
       }
       last_lost_ = lost;
+    }
+    for (const TaskId task : comm_->takeExpired()) {
+      RCLCPP_WARN(get_logger(), "任務 %s 過期（expires 到了）：這台不再出價%s", taskName(task).c_str(),
+        taskCreator(task) == agent_id_ ? "，我是建立者，送 TASK_CLOSE（reason 3）" : "，等建立者關閉");
     }
     for (const auto & [task, holder] : comm_->takeTakeovers()) {
       RCLCPP_WARN(get_logger(), "失聯接手：任務 %s 的持有者 agent %u 失聯超過 %.0f s，撤銷、重新競標",

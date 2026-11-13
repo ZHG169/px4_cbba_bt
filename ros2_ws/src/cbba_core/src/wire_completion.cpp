@@ -121,7 +121,7 @@ std::vector<std::uint8_t> encodeCompletionAck(Header header, const CompletionAck
 std::vector<std::uint8_t> encodeTaskClose(Header header, const TaskCloseBody & b)
 {
   if (!validCommon(b.task_id, b.actor_id, b.relay, b.view) || !validAcks(b.acks) ||
-    (b.reason != kCloseDone && b.reason != kCloseCancelled))
+    !validCloseReason(b.reason))
   {
     throw std::invalid_argument("invalid TASK_CLOSE body");
   }
@@ -205,7 +205,7 @@ std::optional<TaskCloseBody> decodeTaskClose(const std::uint8_t * data, std::siz
     a.agent_id = r.u16();
     a.ack_seq = r.u32();
   }
-  if (!r.ok() || r.remaining() != 0 || (b.reason != kCloseDone && b.reason != kCloseCancelled) ||
+  if (!r.ok() || r.remaining() != 0 || !validCloseReason(b.reason) ||
     !validCommon(b.task_id, b.actor_id, b.relay, b.view) || !validAcks(b.acks))
   {
     return std::nullopt;
