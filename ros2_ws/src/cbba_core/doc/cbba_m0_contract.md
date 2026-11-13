@@ -389,6 +389,15 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | commit_radius | `AssignmentManager::updateCommitted`：執行中任務有 commit_radius 時，用 robot_state 的位置算水平距離，進到半徑內 → 已接近、不可再被搶占（ExecConstraints.preemptible = false）；離開 1.5 倍才解除。AGENT_STATE exec_flags bit 5「已接近」（`NeighborInfo::committed`；不認得的位元舊節點忽略，不用改協定） |
 | 失聯接手 | `CommConfig::takeover_by_priority`（[10, 15, 30, 30] s，P0～P3）；舊型火警是 P0、巡檢是 P3，和原本的 10／30 s 相同。節點參數 `takeover_by_priority`（舊的 `takeover_fire`／`takeover_patrol` 當成預設，相容） |
 
+### 實作（2026-11-13，第 4e 步：optional 角色的自動關閉）
+
+| 項目 | 程式 |
+|---|---|
+| 閘道 | `Gateway::step(now)`（cbba_node 每個 tick 呼叫，內部每 0.2 s）：自己建立、還開著的 optional 角色。O3 同組必要角色都結束（`CbbaComm::groupMandatoryDone`：這一組 role_count 個角色都認得、非 optional 的都不是 OPEN）→ 馬上關（執行中的也關）；沒有正式指派時：`capableAgents` 是空的 → O1（`membership_ready` 後計時，`optional_no_capable_s`，預設 10 s）；有人能做 → O2（`optional_unassigned_s`，預設 15 s，有正式指派就重新計時）。關 = `CbbaComm::dropOptional`：TASK_CLOSE reason 4（`optional_drops`）。cbba_node 印原因、發 `task_orphaned` 一次（原因欄位等介面 v2.0） |
+| membership_ready | `Gateway::membershipReady`：開機同步完成，從連上（第一次聽到任何鄰居，或斷線後恢復；聽不到任何鄰居 = 斷線，重置）起過了 lost_timeout ＋ status_period，期間每個還聽得到的鄰居都收過 AGENT_STATE（`NeighborInfo::last_status`） |
+| 本機 O3 | `CbbaComm::dropOptionalLocally`（不是閘道的節點，每 0.5 s）：同組必要角色都結束了 → 自己永久不對 optional 角色出價（不送 TASK_CLOSE；自己是持有者的照常做完）（`optional_local_drops`）。閘道在線時它的正式關閉很快就到 |
+| 還沒做 | O4 不用另外做（組的取消、過期就是各任務自己的）；`skip_satisfies` 只帶著（precedence 是 CB-4，M1～M2）；`task_orphaned` 的原因欄位（介面 v2.0） |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

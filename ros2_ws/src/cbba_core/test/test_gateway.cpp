@@ -247,7 +247,7 @@ struct Revisable
   InjectRequest req = groundRequest("move-1");
   TaskId id{0};
 
-  explicit Revisable(double expires_sec = 0.0, double commit_radius = 0.0)
+  explicit Revisable(double expires_sec = 0.0, double commit_radius = 0.0, bool optional = false)
   {
     AssignmentConfig c;
     c.require_accept = false;
@@ -262,6 +262,12 @@ struct Revisable
     req.spec = "{\"steps\":[{\"action\":\"inspect\"}]}";
     req.expires_sec = expires_sec;
     req.task.ext.commit_radius = commit_radius;
+    if (optional) {   // 兩個角色的組裡的 optional 角色（另一個角色沒建：這一組不會被判成「必要角色都結束」）
+      req.role = "extra";
+      req.task.ext.role_count = 2;
+      req.task.ext.role_index = 1;
+      req.task.ext.optional = true;
+    }
     const InjectResult r = gw.inject(req, swarm.now());
     EXPECT_EQ(r.status, InjectStatus::CREATED) << r.reason;
     id = r.task_id;
@@ -502,4 +508,154 @@ TEST(Commit, WithoutRadiusHigherPriorityPreempts)
   ASSERT_TRUE(t.dog->active());
   EXPECT_EQ(t.dog->active()->task, u.task_id);
   EXPECT_FALSE(t.swarm.node(kGateway).neighbors().at(50).committed);
+}
+
+// ===========================================================================
+// optional 角色的自動關閉（4e，2026-11-13）
+// ===========================================================================
+namespace
+{
+// 一組：必要的地面角色（role 0）＋ optional 的空中角色（role 1）
+std::pair<InjectRequest, InjectRequest> groundPlusOptionalAir(const std::string & incident)
+{
+  InjectRequest ground = groundRequest(incident, "front");
+  ground.task.ext.role_count = 2;
+  ground.task.ext.role_index = 0;
+  InjectRequest air = groundRequest(incident, "overwatch");
+  air.task.platform = 1;
+  air.task.required_caps = capBit(Capability::MOBILITY_AIR) | capBit(Capability::RGB_CAMERA);
+  air.task.position = {12.0, 0.0, 5.0};
+  air.task.ext.role_count = 2;
+  air.task.ext.role_index = 1;
+  air.task.ext.optional = true;
+  return {ground, air};
+}
+
+struct Dropper
+{
+  Gateway & gw;
+  std::vector<DroppedOptional> drops;
+  void tick(double now)
+  {
+    for (const DroppedOptional & d : gw.step(now)) {
+      drops.push_back(d);
+    }
+  }
+};
+}  // namespace
+
+TEST(Optional, O1NoCapableVehicleDropsAfterWait)
+{
+  // 全隊只有狗：空中的 optional 角色沒人能做 → membership_ready 後 10 s 閘道送 reason 4；之前不關
+  CommConfig cc;
+  cc.epoch = 3;
+  Swarm swarm(0.0, 1, cc);
+  swarm.addGateway(kGateway);
+  swarm.add(50, {5, 0, 0}, 100.0, AgentType::UGV);
+  Gateway gw(swarm.node(kGateway));
+  Dropper d{gw, {}};
+  swarm.onTick([&d](double now) {d.tick(now);});
+  swarm.run(2.0);
+  EXPECT_FALSE(gw.membershipReady(swarm.now()));   // 剛連上：還沒等滿 lost_timeout ＋ status_period
+  swarm.run(1.0);
+  EXPECT_TRUE(gw.membershipReady(swarm.now()));
+  auto [ground, air] = groundPlusOptionalAir("o1");
+  ASSERT_EQ(gw.inject(ground, swarm.now()).status, InjectStatus::CREATED);
+  const InjectResult a = gw.inject(air, swarm.now());
+  ASSERT_EQ(a.status, InjectStatus::CREATED) << a.reason;
+  swarm.run(8.0);
+  EXPECT_TRUE(swarm.node(50).taskOpen(a.task_id));
+  swarm.run(4.0);
+  EXPECT_FALSE(swarm.node(50).taskOpen(a.task_id));
+  EXPECT_EQ(swarm.node(50).closeReason(a.task_id), std::optional<std::uint8_t>(wire::kCloseOptionalDropped));
+  ASSERT_EQ(d.drops.size(), 1u);
+  EXPECT_EQ(d.drops[0].reason, OptionalDrop::NO_CAPABLE);
+  EXPECT_EQ(swarm.node(50).stats().rejected_closes, 0);
+}
+
+TEST(Optional, O2CapableButUnassignedDropsAfterWait)
+{
+  // 無人機能做、也得標，但沒有正式指派（這台沒有指派流程）→ 15 s 後略過；必要的地面角色不受影響
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  Dropper d{gw, {}};
+  swarm.onTick([&d](double now) {d.tick(now);});
+  swarm.run(1.0);
+  auto [ground, air] = groundPlusOptionalAir("o2");
+  const InjectResult g = gw.inject(ground, swarm.now());
+  const InjectResult a = gw.inject(air, swarm.now());
+  ASSERT_EQ(a.status, InjectStatus::CREATED) << a.reason;
+  swarm.run(10.0);
+  EXPECT_TRUE(swarm.node(1).taskOpen(a.task_id));
+  EXPECT_EQ(swarm.node(1).agent().winner(a.task_id), 1);
+  swarm.run(7.0);
+  EXPECT_FALSE(swarm.node(1).taskOpen(a.task_id));
+  ASSERT_EQ(d.drops.size(), 1u);
+  EXPECT_EQ(d.drops[0].reason, OptionalDrop::UNASSIGNED);
+  EXPECT_TRUE(swarm.node(50).taskOpen(g.task_id));   // 必要角色不會被關
+}
+
+TEST(Optional, AssignedOptionalIsKept)
+{
+  // 有正式指派（狗執行中）的 optional 角色：O1、O2 都不關
+  Revisable t(0.0, 0.0, true);
+  ASSERT_TRUE(t.dog->active());
+  Dropper d{t.gw, {}};
+  t.swarm.onTick([&](double now) {
+      t.dog->setExec(ExecInput{}, now);
+      t.dog->step(now);
+      t.dog->takeRequests();
+      t.dog->takeAssignedChanged();
+      d.tick(now);
+    });
+  t.swarm.run(20.0);
+  EXPECT_TRUE(t.swarm.node(50).taskOpen(t.id));
+  EXPECT_TRUE(d.drops.empty());
+  EXPECT_TRUE(t.dog->active());
+}
+
+TEST(Optional, O3GroupDoneDropsAtOnce)
+{
+  // 必要角色結束（閘道取消）→ 同組的 optional 角色馬上略過（不等 O2 的 15 s）
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  Dropper d{gw, {}};
+  swarm.onTick([&d](double now) {d.tick(now);});
+  swarm.run(1.0);
+  auto [ground, air] = groundPlusOptionalAir("o3");
+  const InjectResult g = gw.inject(ground, swarm.now());
+  const InjectResult a = gw.inject(air, swarm.now());
+  swarm.run(3.0);
+  ASSERT_EQ(swarm.node(kGateway).cancelTask(g.task_id, swarm.now()), ReportCheck::ACCEPTED);
+  swarm.run(1.0);
+  EXPECT_FALSE(swarm.node(1).taskOpen(a.task_id));
+  EXPECT_EQ(swarm.node(1).closeReason(a.task_id), std::optional<std::uint8_t>(wire::kCloseOptionalDropped));
+  ASSERT_EQ(d.drops.size(), 1u);
+  EXPECT_EQ(d.drops[0].reason, OptionalDrop::GROUP_DONE);
+}
+
+TEST(Optional, O3WithoutGatewayOnlyStopsLocalBidding)
+{
+  // 閘道離線時必要角色做完：無人機本機不再對 optional 角色出價，但任務不關（沒有 TASK_CLOSE）；閘道回來後才正式略過
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  Dropper d{gw, {}};
+  swarm.onTick([&d](double now) {d.tick(now);});
+  swarm.run(1.0);
+  auto [ground, air] = groundPlusOptionalAir("o3l");
+  const InjectResult g = gw.inject(ground, swarm.now());
+  const InjectResult a = gw.inject(air, swarm.now());
+  swarm.run(3.0);
+  swarm.setOnline(kGateway, false);
+  ASSERT_EQ(assignAndReport(swarm.node(50), g.task_id, true, swarm.now()), ReportCheck::ACCEPTED);
+  swarm.run(3.0);
+  EXPECT_FALSE(swarm.node(1).taskOpen(g.task_id));
+  EXPECT_TRUE(swarm.node(1).taskOpen(a.task_id));
+  EXPECT_STREQ(swarm.node(1).agent().bidFor(a.task_id, swarm.now()).why, "excluded");
+  EXPECT_EQ(swarm.node(1).stats().optional_local_drops, 1);
+
+  swarm.setOnline(kGateway, true);
+  swarm.run(5.0);
+  EXPECT_FALSE(swarm.node(1).taskOpen(a.task_id));
+  EXPECT_EQ(swarm.node(1).closeReason(a.task_id), std::optional<std::uint8_t>(wire::kCloseOptionalDropped));
 }

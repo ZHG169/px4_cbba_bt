@@ -368,6 +368,65 @@ void CbbaComm::sendClose(TaskId task_id, std::uint8_t reason, double now)
   markClosed(task_id, reason, now);
 }
 
+ReportCheck CbbaComm::dropOptional(TaskId task_id, double now)
+{
+  if (!isOpen(task_id)) {
+    return ReportCheck::NOT_OPEN;
+  }
+  if (!canCancel(id(), task_id) || !agent_.tasks().at(task_id).ext.optional) {
+    return ReportCheck::NOT_AUTHORIZED;
+  }
+  sendClose(task_id, wire::kCloseOptionalDropped, now);
+  ++stats_.optional_drops;
+  return ReportCheck::ACCEPTED;
+}
+
+bool CbbaComm::groupMandatoryDone(TaskId group_id, std::uint8_t role_count) const
+{
+  if (group_id == 0 || role_count == 0) {
+    return false;
+  }
+  std::set<std::uint8_t> roles;
+  bool all_done = true;
+  for (const auto & [task_id, task] : agent_.tasks()) {
+    if (task.ext.group_id != group_id) {
+      continue;
+    }
+    roles.insert(task.ext.role_index);
+    if (!task.ext.optional && task.status == TaskStatus::OPEN) {
+      all_done = false;
+    }
+  }
+  return all_done && roles.size() >= role_count;
+}
+
+// O3 的本機判定（合約：閘道斷線時各節點只停本機出價，不產生 TASK_CLOSE、不中途取消執行中或已保留的）。
+// 閘道在線時它會送正式的 TASK_CLOSE；本機先停只是讓結果一樣、不再新接。每 0.5 s 檢查
+void CbbaComm::dropOptionalLocally(double now)
+{
+  if (config_.gateway || now < next_optional_check_) {
+    return;
+  }
+  next_optional_check_ = now + 0.5;
+  std::vector<TaskId> drop;
+  for (const auto & [task_id, task] : agent_.tasks()) {
+    if (task.status != TaskStatus::OPEN || !task.ext.optional || optional_local_.count(task_id) > 0) {
+      continue;
+    }
+    if (assignment(task_id).assignee == id()) {
+      continue;   // 自己正在做（或已保留）的照常做完
+    }
+    if (groupMandatoryDone(task.ext.group_id, task.ext.role_count)) {
+      drop.push_back(task_id);
+    }
+  }
+  for (const TaskId task_id : drop) {
+    optional_local_.insert(task_id);
+    ++stats_.optional_local_drops;
+    markChanged(agent_.excludeTask(task_id, now, kInf));
+  }
+}
+
 bool CbbaComm::expired(TaskId task_id, double now) const
 {
   const auto it = agent_.tasks().find(task_id);
@@ -511,6 +570,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
   pullSpecs(now);
   pullRevisions(now);
   expireTasks(now);
+  dropOptionalLocally(now);
   forgetSpecs(now);
 
   // 依目前位置、電量重新評估
@@ -700,6 +760,7 @@ void CbbaComm::onAgentState(const wire::Header & h, const Bytes & bytes)
     return;
   }
   n.status_seq = h.sequence;
+  n.last_status = n.last_heard;   // receive() 剛用收到的時刻更新過
   n.has_status = true;
   n.flags = b->flags;
   n.gateway = b->vehicle_type == wire::kVehicleGateway;

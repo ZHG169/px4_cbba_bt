@@ -718,6 +718,7 @@ private:
     assignments_->takeRequests();              // 不握手：沒有要送給 BT 的請求
     publishOutputs(now);
     publishAssignments(now);
+    dropOptionals(now);
     checkSpecWait(now);
     report(now);
     logStats(now);
@@ -792,6 +793,24 @@ private:
       RCLCPP_INFO(get_logger(), "注入 %s：重複，沿用任務 %s", key.c_str(), taskName(r.task_id).c_str());
     } else {
       RCLCPP_WARN(get_logger(), "注入 %s 拒絕：%s", key.c_str(), r.reason.c_str());
+    }
+  }
+
+  // optional 角色的自動關閉（閘道，4e）：O1～O3 成立就送 TASK_CLOSE reason 4，log 原因、發 task_orphaned 一次給值班看
+  //（Task.msg 還沒有原因欄位：介面 v2.0 再加）
+  void dropOptionals(double now)
+  {
+    if (!gateway_) {
+      return;
+    }
+    for (const DroppedOptional & d : gateway_->step(now)) {
+      const auto it = comm_->agent().tasks().find(d.task);
+      RCLCPP_WARN(get_logger(), "optional 角色 %s 略過（%s%s）：送 TASK_CLOSE reason 4，不會自動重開",
+        taskName(d.task).c_str(), toString(d.reason),
+        d.reason == OptionalDrop::GROUP_DONE ? "" : ("，" + std::to_string(static_cast<int>(d.waited)) + " s").c_str());
+      if (it != comm_->agent().tasks().end()) {
+        orphan_pub_->publish(toMsg(it->second));
+      }
     }
   }
 

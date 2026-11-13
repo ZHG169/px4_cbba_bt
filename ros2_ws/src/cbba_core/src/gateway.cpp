@@ -1,6 +1,8 @@
 #include "cbba_core/gateway.hpp"
 
 #include <cmath>
+#include <iterator>
+#include <set>
 
 #include "cbba_core/wire_task_spec.hpp"
 
@@ -158,6 +160,98 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
   r.task_id = t.id;
   r.group_id = group_id;
   return r;
+}
+
+const char * toString(OptionalDrop reason)
+{
+  switch (reason) {
+    case OptionalDrop::NO_CAPABLE: return "O1 全隊沒有能做的載具";
+    case OptionalDrop::UNASSIGNED: return "O2 有人能做但沒人接";
+    case OptionalDrop::GROUP_DONE: return "O3 同組的必要角色都結束了";
+  }
+  return "?";
+}
+
+bool Gateway::membershipReady(double now)
+{
+  const auto alive = comm_.aliveNeighbors(now);
+  if (alive.empty()) {
+    connected_since_ = -1.0;   // 斷線：恢復後重新等
+    return false;
+  }
+  if (connected_since_ < 0.0) {
+    connected_since_ = now;
+  }
+  const CommConfig & c = comm_.config();
+  if (!comm_.joined() || now - connected_since_ < c.lost_timeout + c.status_period) {
+    return false;
+  }
+  for (const AgentId a : alive) {
+    const NeighborInfo & n = comm_.neighbors().at(a);
+    if (!n.has_status || n.last_status < connected_since_) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<DroppedOptional> Gateway::step(double now)
+{
+  std::vector<DroppedOptional> out;
+  const bool ready = membershipReady(now);
+  if (now < next_check_) {
+    return out;
+  }
+  next_check_ = now + 0.2;
+  std::vector<std::pair<TaskId, DroppedOptional>> todo;
+  std::set<TaskId> watched;
+  for (const auto & [id, task] : comm_.agent().tasks()) {
+    if (task.status != TaskStatus::OPEN || !task.ext.optional || taskCreator(id) != comm_.id()) {
+      continue;
+    }
+    watched.insert(id);
+    if (comm_.groupMandatoryDone(task.ext.group_id, task.ext.role_count)) {
+      todo.push_back({id, DroppedOptional{id, OptionalDrop::GROUP_DONE, 0.0}});   // O3：執行中的也關
+      continue;
+    }
+    if (comm_.assignment(id).assignee != kNoAgent) {
+      no_capable_since_.erase(id);   // 有正式指派（待接受、保留、執行中）：O1、O2 不關
+      unassigned_since_.erase(id);
+      continue;
+    }
+    if (comm_.capableAgents(task, now).empty()) {
+      unassigned_since_.erase(id);
+      if (!ready) {
+        no_capable_since_.erase(id);   // 還不知道全隊有誰（剛啟動、斷線）：不計時
+        continue;
+      }
+      const double since = no_capable_since_.emplace(id, now).first->second;
+      const double limit = task.ext.optional_no_capable_s > 0 ? task.ext.optional_no_capable_s : 10.0;
+      if (now - since >= limit) {
+        todo.push_back({id, DroppedOptional{id, OptionalDrop::NO_CAPABLE, now - since}});
+      }
+    } else {
+      no_capable_since_.erase(id);
+      const double since = unassigned_since_.emplace(id, now).first->second;
+      const double limit = task.ext.optional_unassigned_s > 0 ? task.ext.optional_unassigned_s : 15.0;
+      if (now - since >= limit) {
+        todo.push_back({id, DroppedOptional{id, OptionalDrop::UNASSIGNED, now - since}});
+      }
+    }
+  }
+  for (const auto & [id, drop] : todo) {
+    if (comm_.dropOptional(id, now) == ReportCheck::ACCEPTED) {
+      out.push_back(drop);
+    }
+    watched.erase(id);
+  }
+  // 結束了、不再看的任務：計時清掉
+  for (auto * timers : {&no_capable_since_, &unassigned_since_}) {
+    for (auto it = timers->begin(); it != timers->end(); ) {
+      it = watched.count(it->first) > 0 ? std::next(it) : timers->erase(it);
+    }
+  }
+  return out;
 }
 
 Task Gateway::build(const InjectRequest & req, double created, double now)

@@ -223,6 +223,7 @@ struct NeighborInfo
   std::map<TaskId, AgentId> pending_view;
   // AGENT_STATE（sequence 比上一則舊的丟掉）
   bool has_status{false};
+  double last_status{0.0};           // 上一則 AGENT_STATE 的時刻（閘道的 membership_ready 用）
   bool gateway{false};               // 它是閘道（AGENT_STATE 的 vehicle_type = 0）：不是載具，不算進能力統計
   bool waiting_spec{false};          // 它排第一的任務在等 TaskSpec（版本 4 的 AGENT_STATE）
   bool committed{false};             // 它執行中的任務已接近目標（commit_radius 內），不可再被搶占
@@ -290,6 +291,9 @@ struct CommStats
   // 過期（2026-11-13）
   int expired_local{0};         // 本機判定過期（停止出價、撤銷自己的指派）
   int expired_closes{0};        // 自己是建立者、送出過期的 TASK_CLOSE
+  // optional 角色（2026-11-13）
+  int optional_drops{0};        // 送出的略過（TASK_CLOSE reason 4，閘道）
+  int optional_local_drops{0};  // O3 本機判定：同組必要角色都結束了，自己不再對 optional 角色出價（不關任務）
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -372,6 +376,12 @@ public:
   // 已結束任務的 TASK_CLOSE reason（1 完成、2 取消、3 過期、4 略過）；還開著、或不知道原因時 nullopt
   std::optional<std::uint8_t> closeReason(TaskId id) const;
 
+  // optional 角色（2026-11-13，合約第三節「optional 角色的自動關閉」）
+  // 略過：送 TASK_CLOSE reason 4（閘道的 O1～O3 用）。要是 optional 角色、還開著、自己能取消（建立者或 cancel_authorities）
+  ReportCheck dropOptional(TaskId id, double now);
+  // 同一組的必要角色（不是 optional 的）都結束了（完成、取消、過期）。這一組 role_count 個角色要都認得才判斷
+  bool groupMandatoryDone(TaskId group_id, std::uint8_t role_count) const;
+
   void receive(const std::uint8_t * data, std::size_t size, double now);
   void receive(const Bytes & packet, double now) {receive(packet.data(), packet.size(), now);}
 
@@ -389,6 +399,7 @@ public:
   const std::map<AgentId, AgentConflict> & conflicts() const {return conflicts_;}
   std::optional<std::uint64_t> selfConflict(double now) const;
   const CbbaAgent & agent() const {return agent_;}
+  const CommConfig & config() const {return config_;}
   // 目前要交給 BT 的任務：路徑上第一個還沒回報完成的任務
   std::optional<Task> currentTask() const;
   bool knows(TaskId id) const {return origins_.count(id) > 0;}
@@ -510,6 +521,9 @@ private:
   void markClosed(TaskId id, std::uint8_t reason, double now);
   void sendClose(TaskId id, std::uint8_t reason, double now);   // 自己發的取消、過期、略過
   void expireTasks(double now);
+  void dropOptionalLocally(double now);   // O3 的本機判定（不是閘道的節點）
+  std::set<TaskId> optional_local_;       // 已經本機停止出價的 optional 角色
+  double next_optional_check_{0.0};
   std::set<TaskId> expired_;          // 本機判定過期、還開著的（建立者要送 TASK_CLOSE）
   std::vector<TaskId> newly_expired_;
   double next_expiry_check_{0.0};
