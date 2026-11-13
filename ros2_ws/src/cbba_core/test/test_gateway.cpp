@@ -2,9 +2,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "cbba_core/assignment_manager.hpp"
 #include "cbba_core/capabilities.hpp"
 #include "cbba_core/gateway.hpp"
 #include "swarm_harness.hpp"
@@ -97,8 +99,11 @@ TEST(Gateway, SameKeyIsIdempotent)
   EXPECT_EQ(older.task_id, first.task_id);
   EXPECT_EQ(older.revision, 2);
 
-  req.revision = 3;
-  EXPECT_EQ(gw.inject(req, swarm.now()).status, InjectStatus::REJECTED);
+  req.revision = 3;   // 較新：改版（4b），同一個 task_id
+  const InjectResult newer = gw.inject(req, swarm.now());
+  EXPECT_EQ(newer.status, InjectStatus::REVISED) << newer.reason;
+  EXPECT_EQ(newer.task_id, first.task_id);
+  EXPECT_EQ(newer.revision, 3);
   EXPECT_EQ(swarm.node(kGateway).taskCount(), 1u);
 }
 
@@ -224,4 +229,136 @@ TEST(Gateway, IsAProtocolNodeOutsideAnyPlatform)
   ASSERT_EQ(r.status, InjectStatus::CREATED) << r.reason;
   swarm.run(2.0);
   EXPECT_EQ(gw.agent().winner(r.task_id), 50);
+}
+
+// ===========================================================================
+// 改版（4b，2026-11-13）
+// ===========================================================================
+namespace
+{
+// 閘道＋無人機 1＋狗 50（狗有指派流程，不握手，同 cbba_node）。狗得標、執行中
+struct Revisable
+{
+  Swarm swarm = makeSwarm();
+  Gateway gw{swarm.node(kGateway)};
+  std::unique_ptr<AssignmentManager> dog;
+  int dog_publishes{0};
+  InjectRequest req = groundRequest("move-1");
+  TaskId id{0};
+
+  Revisable()
+  {
+    AssignmentConfig c;
+    c.require_accept = false;
+    c.assign_hold = 0.4;
+    dog = std::make_unique<AssignmentManager>(swarm.node(50), c, [](int, const std::string &) {});
+    swarm.onTick([this](double now) {
+        dog->setExec(ExecInput{}, now);
+        dog->step(now);
+        dog->takeRequests();
+        dog_publishes += dog->takeAssignedChanged() ? 1 : 0;
+      });
+    req.spec = "{\"tasks\":[{\"action\":\"ptz_inspect\"}]}";
+    const InjectResult r = gw.inject(req, swarm.now());
+    EXPECT_EQ(r.status, InjectStatus::CREATED) << r.reason;
+    id = r.task_id;
+    swarm.run(2.0);
+  }
+};
+}  // namespace
+
+TEST(Revision, ContentChangeKeepsAssignmentAndRepublishes)
+{
+  // 只改位置與 TaskSpec：全隊換成 revision 2，正式指派（版本、執行者、執行中）不變；狗重發一次 current_task（新 revision）
+  Revisable t;
+  ASSERT_TRUE(t.dog->active());
+  EXPECT_EQ(t.dog->active()->task, t.id);
+  const Assignment before = t.swarm.node(kGateway).assignment(t.id);
+  EXPECT_EQ(before.assignee, 50);
+  EXPECT_EQ(before.state, AssignState::ACTIVE);
+  const int publishes = t.dog_publishes;
+
+  t.req.revision = 2;
+  t.req.task.position = {14.0, 1.0, 0.0};
+  t.req.spec = "{\"tasks\":[{\"action\":\"ptz_inspect\"},{\"action\":\"ptz_inspect\"}]}";
+  const InjectResult r = t.gw.inject(t.req, t.swarm.now());
+  ASSERT_EQ(r.status, InjectStatus::REVISED) << r.reason;
+  EXPECT_EQ(r.task_id, t.id);
+  t.swarm.run(2.0);
+
+  for (AgentId a : {kGateway, AgentId{1}, AgentId{50}}) {
+    const Task & got = t.swarm.node(a).agent().tasks().at(t.id);
+    EXPECT_EQ(got.revision, 2) << a;
+    EXPECT_NEAR(got.position.x, 14.0, 1e-3) << a;
+    const Assignment now = t.swarm.node(a).assignment(t.id);
+    EXPECT_EQ(now.version, before.version) << a;
+    EXPECT_EQ(now.assignee, 50) << a;
+    EXPECT_EQ(now.state, AssignState::ACTIVE) << a;
+  }
+  ASSERT_TRUE(t.swarm.node(50).specReady(t.id));
+  EXPECT_EQ(*t.swarm.node(50).taskSpec(t.id), t.req.spec);
+  ASSERT_TRUE(t.dog->active());
+  EXPECT_EQ(t.dog->active()->version, before.version);
+  EXPECT_EQ(t.dog_publishes, publishes + 1);
+  EXPECT_EQ(t.swarm.node(50).stats().reauctions, 0);
+  EXPECT_EQ(t.swarm.node(50).agent().winner(t.id), 50);
+}
+
+TEST(Revision, PlatformChangeReauctions)
+{
+  // 平台、能力改成空中：狗撤銷自己的指派（新版本、執行者 0），無人機得標
+  Revisable t;
+  ASSERT_TRUE(t.dog->active());
+  const std::uint64_t version = t.swarm.node(kGateway).assignment(t.id).version;
+
+  t.req.revision = 2;
+  t.req.task.platform = 1;
+  t.req.task.required_caps = capBit(Capability::MOBILITY_AIR) | capBit(Capability::RGB_CAMERA);
+  ASSERT_EQ(t.gw.inject(t.req, t.swarm.now()).status, InjectStatus::REVISED);
+  t.swarm.run(2.0);
+
+  EXPECT_FALSE(t.dog->active());
+  EXPECT_EQ(t.swarm.node(50).stats().reauctions, 1);
+  for (AgentId a : {kGateway, AgentId{1}, AgentId{50}}) {
+    const Assignment now = t.swarm.node(a).assignment(t.id);
+    EXPECT_GT(now.version, version) << a;
+    EXPECT_EQ(now.assignee, kNoAgent) << a;   // 無人機沒有指派流程：得標但沒有正式指派
+    EXPECT_EQ(t.swarm.node(a).agent().winner(t.id), 1) << a;
+  }
+}
+
+TEST(Revision, LaggingNodeCatchesUp)
+{
+  // 無人機漏掉改版的 TASK_ANNOUNCE（直接的和轉送的都掉）：看到別台的紀錄是較新的 revision，向鄰居要，補到新版與新的 TaskSpec
+  Revisable t;
+  t.swarm.block(kGateway, 1, PacketType::TASK_ANNOUNCE);
+  t.swarm.block(50, 1, PacketType::TASK_ANNOUNCE);
+  t.req.revision = 2;
+  t.req.task.position = {15.0, 0.0, 0.0};
+  t.req.spec = "{\"tasks\":[]}";
+  ASSERT_EQ(t.gw.inject(t.req, t.swarm.now()).status, InjectStatus::REVISED);
+  t.swarm.run(3.0);
+  const Task & got = t.swarm.node(1).agent().tasks().at(t.id);
+  EXPECT_EQ(got.revision, 2);
+  EXPECT_NEAR(got.position.x, 15.0, 1e-3);
+  ASSERT_TRUE(t.swarm.node(1).specReady(t.id));
+  EXPECT_EQ(*t.swarm.node(1).taskSpec(t.id), t.req.spec);
+}
+
+TEST(Revision, OnlyCreatorRevisesAndRolesStay)
+{
+  // 不是建立者不能改版；revision 沒變大不行；閘道不讓角色組改版
+  Revisable t;
+  Task mine = t.swarm.node(50).agent().tasks().at(t.id);
+  mine.revision = 9;
+  EXPECT_FALSE(t.swarm.node(50).reviseLocalTask(mine, t.swarm.now()));
+  Task same = t.swarm.node(kGateway).agent().tasks().at(t.id);
+  EXPECT_FALSE(t.swarm.node(kGateway).reviseLocalTask(same, t.swarm.now()));
+
+  InjectRequest grouped = groundRequest("grp", "front");
+  grouped.task.ext.role_count = 2;
+  ASSERT_EQ(t.gw.inject(grouped, t.swarm.now()).status, InjectStatus::CREATED);
+  grouped.revision = 2;
+  grouped.task.ext.role_count = 3;
+  EXPECT_EQ(t.gw.inject(grouped, t.swarm.now()).status, InjectStatus::REJECTED);
 }

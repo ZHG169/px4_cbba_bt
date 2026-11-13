@@ -278,6 +278,11 @@ struct CommStats
   int spec_requests{0};         // 為了缺 TaskSpec 送出的缺口請求
   int id_conflicts{0};          // 偵測到的同機號衝突（含別台用了自己的機號）
   int conflict_dropped{0};      // 因為同機號衝突拒收的封包、任務定義
+  // 改版（revision，2026-11-13）
+  int revisions{0};             // 套用的改版（含自己建立的）
+  int reauctions{0};            // 其中改了平台、能力、優先級，重新競標的
+  int rejected_revisions{0};    // 不是建立者送的改版（不套用、不轉送）
+  int revision_pulls{0};        // 看到鄰居的紀錄是較新的 revision，向它要任務定義的次數
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -307,6 +312,12 @@ public:
   // spec：TaskSpec（JSON，原文；版本 4）。不是空的時填好任務定義的 spec_length、spec_crc，任務定義之後送 TASK_SPEC 各段；
   // 超過 255 段時回傳 false
   bool addLocalTask(const Task & task, double now, const std::string & spec = std::string());
+
+  // 改版（2026-11-13，合約第三節「版本」）：自己建立、還開著的任務換成新內容。task.revision 要比已知的大；
+  // spec 是這個 revision 的 TaskSpec（空 = 沒有）。送新的 TASK_ANNOUNCE（新的 origin）與 TASK_SPEC。
+  // 只改位置、時間、價值 → 正式指派保留；改了平台、能力、優先級（舊型的種類）→ 重新競標，持有者撤銷自己的指派。
+  // 不是建立者、不認得、已結束、revision 沒有變大、spec 太大時回傳 false
+  bool reviseLocalTask(const Task & task, double now, const std::string & spec = std::string());
 
   // TaskSpec（版本 4）：這個任務可以開始執行了嗎（不需要 TaskSpec，或這個 revision 的已經收齊、長度與 CRC 對）
   bool specReady(TaskId id) const;
@@ -420,6 +431,12 @@ private:
   void relay(const Bytes & bytes);
   void applyAnnounce(const wire::TaskAnnounceBody & b, double now);
   void applyClose(const wire::TaskCloseBody & b, double now);
+  // 改版套用到本機（自己建立的、TASK_ANNOUNCE、SYNC_BATCH 共用；呼叫前已確認 origin 是建立者）
+  void applyRevision(const wire::RelayHeader & origin, const Task & task, double now);
+  // 鄰居的紀錄是較新的 revision：向它要那一個任務的定義（缺口請求，那個流水號標成不認得）
+  void pullRevisions(double now);
+  std::map<TaskId, AgentId> newer_revision_;     // 任務 → 有較新 revision 的鄰居
+  std::map<TaskId, double> last_revision_pull_;
 
   // 補發（版本 3）
   bool wantDigest(double now) const;
@@ -439,6 +456,7 @@ private:
   // 任務
   wire::TaskAnnounceBody announceBody(TaskId id) const;
   bool assign(const Task & task, double now, const std::string & spec = std::string());
+  void sendSpecParts(TaskId id, std::uint16_t revision, const std::string & spec, double now);
 
   // TaskSpec（版本 4）
   struct SpecStore

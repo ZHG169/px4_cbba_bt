@@ -20,6 +20,7 @@ const char * toString(InjectStatus status)
   switch (status) {
     case InjectStatus::CREATED: return "建立";
     case InjectStatus::DUPLICATE: return "重複（沿用）";
+    case InjectStatus::REVISED: return "改版";
     case InjectStatus::REJECTED: return "拒絕";
   }
   return "?";
@@ -107,9 +108,11 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
       r.status = InjectStatus::DUPLICATE;   // 冪等：同一個鍵重送，不重發
       return r;
     }
-    r.reason = req.revision < known->second.revision ?
-      "revision " + std::to_string(req.revision) + " 比已注入的 " + std::to_string(known->second.revision) + " 舊" :
-      "revision 更新（同一個任務改內容）還沒實作（第 4b 步）";
+    if (req.revision > known->second.revision) {
+      return revise(req, known->second, now);
+    }
+    r.reason = "revision " + std::to_string(req.revision) + " 比已注入的 " +
+      std::to_string(known->second.revision) + " 舊";
     r.revision = known->second.revision;
     return r;
   }
@@ -140,19 +143,9 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
     return r;
   }
 
-  Task t = req.task;
+  Task t = build(req, now, now);
   t.id = *id;
-  t.type = TaskType::NONE;
-  t.status = TaskStatus::OPEN;
-  t.created = now;
-  t.status_stamp = now;
-  t.explicit_deadline = req.deadline_sec > 0.0;
-  t.deadline_sec = t.explicit_deadline ? req.deadline_sec : 300.0;
-  t.revision = req.revision;
-  t.success_prob = 1.0;
   t.ext.group_id = group_id;
-  t.ext.release = req.release_sec > 0.0 ? now + req.release_sec : 0.0;
-  t.ext.expires = req.expires_sec > 0.0 ? now + req.expires_sec : 0.0;
   if (!comm_.addLocalTask(t, now, req.spec)) {
     r.reason = "協定層拒收（task_id 重複或 spec 超過上限）";
     return r;
@@ -164,6 +157,61 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
   r.status = InjectStatus::CREATED;
   r.task_id = t.id;
   r.group_id = group_id;
+  return r;
+}
+
+Task Gateway::build(const InjectRequest & req, double created, double now)
+{
+  Task t = req.task;
+  t.type = TaskType::NONE;
+  t.status = TaskStatus::OPEN;
+  t.created = created;
+  t.status_stamp = now;
+  t.explicit_deadline = req.deadline_sec > 0.0;
+  // 期限是「從現在起」：改版時 created 是原本的建立時刻，換算成從 created 起算
+  t.deadline_sec = t.explicit_deadline ? now + req.deadline_sec - created : 300.0;
+  t.revision = req.revision;
+  t.success_prob = 1.0;
+  t.ext.release = req.release_sec > 0.0 ? now + req.release_sec : 0.0;
+  t.ext.expires = req.expires_sec > 0.0 ? now + req.expires_sec : 0.0;
+  return t;
+}
+
+InjectResult Gateway::revise(const InjectRequest & req, Injected & known, double now)
+{
+  InjectResult r;
+  r.task_id = known.task_id;
+  r.revision = known.revision;
+  const auto group = groups_.find(req.incident_id);
+  r.group_id = group != groups_.end() ? group->second : 0;
+  if (const std::string bad = check(req); !bad.empty()) {
+    r.reason = bad;
+    return r;
+  }
+  const auto it = comm_.agent().tasks().find(known.task_id);
+  if (it == comm_.agent().tasks().end()) {
+    r.reason = "任務還沒送出（閘道還在和鄰居同步），稍後再改版";
+    return r;
+  }
+  const Task & old = it->second;
+  if (old.status != TaskStatus::OPEN) {
+    r.reason = "任務已結束，不能改版";
+    return r;
+  }
+  if (req.task.ext.role_count != old.ext.role_count || req.task.ext.role_index != old.ext.role_index) {
+    r.reason = "角色組（role_index、role_count）不能改版：要另外建任務";
+    return r;
+  }
+  Task t = build(req, old.created, now);
+  t.id = known.task_id;
+  t.ext.group_id = old.ext.group_id;
+  if (!comm_.reviseLocalTask(t, now, req.spec)) {
+    r.reason = "協定層拒收改版";
+    return r;
+  }
+  known.revision = req.revision;
+  r.status = InjectStatus::REVISED;
+  r.revision = req.revision;
   return r;
 }
 

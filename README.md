@@ -18,12 +18,14 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 |---|---|---|
 | sim | 真實世界＋所有飛控 | Gazebo、每台無人機一個 PX4 SITL、相機橋接、假狗的 Gazebo 替身 |
 | uav1、uav2… | 每台無人機的機上電腦 | XRCE Agent、px4_state_bridge、cbba_node、BT（uav_task_manager_node）、AprilTag 偵測 |
-| gcs | 地面站 | 監控；測試時可以跑機器狗的 cbba_node |
+| gcs | 地面站 | **閘道**（2-1b，`cbba_gateway.yaml`：機號 200、不出價的 cbba_node，`inject_task` 建任務、`assignments` 監控）；測試時可以跑機器狗的 cbba_node |
 
 - 控制路徑（節點 → XRCE Agent → PX4）走每台自己的線，**不經過 mesh**；**DDS 只在機內**。
 - 機間只有兩條 UDP multicast：
-  - **CBBA 協定版本 3**（`cbba_node`，port 14600）：每筆任務資料帶 task_id，不相容於「機間通訊封包規格」2026-10-06，
-    見 `ros2_ws/src/cbba_core/doc/protocol.md`；版本 3（2026-10-28）只改補發，見 `cbba_core/doc/protocol_v3_sync.md`。
+  - **CBBA 協定版本 4**（`cbba_node`，port 14600）：每筆任務資料帶 task_id，不相容於「機間通訊封包規格」2026-10-06，
+    見 `ros2_ws/src/cbba_core/doc/protocol.md`；版本 3（2026-10-28）改補發（`cbba_core/doc/protocol_v3_sync.md`）；
+    **版本 4**（2026-11-11 起，2-1b M0）：64 位元 task_id、能力過濾、P0～P3、TaskSpec、閘道、改版，見 `cbba_core/doc/cbba_m0_contract.md`。
+    各版本互相拒收，全隊（含狗）要用同一版編譯。
   - **飛行層位置廣播**（無人機 BT 的 `flight_beacon`，port 14601，10 Hz）：給 CBF 避碰用的鄰機位置與速度。
 - 用 `docker/scripts/mesh_tc.sh` 模擬丟包與延遲。
 
@@ -33,7 +35,7 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 ```
             ┌──────────────── 每台載具的機上電腦 ────────────────┐
  其他載具 ◄═UDP═► cbba_node ◄─ robot_state ── 狀態轉接（無人機：px4_state_bridge）
- （協定版本 3）       │  ▲
+ （協定版本 4）       │  ▲
    current_task       │  │ task_result、new_task（例如火警）
    task_closed        ▼  │
    task_announced*     BT（無人機：uav_px4_bt；狗：伯宇的 task_manager）→ PX4／Nav2
@@ -178,7 +180,22 @@ ros2 run cbba_core cbba_sim run $SCN/fire_3uav.csv --loss 0 --out /tmp/fire_3uav
 ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points.csv --out /tmp/insert
 ```
 
-## 目前進度（2026-11-04）
+## 目前進度（2026-11-13）
+
+**2-1b M0（11/20）的 CBBA 部分**（合約 `ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`）：
+
+| 項目 | 狀態 |
+|---|---|
+| 能力過濾（平台＋能力標籤）、優先級 P0～P3 | ✅ 單元、itest |
+| 協定版本 4：64 位元 task_id（建立者｜世代｜流水號）、27 B 紀錄、24 B 摘要、任務定義 A 層；機內 task_id uint64 | ✅ itest comm --dogs 3、uav |
+| 世代存檔、同機號偵測（`agent_conflict`） | ✅ |
+| TaskSpec（TASK_SPEC 分段、快取、缺口請求、WAITING_SPEC） | ✅ |
+| 閘道：非競標的協定節點（平台 0、能力 0）、`inject_task`（冪等、角色組 group_id）、`assignments` | ✅ 單元、手動（閘道＋狗） |
+| 改版（revision）：只改位置／時間／價值保留指派、改平台／能力／優先級重新競標、落後的節點補新版 | ✅ 手動；**狗 BT 收到同 task_id 新 revision 還是照舊版做（要和伯宇對）** |
+| 狗 BT 照 `current_task.spec` 建 tasks（`docker/dog/task_manager_spec.patch`） | ✅ 單元、端到端（閘道 → CBBA → 狗 BT） |
+| 過期、失聯接手依優先級、commit_radius、optional 角色關閉、DETECTION | ⏳ |
+
+**之前（第 1～5 週）**：
 
 | 項目 | 狀態 |
 |---|---|
@@ -196,7 +213,7 @@ ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points
 | 動態重新分配（執行超時交還、PX4 斷線接手） | ✅ itest U6、`--scenario cbba_overrun` |
 | 展示與測試工具：情境檔、兩個 terminal 手動／隨機插入、俯視動畫（電量長條）、D7 CBF 距離 | ✅ |
 | 無人機被人工接管（切出 offboard）時停止出價、交還任務 | ✅ 單元測試、SITL（10/17：分得出人接管和 PX4 失效保護，切回後重新得標完成） |
-| 機器狗 | 假狗（`fake_dog.py`）✅；伯宇的 BT 在模擬裡跑過（`--dog bt`，10/27，協定版本 2）；真的 V60 ⏳ 等伯宇換成 main（協定版本 3），說明在 `swarm_cbba/README_v60.md` |
+| 機器狗 | 假狗（`fake_dog.py`）✅；伯宇的 BT 在模擬裡跑協定版本 4（套 `docker/dog/` 的兩個 patch，11/13）；真的 V60 ⏳ 等伯宇換成 main（協定版本 4＋兩個 patch），說明在 `swarm_cbba/README_v60.md` |
 | GCS ↔ 載具 | 10/21 做過 Zenoh 白名單，11/04 拔掉（用不到；要再用從 commit `ec23b01` 拿回）；GCS 的插任務、監控、全體急停 ⏳ |
 | Nav2 接入模擬（伯宇的 task_manager＋Nav2 取代假狗） | ⏳ 規劃見 `docs/nav2_integration_plan.md` |
 | 能量模型校正（實機 ulog）、Jetson、實機 mesh | ⏳ |

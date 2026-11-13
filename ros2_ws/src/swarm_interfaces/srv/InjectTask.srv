@@ -1,7 +1,8 @@
 # 閘道注入任務（2-1b M0 第 4a 步，2026-11-12；合約 cbba_core/doc/cbba_m0_contract.md 第三節「注入」）
 # 只有閘道的 cbba_node（participate: never）提供：/<ns>/inject_task。task_id 由閘道配（版本 4：建立者｜世代｜流水號）。
 # 冪等鍵 (incident_id, role, revision)：同一個鍵重送回同一個 task_id、不重發（duplicate = true）；
-# revision 比已注入的舊 → 拒絕；較新 → 改版（第 4b 步才做，現在拒絕）。
+# revision 比已注入的舊 → 拒絕；較新 → 改版（同一個 task_id；只改位置、時間、價值時指派保留，
+# 改了 platform、能力、priority 重新競標；role_index、role_count 不能改）。
 # 時間欄位是「從注入時刻起算的秒數」，0 = 沒有。
 uint8 PLATFORM_ANY = 0
 uint8 PLATFORM_UAV = 1
@@ -37,7 +38,7 @@ uint16 optional_no_capable_s       # optional 關閉 O1 的等待；0 = 預設 1
 uint16 optional_unassigned_s       # optional 關閉 O2 的等待；0 = 預設 15 s
 string spec                        # TaskSpec（JSON，B 層：steps 等）；空 = 沒有
 ---
-bool accepted                      # 建立了，或同一個鍵重送（duplicate）
+bool accepted                      # 建立了、改版了，或同一個鍵重送（duplicate）
 bool duplicate
 string reason                      # 拒絕的原因
 uint64 task_id

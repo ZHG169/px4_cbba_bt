@@ -359,6 +359,18 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | 節點 | `cbba_node` 的 `participate: never`（不訂 robot_state、永不出價）時提供 `inject_task`（`InjectTask.srv`，時間欄位是從注入起算的秒數）、發 `assignments`（`TaskAssignments.msg`，開著的任務；`publish_assignments`）；`config/cbba_gateway.yaml`（機號 200、`epoch_required`）；`cbba_uav.yaml`、`cbba_v60.yaml` 的 `cancel_authorities: [200]` |
 | 還沒做 | 改版（較大的 revision，4b）；過期（4c）；失聯接手依優先級、commit_radius（4d）；optional 關閉 O1～O4（4e）。注入的新型任務（type 0）BT 還不會執行（伯宇的 ExecuteSteps 在 M1～M2） |
 
+### 實作（2026-11-13，第 4b 步：改版）
+
+| 項目 | 程式 |
+|---|---|
+| 建立者改版 | `CbbaComm::reviseLocalTask(task, now, spec)`：自己建立、還開著、revision 變大才行；新的 origin 送 TASK_ANNOUNCE＋這個 revision 的 TASK_SPEC。閘道：`inject_task` 同 (incident, role)、較大的 revision → `REVISED`（同一個 task_id；期限從原本的建立時刻換算；role_index、role_count 不能改） |
+| 收到 | 較新的 revision 只收建立者送的（`rejected_revisions`，不轉送）；比已知舊的丟掉、不轉送。`applyRevision`：換內容、origin 換新版的（保底重播、補發用新版）、`added_at_` 更新（直接推送） |
+| 對分配的影響 | 種類、平台、能力、優先級（effective*）都沒變 → `CbbaAgent::updateTask(…, false)`：得標者、得標價、正式指派保留，手上有的照新內容重算（`reevaluate`，做不到就釋放）。有變 → `updateTask(…, true)`：清掉得標者、自己手上的釋放、重新出價；**持有者自己撤銷**指派（`endAssignment`，新版本、執行者 0），別台的鎖等撤銷的紀錄傳到（持有者失聯照失聯接手）（`reauctions`） |
+| 補發 | 摘要、round_key 把進行中任務的 revision 算進 CRC；CBBA_STATE 紀錄的 revision 比已知新 → 每 `gap_request_gap` 向那個鄰居送只有那個流水號（標成不認得）的缺口請求，對方回新版的任務定義與 TaskSpec（`revision_pulls`） |
+| TaskSpec | 新 revision 沒有 TaskSpec → 丟掉舊的快取（`taskSpec` 回空字串）；有 → 照原本的分段收齊、比對 CRC |
+| 執行端 | `AssignmentManager`：執行中的任務改版（指派保留）且新 revision 的 TaskSpec 收齊 → 重發 current_task（同一個 task_id、新的 revision）；收齊前 BT 照舊版繼續 |
+| 還沒做 | BT 收到同一個 task_id、新 revision 的 current_task：狗的 BT（`if (t.task_id == cur) return;`）和無人機骨架目前都當成重送忽略、照舊版做完。要換目標時要中斷再插入，和伯宇對 |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

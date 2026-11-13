@@ -298,6 +298,27 @@ bool CbbaAgent::onTask(const Task & task, double now)
   return changed;
 }
 
+bool CbbaAgent::updateTask(const Task & task, bool reauction, double now)
+{
+  const auto it = tasks_.find(task.id);
+  if (it == tasks_.end() || it->second.status != TaskStatus::OPEN || task.revision <= it->second.revision) {
+    return false;
+  }
+  Task updated = task;
+  updated.status = TaskStatus::OPEN;
+  updated.success_prob = it->second.success_prob;   // 本機的失敗打折不因改版重來
+  it->second = updated;
+  if (reauction) {
+    releaseIf({task.id});
+    y_[task.id] = 0.0;
+    z_[task.id] = kNoAgent;
+    buildBundle(now);
+    return true;
+  }
+  reevaluate(now);
+  return true;
+}
+
 bool CbbaAgent::onMessage(const CbbaMessage & msg, double now)
 {
   // 1. 過濾

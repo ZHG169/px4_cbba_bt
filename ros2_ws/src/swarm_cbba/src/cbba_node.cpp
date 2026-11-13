@@ -766,6 +766,11 @@ private:
         platformName(t.platform), static_cast<unsigned>(t.priority), t.position.x, t.position.y, t.position.z,
         capabilitiesToString(t.required_caps).c_str(),
         req.spec.empty() ? "" : ("，TaskSpec " + std::to_string(req.spec.size()) + " B").c_str());
+    } else if (r.status == InjectStatus::REVISED) {
+      RCLCPP_INFO(get_logger(), "注入 %s → 任務 %s 改版：%s P%u (%.1f, %.1f, %.1f) 能力 %s%s", key.c_str(),
+        taskName(r.task_id).c_str(), platformName(t.platform), static_cast<unsigned>(t.priority),
+        t.position.x, t.position.y, t.position.z, capabilitiesToString(t.required_caps).c_str(),
+        req.spec.empty() ? "" : ("，TaskSpec " + std::to_string(req.spec.size()) + " B").c_str());
     } else if (r.status == InjectStatus::DUPLICATE) {
       RCLCPP_INFO(get_logger(), "注入 %s：重複，沿用任務 %s", key.c_str(), taskName(r.task_id).c_str());
     } else {

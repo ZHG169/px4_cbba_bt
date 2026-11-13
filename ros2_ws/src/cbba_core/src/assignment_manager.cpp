@@ -115,6 +115,8 @@ void AssignmentManager::startActive(const HeldAssignment & a, double now)
 {
   active_ = a;
   active_since_ = now;
+  const auto rev = comm_.agent().tasks().find(a.task);
+  active_revision_ = rev != comm_.agent().tasks().end() ? rev->second.revision : 0;
   active_expected_ = now + config_.overrun_margin;
   const auto it = comm_.agent().tasks().find(a.task);
   if (it != comm_.agent().tasks().end()) {
@@ -131,6 +133,20 @@ void AssignmentManager::startActive(const HeldAssignment & a, double now)
 void AssignmentManager::step(double now)
 {
   checkHeld(now);
+
+  // 執行中的任務改版（只改位置、時間、價值，指派保留；2026-11-13）：這個 revision 的 TaskSpec 收齊才重發 current_task
+  //（同一個 task_id、新的 revision），收齊前 BT 照舊版繼續
+  if (active_) {
+    const auto it = comm_.agent().tasks().find(active_->task);
+    if (it != comm_.agent().tasks().end() && it->second.revision != active_revision_ &&
+      comm_.specReady(active_->task))
+    {
+      info("執行中的 " + name(active_->task, active_->version) + " 改版 revision " +
+        std::to_string(active_revision_) + " → " + std::to_string(it->second.revision) + "：重發 current_task");
+      active_revision_ = it->second.revision;
+      assigned_changed_ = true;
+    }
+  }
 
   // 待接受逾時：當成暫時拒絕；送 RELEASE，之後才到的接受回覆不會啟動任務
   if (pending_ && now - pending_->sent > config_.accept_timeout) {

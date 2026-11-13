@@ -447,6 +447,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
   }
   releaseConflicts(now);
   pullSpecs(now);
+  pullRevisions(now);
   forgetSpecs(now);
 
   // 依目前位置、電量重新評估
@@ -813,6 +814,9 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
     // 較舊時等它更新。正式指派和任務定義的版本無關，上面照常合併
     const auto known = agent_.tasks().find(r.task_id);
     if (known != agent_.tasks().end() && known->second.revision != r.revision) {
+      if (r.revision > known->second.revision && known->second.status == TaskStatus::OPEN) {
+        newer_revision_[r.task_id] = h.sender_id;   // 它有較新的版本：向它要（pullRevisions）
+      }
       continue;
     }
     msg.bids.push_back(Bid{r.task_id, r.winning_bid, r.winner_id});
@@ -851,6 +855,10 @@ std::map<DigestKey, wire::DigestEntry> CbbaComm::digestMap() const
       d.crc = crc32Update(d.crc, static_cast<std::uint8_t>(seq >> shift));
     }
     d.crc = crc32Update(d.crc, closed ? 1 : 0);
+    if (!closed) {   // 進行中任務的 revision（2026-11-13）：落後的一方摘要不同 → 直接推送剛改版的
+      const std::uint16_t rev = agent_.tasks().at(task_id).revision;
+      d.crc = crc32Update(crc32Update(d.crc, static_cast<std::uint8_t>(rev >> 8)), static_cast<std::uint8_t>(rev));
+    }
   }
   for (auto & [key, d] : out) {
     d.crc = ~d.crc;
@@ -1295,6 +1303,10 @@ std::uint32_t CbbaComm::roundKey() const
       crc = crc32Update(crc, static_cast<std::uint8_t>(task_id >> shift));
     }
     crc = crc32Update(crc, isOpen(task_id) ? 0 : 1);
+    if (isOpen(task_id)) {   // revision 不同也算不一致（2026-11-13）
+      const std::uint16_t rev = agent_.tasks().at(task_id).revision;
+      crc = crc32Update(crc32Update(crc, static_cast<std::uint8_t>(rev >> 8)), static_cast<std::uint8_t>(rev));
+    }
   }
   return ~crc;
 }
@@ -1337,14 +1349,44 @@ bool CbbaComm::assign(const Task & task, double now, const std::string & spec)
   }
   dedup_.firstSeen(PacketType::TASK_ANNOUNCE, origin, now);   // 自己發的先登記
   send(wire::encodeTaskAnnounce(h, announceBody(t.id)), PacketType::TASK_ANNOUNCE);
-  if (spec.empty()) {
-    return true;
+  sendSpecParts(t.id, t.revision, spec, now);
+  return true;
+}
+
+bool CbbaComm::reviseLocalTask(const Task & task, double now, const std::string & spec)
+{
+  if (spec.size() > wire::kMaxSpecChunk * wire::kMaxSpecParts) {
+    return false;
   }
-  // TaskSpec：任務定義之後每段各一則（新的序號、origin），自己先存成收齊的（補發用）
+  const auto known = agent_.tasks().find(task.id);
+  if (known == agent_.tasks().end() || taskCreator(task.id) != id() || !isOpen(task.id) ||
+    task.revision <= known->second.revision)
+  {
+    return false;
+  }
+  const wire::Header h = newHeader(PacketType::TASK_ANNOUNCE);
+  const wire::RelayHeader origin = wire::originOf(h);   // 新的 origin：已收過舊版的節點不會當成重複
+  Task t = task;
+  t.status = TaskStatus::OPEN;
+  t.ext.spec_length = static_cast<std::uint32_t>(spec.size());
+  t.ext.spec_crc = spec.empty() ? 0 : wire::specCrc(spec);
+  dedup_.firstSeen(PacketType::TASK_ANNOUNCE, origin, now);
+  applyRevision(origin, t, now);
+  send(wire::encodeTaskAnnounce(h, announceBody(t.id)), PacketType::TASK_ANNOUNCE);
+  sendSpecParts(t.id, t.revision, spec, now);
+  return true;
+}
+
+// TaskSpec：任務定義之後每段各一則（新的序號、origin），自己先存成收齊的（補發用）。空的不送
+void CbbaComm::sendSpecParts(TaskId task_id, std::uint16_t revision, const std::string & spec, double now)
+{
+  if (spec.empty()) {
+    return;
+  }
   const auto chunks = wire::splitSpec(spec);
-  SpecStore & st = specs_[t.id];
+  SpecStore & st = specs_[task_id];
   st = SpecStore{};
-  st.revision = t.revision;
+  st.revision = revision;
   st.part_count = static_cast<std::uint8_t>(chunks.size());
   st.data = chunks;
   st.have.assign(chunks.size(), true);
@@ -1354,10 +1396,9 @@ bool CbbaComm::assign(const Task & task, double now, const std::string & spec)
     const wire::Header ph = newHeader(PacketType::TASK_SPEC);
     st.origin.push_back(wire::originOf(ph));
     dedup_.firstSeen(PacketType::TASK_SPEC, st.origin.back(), now);
-    send(wire::encodeTaskSpec(ph, specPartBody(t.id, static_cast<std::uint8_t>(k))), PacketType::TASK_SPEC);
+    send(wire::encodeTaskSpec(ph, specPartBody(task_id, static_cast<std::uint8_t>(k))), PacketType::TASK_SPEC);
     ++stats_.spec_parts_sent;
   }
-  return true;
 }
 
 // 已知任務的定義（origin 沿用建立時的）：建立、保底重播、補發共用
@@ -1475,6 +1516,17 @@ void CbbaComm::onTaskAnnounce(const Bytes & bytes, double now)
     ++stats_.conflict_dropped;   // 同機號衝突中較晚的那台建立的：不轉送、不收
     return;
   }
+  // 改版（2026-11-13）：較新的 revision 只收建立者送的；別人送的不套用、不轉送。比已知舊的不轉送（已經過時）
+  const auto known = agent_.tasks().find(b->task_id);
+  if (known != agent_.tasks().end()) {
+    if (b->revision > known->second.revision && b->relay.origin_id != taskCreator(b->task_id)) {
+      ++stats_.rejected_revisions;
+      return;
+    }
+    if (b->revision < known->second.revision) {
+      return;
+    }
+  }
   if (b->relay.origin_id != id()) {
     relay(bytes);   // 第一次收到時原封不動轉送一次
   }
@@ -1525,7 +1577,77 @@ void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
   e.optional_unassigned_s = b.optional_unassigned_s;
   e.spec_length = b.spec_length;
   e.spec_crc = b.spec_crc;
+  const auto known = agent_.tasks().find(t.id);
+  if (known != agent_.tasks().end() && t.revision != known->second.revision) {
+    if (t.revision < known->second.revision) {
+      return;   // 舊版（補發、轉送晚到）
+    }
+    if (b.relay.origin_id != taskCreator(t.id)) {
+      ++stats_.rejected_revisions;   // 只有建立者能改版
+      return;
+    }
+    applyRevision(b.relay, t, now);
+    return;
+  }
   addTask(b.relay, t, now);
+}
+
+// 改版：已結束的不理。只改位置、時間、價值 → 正式指派保留（核心照新內容重算分數）；平台、能力、優先級（或舊型的種類）
+// 改了 → 重新競標：核心清掉得標者，自己是持有者時撤銷自己的指派（新版本，執行者 0）；別台的鎖等持有者撤銷的紀錄傳到，
+// 持有者失聯時照失聯接手。TaskSpec 換成這個 revision 的（沒有就丟掉舊的）
+void CbbaComm::applyRevision(const wire::RelayHeader & origin, const Task & task, double now)
+{
+  const auto it = agent_.tasks().find(task.id);
+  if (it == agent_.tasks().end() || !isOpen(task.id) || task.revision <= it->second.revision) {
+    return;
+  }
+  const Task & old = it->second;
+  const bool reauction = old.type != task.type || effectivePlatform(old) != effectivePlatform(task) ||
+    effectiveRequiredCaps(old) != effectiveRequiredCaps(task) || priorityLevel(old) != priorityLevel(task);
+  origins_[task.id] = origin;   // 之後的保底重播、補發都用新版的 origin
+  added_at_[task.id] = now;     // 摘要不同時直接推送（push_recent_sec）
+  newer_revision_.erase(task.id);
+  ++stats_.revisions;
+  markChanged(agent_.updateTask(task, reauction, now));
+  dirty_ = true;
+  if (reauction) {
+    ++stats_.reauctions;
+    const Assignment a = assignment(task.id);
+    if (a.assignee == id() && a.state != AssignState::NONE) {
+      endAssignment(task.id);
+    }
+  }
+  if (task.ext.spec_length == 0) {
+    specs_.erase(task.id);
+  } else if (specs_.count(task.id) > 0) {
+    completeSpec(task.id);   // 新版的段比任務定義先到
+  }
+}
+
+void CbbaComm::pullRevisions(double now)
+{
+  for (auto it = newer_revision_.begin(); it != newer_revision_.end(); ) {
+    const TaskId task_id = it->first;
+    const auto n = neighbors_.find(it->second);
+    if (!isOpen(task_id) || n == neighbors_.end() || now - n->second.last_heard > config_.neighbor_timeout) {
+      it = newer_revision_.erase(it);
+      continue;
+    }
+    double & last = last_revision_pull_.try_emplace(task_id, -1e9).first->second;
+    if (now - last >= config_.gap_request_gap) {
+      last = now;
+      // 那個流水號標成「不認得」：對方回任務定義（新版）與 TaskSpec
+      wire::GapRequestBody b;
+      b.target_id = it->second;
+      b.creator = taskCreator(task_id);
+      b.epoch = taskEpoch(task_id);
+      b.first_seq = taskSeq(task_id);
+      b.states = {wire::SeqState::UNKNOWN};
+      send(wire::encodeGapRequest(newHeader(PacketType::GAP_REQUEST), b), PacketType::GAP_REQUEST, TxKind::RETRY);
+      ++stats_.revision_pulls;
+    }
+    ++it;
+  }
 }
 
 // ===========================================================================
@@ -1550,7 +1672,8 @@ std::optional<std::string> CbbaComm::taskSpec(TaskId id) const
     return std::nullopt;
   }
   const auto st = specs_.find(id);
-  return st == specs_.end() ? std::string() : st->second.json;
+  const bool none = agent_.tasks().at(id).ext.spec_length == 0;   // 這個 revision 沒有 TaskSpec（舊版的可能還在快取）
+  return st == specs_.end() || none ? std::string() : st->second.json;
 }
 
 wire::TaskSpecBody CbbaComm::specPartBody(TaskId id, std::uint8_t part) const

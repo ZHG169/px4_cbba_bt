@@ -1,9 +1,30 @@
 # 機器狗（V60）端使用說明
 
-給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-04 更新：機間協定版本 3）
+給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-13 更新：機間協定版本 4，見第 0.1 節）
 
-**一句話**：main 上的 CBBA 節點已經照你 handoff（2026-10-11）的格式做好了。你的 `task_manager`、`mission.xml`、
-launch 指令、yaml 都不用改，只要**換掉三個套件、重新編譯**。
+**一句話**：main 上的 CBBA 節點照你 handoff（2026-10-11）的格式做好了。`mission.xml`、launch 指令、yaml 不用改；
+**換掉三個套件、你的 `task_manager` 套兩個 patch（第 0.1 節），再重新編譯**。
+
+## 0.1 協定版本 4（2026-11-11 起，2-1b M0）要你改的
+
+| 改動 | 對你的影響 | 怎麼做 |
+|---|---|---|
+| task_id 改 **uint64**（`Task`、`TaskResult`、`Bid`；建立者｜世代｜流水號） | `task_manager` 約 12 處 `uint32_t task_id`（`externalTaskId`、`current_task_id`、埠、task_result）要改，否則回報的 task_id 會被截斷 | `docker/dog/task_manager_uint64.patch` |
+| `Task.msg` 加 `revision`、`spec` | 不讀新欄位也能跑；但 DDS 型別雜湊變了，**沒重編的程式收不到** | 用到 `swarm_interfaces` 的全部重編 |
+| `current_task.spec`：外部 task manager（閘道）給這個任務要做的 tasks（格式同你的任務檔 `waypoints[].tasks`） | 不套的話照舊 `[ptz_inspect, report_result]`（spec 被忽略） | `docker/dog/task_manager_spec.patch`（`mission_loader` 的 `parseTasks`／`parseSpecTasks`、`makeExternalWaypoint` 多一個 tasks、`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
+| 改版：同一個 task_id、較大的 `revision`（例如目標移動） | `onCurrentTask` 的 `if (t.task_id == cur) return;` 會當成重送，照舊版做完 | **還沒做，要和你對**：同 task_id、revision 變大時先取消再插入 |
+| 新增葉節點（Track、Wait、Speak…） | spec 裡能用的 action 要同時在 `kValidActions` 和 Switch 的 case | 你新版加 case 時一起加 `kValidActions` |
+
+套 patch（照順序；你更新 `task_manager` 後也照這樣重套，有衝突時對照 patch 開頭的說明手動改）：
+
+```bash
+cd <你的 task_manager 的上一層>
+patch -p1 -d task_manager < <repo>/docker/dog/task_manager_uint64.patch
+patch -p1 -d task_manager < <repo>/docker/dog/task_manager_spec.patch
+```
+
+**全隊要一起換**：版本 3 和版本 4 互相拒收；閘道（機號 200）的 AGENT_STATE 平台是 0，舊的版本 4 節點會當成壞封包。
+`cbba_v60.yaml` 已經加 `cancel_authorities: [200]`（閘道可以取消任務）。
 
 ---
 
@@ -15,10 +36,10 @@ launch 指令、yaml 都不用改，只要**換掉三個套件、重新編譯**�
 - 機間協定改成**版本 2**（每筆任務帶 task_id、session 取代 seq_file、機號不限 1～8），2026-10-28 再升到**版本 3**
   （只改補發：壓縮摘要 → 缺口請求 → 限速分批，弱網時流量不再隨已結束的任務數增加，`cbba_core/doc/protocol_v3_sync.md`）。
   **版本 1、2、3 互相拒收**，全隊（無人機、狗）要用同一版的 `cbba_core`、`swarm_cbba` 編譯。
-  你的 BT 和 cbba_node 之間的話題、訊息、QoS 都沒有變，BT 不用改。
+  2026-11-11 起是**版本 4**（第 0.1 節）：task_id 改 uint64、`Task.msg` 加欄位，BT 要套 patch。
 - 你 handoff 的 patch 套不上 main（`uav_cbba` 已經不存在），**不用套**。
 
-格式（套件名、launch、yaml、話題、訊息、QoS）完全照你的；底下換成協定版本 3 的核心，分配行為有幾點不同（第 6 節）。
+格式（套件名、launch、yaml、話題、訊息、QoS）完全照你的；底下換成協定版本 4 的核心，分配行為有幾點不同（第 6 節）。
 
 ## 1. 取得程式
 
@@ -27,7 +48,7 @@ launch 指令、yaml 都不用改，只要**換掉三個套件、重新編譯**�
 | 套件 | 是什麼 |
 |---|---|
 | `ros2_ws/src/swarm_interfaces` | 訊息 v1.6＝你的 v1.2（RobotState 的 `mode`、TaskResult 的 `reason`）＋ `ManualOverride.srv`＋`FireDetection`（無人機用，你用不到） |
-| `ros2_ws/src/cbba_core` | CBBA 核心、機間協定版本 3、指派流程（不依賴 ROS） |
+| `ros2_ws/src/cbba_core` | CBBA 核心、機間協定版本 4、指派流程、閘道（不依賴 ROS） |
 | `ros2_ws/src/swarm_cbba` | 統一版 `cbba_node`、`launch/cbba.launch.py`、`config/cbba_v60.yaml`、`config/cbba_uav.yaml` |
 
 ```bash
@@ -55,6 +76,7 @@ ros2 interface show swarm_interfaces/msg/RobotState | grep mode          # 有 A
 ros2 interface show swarm_interfaces/msg/TaskResult | grep reason        # 有 NONE / PERMANENT / … / reason
 ros2 interface show swarm_interfaces/srv/ManualOverride                  # Task task、bool clear / bool accepted、string message
 ros2 interface show swarm_interfaces/msg/Task | grep assignment_version  # 應該沒有輸出
+ros2 interface show swarm_interfaces/msg/Task | grep -E "uint64 task_id|revision|spec"   # 版本 4：三行都要有
 ```
 
 `ManualOverride.srv` 是照介面規格圖（`cbba_core/doc/spec/ugv_interface.png`）放的，欄位和你 `task_manager_node.cpp` 的用法一致；

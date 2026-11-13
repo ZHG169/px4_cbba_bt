@@ -6,7 +6,8 @@
 //
 // 冪等鍵 (incident_id, role, revision)：
 //   同一個鍵重送           → DUPLICATE：回同一個 task_id，不重發（規劃器逾時重試不會建出兩個任務）
-//   同 (incident, role)、revision 較大 → 改版（第 4b 步才做；現在回 REJECTED）
+//   同 (incident, role)、revision 較大 → 改版（REVISED，同一個 task_id；4b，2026-11-13）：CbbaComm::reviseLocalTask，
+//                            只改位置、時間、價值時指派保留，改了平台、能力、優先級重新競標；角色組（role_index、role_count）不能改
 //   revision 較小          → REJECTED
 // 對照表只在記憶體裡：閘道重開後同一個事件再注入會變成新任務（世代不同，task_id 不會撞）。
 // group_id：同一個 incident 有角色組（role_count > 0）時配一個，格式同 task_id（和任務共用流水號）。
@@ -39,7 +40,7 @@ struct InjectRequest
   std::string spec;            // TaskSpec（JSON，B 層）；空 = 沒有
 };
 
-enum class InjectStatus { CREATED, DUPLICATE, REJECTED };
+enum class InjectStatus { CREATED, DUPLICATE, REVISED, REJECTED };
 const char * toString(InjectStatus status);
 
 struct InjectResult
@@ -68,6 +69,9 @@ public:
 
 private:
   std::string check(const InjectRequest & req) const;   // 空字串 = 合法
+  // 請求 → 任務內容（id、group_id、created 由呼叫端填）；期限從 created 起算
+  static Task build(const InjectRequest & req, double created, double now);
+  InjectResult revise(const InjectRequest & req, Injected & known, double now);
 
   CbbaComm & comm_;
   std::map<std::pair<std::string, std::string>, Injected> injected_;

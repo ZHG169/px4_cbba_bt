@@ -20,6 +20,9 @@
 // require_accept = false（無人機的 BT 還沒好）：跳過和 BT 的握手（請求當下就算接受），
 // 可行性檢查、版本、回報檢查照常。
 //
+// 改版（2026-11-13）：執行中的任務只改了位置、時間、價值時指派保留，新 revision 的 TaskSpec 收齊後重發 current_task；
+// 改了平台、能力、優先級時 CbbaComm 撤銷這台的指派，checkHeld 照「被更新的正式指派取代」處理。
+//
 // WAITING_SPEC（協定版本 4，2026-11-12，合約第二節「TaskSpec 的傳送」）：排第一、assign_hold 已過，但這個 revision 的
 // TaskSpec 還沒收齊 → 不建立正式指派、不發 current_task（不鎖定，別台照 CBBA 規則仍可以贏走），等收齊立刻開始。
 // 等超過 spec_wait 不算失敗：CbbaComm 改向每個鄰居要（setWaitingSpec 的 urgent），節點層告警（task_spec_missing）
@@ -164,6 +167,7 @@ private:
   std::optional<HeldAssignment> reserved_;
   std::optional<Pending> pending_;
   double active_since_{0.0};
+  std::uint16_t active_revision_{0};   // 發給 BT 的 current_task 是哪個 revision（改版時重發）
   double active_expected_{0.0};    // 執行中任務預估的完成時刻（開始時估）
   bool overrun_{false};
   double last_mismatch_warn_{-1e9};
