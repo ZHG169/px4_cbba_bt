@@ -1,0 +1,46 @@
+# 對象（2-1b 註冊表 REG-1，schema 1.0，2026-11-14 初版）
+#
+# steps 的 object（例如 inspect 要看的設備、track 要跟的目標）、偵測的類別、規劃器與 VLM 的詞彙都用這裡的名稱。
+#   classes    對象的種類（詞彙）。category：agent（會動的人、車）／equipment（設備）／structure（建物、門）／
+#              hazard（火、煙等危害）／item（物品）。trackable：可以當 track 的目標；inspectable：可以當 inspect 的對象
+#   instances  場地上具體的對象（有固定位置的設備）：id（steps 的 object 填這個）、class、site、position（map ENU）、floor
+#              目前是模擬的 yard 場景（docker/gz/worlds/yard_env.sdf.inc，伯宇的變電所）；換場地加一組 site
+# 新增：加一筆就好，名稱、id 用過之後不改（任務、偵測、紀錄都用名稱）。加完跑 swarm_cbba 的 test_registry 檢查。
+schema_version: "1.0"
+
+classes:
+  - {name: person, category: agent, trackable: true, inspectable: false, description: 人}
+  - {name: vehicle, category: agent, trackable: true, inspectable: false, description: 車輛}
+  - {name: transformer, category: equipment, trackable: false, inspectable: true, description: 變壓器}
+  - {name: tank, category: equipment, trackable: false, inspectable: true, description: 儲槽}
+  - {name: pipe_rack, category: equipment, trackable: false, inspectable: true, description: 管架}
+  - {name: valve, category: equipment, trackable: false, inspectable: true, description: 閥門}
+  - {name: building, category: structure, trackable: false, inspectable: true, description: 建物（控制室等）}
+  - {name: door, category: structure, trackable: false, inspectable: true, description: 門（open_door、close_door 之後用）}
+  - {name: fire, category: hazard, trackable: false, inspectable: true, description: 火}
+  - {name: smoke, category: hazard, trackable: false, inspectable: true, description: 煙}
+  - {name: hot_spot, category: hazard, trackable: false, inspectable: true, description: 熱異常（熱像儀看到的高溫點）}
+  - {name: left_object, category: item, trackable: false, inspectable: true, description: 遺留物}
+
+instances:
+  - {id: control_room, class: building, site: yard, position: [-38.0, 28.0, 2.0]}
+  - {id: TA1, class: transformer, site: yard, position: [-30.0, 15.0, 1.5]}
+  - {id: TA2, class: transformer, site: yard, position: [-20.0, 15.0, 1.5]}
+  - {id: TA3, class: transformer, site: yard, position: [-10.0, 15.0, 1.5]}
+  - {id: TA4, class: transformer, site: yard, position: [0.0, 15.0, 1.5]}
+  - {id: TA5, class: transformer, site: yard, position: [10.0, 15.0, 1.5]}
+  - {id: TB1, class: transformer, site: yard, position: [-30.0, 0.0, 1.5]}
+  - {id: TB2, class: transformer, site: yard, position: [-20.0, 0.0, 1.5]}
+  - {id: TB3, class: transformer, site: yard, position: [-10.0, 0.0, 1.5]}
+  - {id: TB4, class: transformer, site: yard, position: [0.0, 0.0, 1.5]}
+  - {id: TB5, class: transformer, site: yard, position: [10.0, 0.0, 1.5]}
+  - {id: TC1, class: transformer, site: yard, position: [-30.0, -15.0, 1.5]}
+  - {id: TC2, class: transformer, site: yard, position: [-20.0, -15.0, 1.5]}
+  - {id: TC3, class: transformer, site: yard, position: [-10.0, -15.0, 1.5]}
+  - {id: TC4, class: transformer, site: yard, position: [0.0, -15.0, 1.5]}
+  - {id: TC5, class: transformer, site: yard, position: [10.0, -15.0, 1.5]}
+  - {id: TC6, class: transformer, site: yard, position: [30.0, -15.0, 1.5]}   # 場景裡的模型名稱是 TC6_fire
+  - {id: pipe_rack, class: pipe_rack, site: yard, position: [0.0, -28.0, 2.0]}
+  - {id: valve_skid, class: valve, site: yard, position: [25.0, 10.0, 0.6]}
+  - {id: tank_1, class: tank, site: yard, position: [40.0, 25.0, 3.0]}
+  - {id: tank_2, class: tank, site: yard, position: [40.0, 33.0, 3.0]}

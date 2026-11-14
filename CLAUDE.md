@@ -177,7 +177,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | 分支 | 內容 |
 |---|---|
 | `main` | 2026-10-10 起包含全部（通用 cbba_node、協定版本 2、BT 接受流程、uav_px4_bt、apriltag_fire_detector、模擬測試場景），以 `12e36bb` 為基礎直接 commit 目前的工作目錄 |
-| `hetero-tasking` | 2026-11-14 起：異質機隊的任務分派（多種載具分工、同一事件拆成多個角色），2-1b M0 全部（協定版本 4 的後半、閘道、介面 v2.0、DETECTION、註冊表、給伯宇的清單）。GitHub 的 main 停在 `2553ca8`（11/12），伯宇 pull main 不會拿到；約好一起換時再合進 main。本機的 main 也指到 `a4c716b`（沒 push），之後在這個分支上做 |
+| `hetero-tasking` | 2026-11-14 起：異質機隊的任務分派（多種載具分工、同一事件拆成多個角色），2-1b M0 全部（協定版本 4 的後半、閘道、介面 v2.0、DETECTION、註冊表、給伯宇的清單）。GitHub 的 main 停在 `2553ca8`（11/12），伯宇 pull main 不會拿到；約好一起換時再合進 main。已推到 GitHub（11/14）；本機的 main 指到 `a4c716b`（沒 push），之後在這個分支上做 |
 | `dog-integration` | GitHub 上是 `e802fbb`（10/07 的 `uav_cbba`＋`ugv_cbba`，協定版本 1；伯宇的 handoff 就是對照這版），不再用 |
 
 - 兩個分支共用 `ros2_ws/build`、`install`：**切換分支後要重新編譯**，否則 install 裡是另一個分支的程式。
@@ -323,6 +323,12 @@ CBBA 的 UDP 不受 `ROS_DOMAIN_ID` 隔離：只重開一個節點時，任務�
 1. ~~介面 v2.0~~（11/14 寫好，見上表；`teammates` 是 CB-4）。改訊息 → 全隊（含狗的 BT）重編，BT 不讀新欄位就不用改程式
 2. ~~5 DETECTION~~（11/14 寫好，見上表；欄位照 2-1b 第七節＋位置、attrs，EVT-1 只加欄位）
 3. ~~註冊表~~（11/14 寫好，見上表；`registry_dir` 預設不用，要在 `cbba_uav.sh`、itest 打開再定）
+   3b. **`actions.yaml` 初版**（11/14 ✅ 單元＋節點載入）：2-1b 第二節的 8 個可規劃動作（go_to、patrol、inspect、track、speak、wait、return_to_dock、
+   alert_operator）的平台、能力、location／object、參數、前置條件、失敗碼；參數暫定（inspect 照狗 BT 的 snapshots、timeout，
+   patrol 10 m、track 2 m／30 s 照 UAV 實機 API），等伯宇的 REG-2 對過才凍結。載入器檢查格式（`test_registry` 6 項）。
+   3c. **`objects.yaml`、`event_types.yaml` 初版**（11/14 ✅ 單元 8 項＋R1、R8＋回歸）：對象 12 種＋yard 的 21 個設備；事件先自訂 5 種（fire P0〔`apriltag_fire`
+   已有〕、smoke P0、intrusion P0、thermal_anomaly P1、left_object P2，偵測器、門檻、VLM、範本名稱）。**2-1b 的六份 schema 都有了**；
+   範本 `event_rules.yaml` 是 PLN-1。新增事件／設備只要加一筆（`registry/README.md`「怎麼新增」；`test_registry` 8 項）
 4. ~~給伯宇的介面變更清單~~（11/14：`README_v60.md` 第 0.1 節改成 A 必做 6 項、B 要知道 9 項、C 要對的 6 項＋驗收步驟）
 5. ~~全隊重編、itest 重跑~~（11/14 全過）：`20261114_173818_comm`（`--dogs 3`，C0～C9 PASS；待命 10.5 kB/s，和 11/12 版本 4 相同，11/09 版本 3 是 8.5）、
    `20261114_174034_loss`（`--dogs 3 --levels 30,70`：30% 5 s 收斂 100%、0.75／1.10 s；70% 100%、2.46／3.06 s〔第 5 週 90%、2.31／4.27 s〕；重複認領 0）、
@@ -434,7 +440,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 **commit**：分支 `hetero-tasking`（11/14）：`41e52cf`（註冊表、清單、itest 結果）、`a4c716b`（DETECTION）、`867ea76`（介面 v2.0）；之前 `70ad844`（4f 第一批）。M0 依序：`b9d3649`（第 1、2a、2b 步）、`9e4eea9`（2c）、`2553ca8`（3 TaskSpec）、
 `a6dd8a8`（4a 閘道）、`dd9336e`（狗 BT 讀 spec）、`4b20ad5`（4b 改版＋README 版本 4）、`afe3ea3`（4c 過期）、`f754ac8`（4d）、
 `c1f7c17`（通用 steps、`inspect` 改名）、`e52f159`（4e＋inspect 拍 1 張）、`70ad844`（4f 第一批）；之前 `2edd074`（第 5 週收尾＋M0 合約）。
-**還沒 push**：分支 `hetero-tasking`（`a6dd8a8` 之後的 commit 都在這個分支；GitHub 的 main 停在 `2553ca8`）。push：`git push -u origin hetero-tasking`（要 GitHub 的 Personal Access Token）。
+**push**：分支 `hetero-tasking` 11/14 推到 GitHub（`origin/hetero-tasking`）；GitHub 的 main 停在 `2553ca8`，約好一起換時再合進 main（PR：`https://github.com/ZHG169/px4_cbba_bt/pull/new/hetero-tasking`）。
 **還沒 commit**：無。
 不要進 repo：`graphify-out/`、`docs/reports/82fd836a-…實驗規劃.pdf`（使用者的檔案，要不要收先問）、`swarm_zenoh` 的 `__pycache__`、`ros2_ws/src/world/`（伯宇的原檔）、
 隊友的資料（`docs/handoff_uav_*`、`docs/messageImage_*.jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`、宜臻的實作說明 .md，`.gitignore`）。

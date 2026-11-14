@@ -1,0 +1,145 @@
+# 動作（2-1b 註冊表 REG-1，schema 1.0，2026-11-14 初版）
+#
+# 2-1b 第二節的 8 個可規劃動作。閘道、規劃器把任務寫成 steps（current_task.spec：{"steps": [{action, location, object, params}]}），
+# 各平台的 BT（狗的 task_manager、無人機的 uav_adapter）照 action 名稱分派到自己的葉節點。狗和無人機用同一套名稱。
+# 動作的 ROS Action 介面與失敗碼（REG-2）由伯宇定：這份的參數名稱、預設值是**初版（暫定）**，對過之後才凍結。
+# 系統動作（emergency_stop、emergency_land）、平台內部動作（UAV 的 takeoff、set_altitude，由 adapter 自動補）、
+# report_state、未開放的（open_door、close_door、pick_up、use_tool）之後再加。
+#
+# 欄位
+#   name                  動作名稱（steps 的 action）；只增不改
+#   class                 plannable（可規劃，規劃器、範本可以用）／system（系統）／internal（平台內部，規劃器不能用）
+#   platforms             哪些平台做得到（platforms.yaml 的 name）
+#   required_capabilities 除了平台本身的移動能力，還要哪些能力（tools.yaml 的 name）；任務的 required_capabilities 由範本展開時合併
+#   location              step 的 location（map ENU 的 x、y、z）：required／optional／none
+#   object                step 的 object（對象，例如追蹤目標的 id）：required／optional／none
+#   params                參數：name、type（float、int、string、bool、point、point_list）、unit、required、default、description
+#   preconditions         開始前要成立的條件（檢查器的「前置條件鏈」）：at_location = 載具已經在 step 的 location 附近
+#                         （通常由前一步 go_to 達成）
+#   failure_codes         這個動作會回的失敗碼（另外每個動作都可能回 common_failure_codes）
+#   cancellable           可以中途取消（2-1b：每個動作都必須可取消）
+#   status                open（開放）／closed（還不能用）
+schema_version: "1.0"
+
+# 每個動作都可能回的失敗碼（8 個失敗碼的定義與對應的排除見 cbba_core/failure_codes.hpp）
+common_failure_codes: [E_PRECONDITION, E_SAFETY_STOP, E_LOW_BATTERY, E_COMM, E_HW]
+
+actions:
+  - name: go_to
+    description: 走（飛）到一個點
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: []
+    location: required
+    object: none
+    params:
+      - {name: tolerance, type: float, unit: m, required: false, default: 0.5, description: 到點的容許距離}
+      - {name: timeout, type: float, unit: s, required: false, default: 0, description: 逾時；0 = 依距離與速度自動算}
+    preconditions: []
+    failure_codes: [E_UNREACHABLE, E_TIMEOUT]
+    cancellable: true
+    status: open
+
+  - name: patrol
+    description: 照一串點巡邏
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: []
+    location: optional          # pattern 是 square 時是正方形的中心；沒給用目前位置
+    object: none
+    params:
+      - {name: pattern, type: string, required: false, default: waypoints, description: "waypoints（照 waypoints 走）／square（以 location 為中心的正方形）"}
+      - {name: waypoints, type: point_list, unit: m, required: false, description: pattern 是 waypoints 時必填}
+      - {name: size, type: float, unit: m, required: false, default: 10.0, description: pattern 是 square 時的邊長（UAV 實機 API 是 10 m）}
+      - {name: loops, type: int, required: false, default: 1, description: 繞幾圈}
+    preconditions: []
+    failure_codes: [E_UNREACHABLE, E_TIMEOUT]
+    cancellable: true
+    status: open
+
+  - name: inspect
+    description: 到點後看、拍照
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: [rgb_camera]
+    location: required          # 要看的點（狗：雲台的 target；無人機：下視的位置）
+    object: optional            # 要看的設備（objects.yaml）
+    params:
+      - {name: snapshots, type: int, required: false, default: 1, description: 拍幾張；0 = 只看不拍}
+      - {name: timeout, type: float, unit: s, required: false, default: 30.0, description: 逾時}
+    preconditions: [at_location]
+    failure_codes: [E_UNREACHABLE, E_TIMEOUT]
+    cancellable: true
+    status: open
+
+  - name: track
+    description: 跟著目標
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: [rgb_camera]
+    location: optional          # 目標最後出現的位置
+    object: required            # 目標（偵測的 track_id 或 objects.yaml 的 id）
+    params:
+      - {name: distance, type: float, unit: m, required: false, default: 2.0, description: 跟隨距離（UAV 實機 API 是 2 m）}
+      - {name: duration, type: float, unit: s, required: false, default: 30.0, description: 跟多久（UAV 實機 API 是 30 s）}
+    preconditions: []
+    failure_codes: [E_TARGET_LOST, E_UNREACHABLE, E_TIMEOUT]
+    cancellable: true
+    status: open
+
+  - name: speak
+    description: 喊話
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: [speaker]
+    location: none
+    object: none
+    params:
+      - {name: text, type: string, required: true, description: 要說的話}
+      - {name: repeat, type: int, required: false, default: 1, description: 重複幾次}
+    preconditions: []
+    failure_codes: [E_TIMEOUT]
+    cancellable: true
+    status: open
+
+  - name: wait
+    description: 原地等
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: []
+    location: none
+    object: none
+    params:
+      - {name: duration, type: float, unit: s, required: true, description: 等多久}
+    preconditions: []
+    failure_codes: []
+    cancellable: true
+    status: open
+
+  - name: return_to_dock
+    description: 回充電點（無人機是回起降點）
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: []
+    location: optional          # 沒給用載具自己的充電點、起降點
+    object: none
+    params: []
+    preconditions: []
+    failure_codes: [E_UNREACHABLE, E_TIMEOUT]
+    cancellable: true
+    status: open
+
+  - name: alert_operator
+    description: 通知值班的人
+    class: plannable
+    platforms: [uav, quadruped]
+    required_capabilities: []
+    location: none
+    object: optional
+    params:
+      - {name: message, type: string, required: true, description: 通知的內容}
+      - {name: level, type: string, required: false, default: warning, description: "info／warning／critical"}
+    preconditions: []
+    failure_codes: [E_TIMEOUT]
+    cancellable: true
+    status: open

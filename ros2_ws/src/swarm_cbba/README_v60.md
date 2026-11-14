@@ -39,7 +39,7 @@ patch -p1 -d task_manager < <repo>/docker/dog/task_manager_spec.patch
 | B5 | `task_orphaned` 的型別從 `Task` 改成 **`TaskOrphaned`**（task、reason、waited_sec、detail） | 你的 BT 沒訂這個話題，不影響；地面站、監控程式有訂的要改型別 |
 | B6 | 新話題 `/v60/detection`（`swarm_interfaces/Detection`：detector、source、t、label、score、bbox、track_id、position、attrs） | 現在不用做。之後狗的偵測（看到火、看到人）**不自己建任務**，發這個話題；cbba_node 送給閘道（閘道斷線時暫存、恢復後送出），由閘道決定要不要建任務 |
 | B7 | 能力過濾：任務帶 `platform`、`required_capabilities`，載具要平台符合、能力都有才出價 | 狗預設能力 `mobility_ground`、`rgb_camera`；V60 實際有的（雲台變焦 `zoom`、熱像 `thermal_camera`…）請告訴我，加進 `registry/fleet.yaml` |
-| B8 | 註冊表（`<repo>/registry/`：`tools.yaml`、`platforms.yaml`、`fleet.yaml`） | 選用：cbba_node 給 `registry_dir`（或環境變數 `CBBA_REGISTRY_DIR`）時從 `fleet.yaml` 讀平台與能力；沒給照參數。`swarm_cbba` 多了 yaml-cpp 的依賴（Jazzy 本來就有，不用另外裝） |
+| B8 | 註冊表（`<repo>/registry/`：`tools.yaml`、`platforms.yaml`、`fleet.yaml`、`actions.yaml`、`objects.yaml`、`event_types.yaml`；你要加動作、事件種類、設備時見 `registry/README.md`「怎麼新增」，加一筆就好） | 選用：cbba_node 給 `registry_dir`（或環境變數 `CBBA_REGISTRY_DIR`）時從 `fleet.yaml` 讀平台與能力；沒給照參數。`swarm_cbba` 多了 yaml-cpp 的依賴（Jazzy 本來就有，不用另外裝） |
 | B9 | 搶占與接手照任務的優先級 P0～P3：接近目標（`commit_radius` 內）後不可被搶；持有者失聯 P0 10 s、P1 15 s、P2／P3 30 s 後別台接手 | 舊型任務結果和原本相同（火警 = P0 10 s、巡檢 = P3 30 s） |
 
 ### C. 要和你對的
@@ -71,7 +71,7 @@ spec patch 讓你的 BT 把 steps 翻成外部點的 tasks，交給 `mission.xml
 |---|---|
 | 能測 | steps 的解析與分派：`go_to`、`inspect` 已經接好；**你新加的動作**（`track`、`wait`、`speak`、`return_to_dock`、`alert_operator`…）只要 Switch 加 case、`kValidActions` 加名字就能用，解析的程式不用改；不支援的名稱回 `BAD_SPEC` |
 | 能測 | 完成、失敗的回報：做完回 `success`，閘道的 log 印「已確認完成」；失敗照 `reason`（之後可以填 `failure_code`，第 0.1 節 B4） |
-| 還沒定 | **每個動作的參數格式**（`wait` 是秒數還是條件、`track` 要哪些 params…）：要寫進註冊表的 `actions.yaml`，你定 Action 介面（REG-2）時一起定。下面例子的參數名稱只是暫定 |
+| 初版（請確認） | **每個動作的參數格式**：`<repo>/registry/actions.yaml`（2-1b 第二節的 8 個動作：參數名稱、型別、預設值、location／object、失敗碼；表在 `registry/README.md`）。`inspect` 照你已經在用的（`snapshots`、`timeout`），其他是提案；你定 Action 介面（REG-2）時對一遍，對過之後凍結 |
 | 還沒定 | 同一個任務改版（revision 變大）時 BT 怎麼處理（第 0.1 節 C1） |
 
 ### steps 的格式
@@ -142,7 +142,7 @@ ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask \
 | S2 | `go_to` → `inspect`（`params: {"snapshots": 3}`）→ `inspect`（另一個 location） | 兩次雲台，第一次拍 3 張、第二次 1 張 |
 | S3 | `go_to` → `wait`（`params: {"duration": 5}`），**還沒加 `wait` 的 case 時** | BT 回 `BAD_SPEC: …`（PERMANENT），任務不執行；cbba_node log「這台不再接」 |
 | S4 | 同 S3，**加了 `wait` 的 case 之後** | 走到後停 5 s、回 `success` |
-| S5 | 你其他新動作（`track`、`speak`…），參數照你葉節點要的 | 走到對的葉節點；參數名稱和你的葉節點對不上時告訴我，一起寫進 `actions.yaml` |
+| S5 | 你其他新動作（`track`、`speak`…），參數照 `registry/actions.yaml`（例如 `{"action":"track","object":"7","params":{"distance":2,"duration":30}}`） | 走到對的葉節點、讀到參數；名稱、型別不合你的葉節點時告訴我，改 `actions.yaml` |
 | S6 | `spec` 給空字串 | 照舊型流程（走到任務位置前、固定做一次雲台） |
 
 看的地方：你 BT 的 log（外部點的 tasks、Switch 走到哪個 case）、`ros2 topic echo /v60/current_task`（`spec` 欄位）、

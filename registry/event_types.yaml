@@ -1,0 +1,90 @@
+# 事件種類（2-1b 註冊表 REG-1，schema 1.0，2026-11-14 初版；EVT-1）
+#
+# 偵測（swarm_interfaces/Detection：detector、label、score…，機器人經 cbba_node 送到閘道）→ 閘道的事件流程照這份判斷
+# 「算不算一個事件」→ 成立就用 template 展開成任務（範本在 event_rules.yaml，PLN-1，之後加）。
+# 2-1b 的事件種類會再增加：目前是我們先自訂的五種，只有 fire 的偵測器現在就有（apriltag_fire_detector）。
+#
+# 欄位
+#   name           事件種類的名稱；用過之後不改（事件、任務、紀錄都用名稱）
+#   priority       任務的優先級 P0～P3（0 最高），展開的任務照這個（CBBA 的搶占、失聯接手看它）
+#   object_class   事件的主體（objects.yaml 的 class）
+#   detectors      哪些偵測器、哪些類別（Detection 的 detector、label）會觸發，min_score 以下的偵測不算；
+#                  status：available（已經有）／planned（還沒做）
+#   trigger        累積門檻：window 秒內、merge_radius 公尺內累積 min_count 筆（可以來自不同機器人）才成立
+#   vlm            成立前要不要再請 VLM 確認（enabled），prompt 是給 VLM 的問題
+#   dispatch_cost  派遣代價（相對值，1 = 一般）：越高表示誤報的代價越大（例如要出動多台），事件流程要更確定才派；
+#                  這版只帶著，事件流程（EVT-1、PLN）再定用法
+#   template       預設的任務範本（event_rules.yaml 的名稱）
+#   expires        事件成立後多久沒處理完就失效（s）；展開的任務帶同樣的 expires
+#   status         open（啟用）／closed（先不處理）
+#
+# 新增事件種類（我們或伯宇都可以）：在 event_types 加一筆；偵測器還沒有就標 planned。名稱用小寫加底線，用過之後不改；
+# 其他欄位（門檻、優先級、範本）之後可以調。加完跑 swarm_cbba 的 test_registry 檢查（優先級、物件種類、門檻的範圍）。
+schema_version: "1.0"
+
+event_types:
+  - name: fire
+    description: 火警
+    priority: 0
+    object_class: fire
+    detectors:
+      - {detector: apriltag_fire, labels: [fire], min_score: 0.85, status: available}   # 模擬：AprilTag 101 當火
+      - {detector: fire_smoke_yolo, labels: [fire], min_score: 0.6, status: planned}
+    trigger: {min_count: 3, window: 2.0, merge_radius: 2.0}
+    vlm: {enabled: false, prompt: ""}
+    dispatch_cost: 1.0
+    template: fire_response
+    expires: 900
+    status: open
+
+  - name: smoke
+    description: 煙霧
+    priority: 0
+    object_class: smoke
+    detectors:
+      - {detector: fire_smoke_yolo, labels: [smoke], min_score: 0.6, status: planned}
+    trigger: {min_count: 5, window: 3.0, merge_radius: 3.0}
+    vlm: {enabled: true, prompt: "畫面中是否有煙霧？回答 yes 或 no，並說明位置。"}
+    dispatch_cost: 1.0
+    template: smoke_check
+    expires: 900
+    status: open
+
+  - name: intrusion
+    description: 入侵（禁區內有人）
+    priority: 0
+    object_class: person
+    detectors:
+      - {detector: person_yolo, labels: [person], min_score: 0.5, status: planned}
+    trigger: {min_count: 5, window: 2.0, merge_radius: 3.0}
+    vlm: {enabled: true, prompt: "畫面中的人是否在禁區內、是否是巡檢人員？"}
+    dispatch_cost: 2.0          # 入侵範本會派狗＋無人機
+    template: intrusion_response
+    expires: 600
+    status: open
+
+  - name: thermal_anomaly
+    description: 熱異常（設備過熱）
+    priority: 1
+    object_class: hot_spot
+    detectors:
+      - {detector: thermal_hotspot, labels: [hot_spot], min_score: 0.7, status: planned}
+    trigger: {min_count: 3, window: 5.0, merge_radius: 2.0}
+    vlm: {enabled: false, prompt: ""}
+    dispatch_cost: 1.0
+    template: thermal_check
+    expires: 1800
+    status: open
+
+  - name: left_object
+    description: 遺留物
+    priority: 2
+    object_class: left_object
+    detectors:
+      - {detector: left_object_yolo, labels: [bag, box, left_object], min_score: 0.5, status: planned}
+    trigger: {min_count: 10, window: 30.0, merge_radius: 1.0}    # 要停留一段時間才算遺留
+    vlm: {enabled: true, prompt: "這個物品是不是被遺留在現場？"}
+    dispatch_cost: 0.5
+    template: left_object_check
+    expires: 3600
+    status: open
