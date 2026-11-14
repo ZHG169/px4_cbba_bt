@@ -177,7 +177,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | 分支 | 內容 |
 |---|---|
 | `main` | 2026-10-10 起包含全部（通用 cbba_node、協定版本 2、BT 接受流程、uav_px4_bt、apriltag_fire_detector、模擬測試場景），以 `12e36bb` 為基礎直接 commit 目前的工作目錄 |
-| `2-1b-m0` | 2026-11-14 起：2-1b M0 全部（協定版本 4 的後半、閘道、介面 v2.0、DETECTION、註冊表、給伯宇的清單）。GitHub 的 main 停在 `2553ca8`（11/12），伯宇 pull main 不會拿到；約好一起換時再合進 main。本機的 main 也指到 `a4c716b`（沒 push），之後在這個分支上做 |
+| `hetero-tasking` | 2026-11-14 起：異質機隊的任務分派（多種載具分工、同一事件拆成多個角色），2-1b M0 全部（協定版本 4 的後半、閘道、介面 v2.0、DETECTION、註冊表、給伯宇的清單）。GitHub 的 main 停在 `2553ca8`（11/12），伯宇 pull main 不會拿到；約好一起換時再合進 main。本機的 main 也指到 `a4c716b`（沒 push），之後在這個分支上做 |
 | `dog-integration` | GitHub 上是 `e802fbb`（10/07 的 `uav_cbba`＋`ugv_cbba`，協定版本 1；伯宇的 handoff 就是對照這版），不再用 |
 
 - 兩個分支共用 `ros2_ws/build`、`install`：**切換分支後要重新編譯**，否則 install 裡是另一個分支的程式。
@@ -431,10 +431,10 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 - 2026-11-08 `out/20261108_162805_demo`：dog1 模擬偵測發現 F2；影片已補畫偵測範圍（舊版留成 `*_before_detect.mp4`）。
 - 2026-10-24 `out/20261024_235929_demo`（`assign_random --seed 7`，3 m/s）：全過，X1 VO 繞過懸停的 uav2、最近 2.25 m。單元測試（10/24）：test_avoidance 15、test_cbf 16、test_flight_beacon 5、test_motion 8、test_skeleton 41、test_tree 13 全過、零警告。
 
-**commit**：分支 `2-1b-m0`（11/14）：`41e52cf`（註冊表、清單、itest 結果）、`a4c716b`（DETECTION）、`867ea76`（介面 v2.0）；之前 `70ad844`（4f 第一批）。M0 依序：`b9d3649`（第 1、2a、2b 步）、`9e4eea9`（2c）、`2553ca8`（3 TaskSpec）、
+**commit**：分支 `hetero-tasking`（11/14）：`41e52cf`（註冊表、清單、itest 結果）、`a4c716b`（DETECTION）、`867ea76`（介面 v2.0）；之前 `70ad844`（4f 第一批）。M0 依序：`b9d3649`（第 1、2a、2b 步）、`9e4eea9`（2c）、`2553ca8`（3 TaskSpec）、
 `a6dd8a8`（4a 閘道）、`dd9336e`（狗 BT 讀 spec）、`4b20ad5`（4b 改版＋README 版本 4）、`afe3ea3`（4c 過期）、`f754ac8`（4d）、
 `c1f7c17`（通用 steps、`inspect` 改名）、`e52f159`（4e＋inspect 拍 1 張）、`70ad844`（4f 第一批）；之前 `2edd074`（第 5 週收尾＋M0 合約）。
-**還沒 push**：分支 `2-1b-m0`（`a6dd8a8` 之後的 commit 都在這個分支；GitHub 的 main 停在 `2553ca8`）。push：`git push -u origin 2-1b-m0`（要 GitHub 的 Personal Access Token）。
+**還沒 push**：分支 `hetero-tasking`（`a6dd8a8` 之後的 commit 都在這個分支；GitHub 的 main 停在 `2553ca8`）。push：`git push -u origin hetero-tasking`（要 GitHub 的 Personal Access Token）。
 **還沒 commit**：無。
 不要進 repo：`graphify-out/`、`docs/reports/82fd836a-…實驗規劃.pdf`（使用者的檔案，要不要收先問）、`swarm_zenoh` 的 `__pycache__`、`ros2_ws/src/world/`（伯宇的原檔）、
 隊友的資料（`docs/handoff_uav_*`、`docs/messageImage_*.jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`、宜臻的實作說明 .md，`.gitignore`）。

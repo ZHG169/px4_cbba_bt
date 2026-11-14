@@ -13,7 +13,7 @@
 
 | # | 項目 | 為什麼 | 怎麼做 |
 |---|---|---|---|
-| A1 | 換掉三個套件：分支 `2-1b-m0` 的 `swarm_interfaces`、`cbba_core`、`swarm_cbba`（第 1 節） | 版本 3 和版本 4 **互相拒收**；全隊（無人機、狗、閘道）要同一版 | 第 1 節 |
+| A1 | 換掉三個套件：分支 `hetero-tasking` 的 `swarm_interfaces`、`cbba_core`、`swarm_cbba`（第 1 節） | 版本 3 和版本 4 **互相拒收**；全隊（無人機、狗、閘道）要同一版 | 第 1 節 |
 | A2 | 用到 `swarm_interfaces` 的**全部重編**（含 `task_manager`） | `Task`、`TaskResult` 加了欄位、新增 `TaskOrphaned`、`Detection`；DDS 型別雜湊變了，沒重編的程式**靜默收不到** | 第 2 節（最後有確認的指令） |
 | A3 | `task_manager` 套 **uint64 patch** | task_id 改 64 位元（建立者｜世代｜流水號）；你的 `uint32_t task_id` 約 12 處（`externalTaskId`、`current_task_id`、task_result…）會把閘道建的任務截斷 | `docker/dog/task_manager_uint64.patch` |
 | A4 | `task_manager` 套 **spec patch** | 閘道建的任務用 `current_task.spec`（2-1b 的通用 steps：`{"steps": [{"action": "go_to"…}, {"action": "inspect"…}]}`）告訴你要做什麼；不套的話 spec 被忽略、照舊固定做一次雲台 | `docker/dog/task_manager_spec.patch`（`parseSpecSteps`：第一步 go_to 是站的位置、inspect 的 location → 雲台 target、沒寫 snapshots 拍 1 張；`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
@@ -165,7 +165,7 @@ ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask \
 
 ## 1. 取得程式
 
-從 GitHub 的分支 **`2-1b-m0`** 拿這三個套件（2026-11-14 起：2-1b M0 的改動先放在這個分支，main 停在 11/12 的版本，
+從 GitHub 的分支 **`hetero-tasking`** 拿這三個套件（2026-11-14 起：2-1b M0 的改動先放在這個分支，main 停在 11/12 的版本，
 等我們約好一起換時再合進 main；不是 `dog-integration`）：
 
 | 套件 | 是什麼 |
@@ -175,7 +175,7 @@ ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask \
 | `ros2_ws/src/swarm_cbba` | 統一版 `cbba_node`、`launch/cbba.launch.py`、`config/cbba_v60.yaml`、`config/cbba_uav.yaml` |
 
 ```bash
-git clone -b 2-1b-m0 https://github.com/ZHG169/px4_cbba_bt.git
+git clone -b hetero-tasking https://github.com/ZHG169/px4_cbba_bt.git
 cp -r px4_cbba_bt/ros2_ws/src/{swarm_interfaces,cbba_core,swarm_cbba} <你的工作區>/src/
 ```
 
