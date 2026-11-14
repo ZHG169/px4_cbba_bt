@@ -431,6 +431,16 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | 沒改 | 無人機 BT 的火警照舊用 `new_task`（舊型，保留到 M3）；偵測器還沒發 `detection`（EVT-1 接上 `apriltag_fire_detector`） |
 | 測試 | `test_wire_detection`（5 項）、`test_detection`（11 項：合併、上限、限速與重送、暫存標記、去重複、送達與確認、斷線暫存後依序送出、50% 掉包每筆一次、多跳、閘道本機）；`swarm_cbba/test/det_iface.sh`（閘道＋狗的 cbba_node） |
 
+### 實作（2026-11-14，註冊表）
+
+| 項目 | 程式 |
+|---|---|
+| 檔案 | `<repo>/registry/`：`tools.yaml`（13 個能力標籤＋bit）、`platforms.yaml`（uav 1、quadruped 2＋成本模型）、`fleet.yaml`（uav1～3、狗 50～52、閘道 200）；schema 1.0，說明在 `registry/README.md` |
+| 載入 | `swarm_cbba/registry.hpp`（yaml-cpp；放在節點層，cbba_core 不讀檔案）：`loadRegistry`（格式、型別、schema 版本）、`checkRegistry`（bit 和 `capabilities.hpp` 一致、不重複、機號、平台、能力）、`unknownTools`（註冊表比程式新） |
+| cbba_node | 參數 **`registry_dir`**（取代第一節寫的 `fleet_file`：tools.yaml 也要一起檢查）：載具從 fleet.yaml 拿平台（要和 agent_type 一致）與能力；閘道的機號給 `gateways`；有錯拒絕啟動。沒給照參數 |
+| 還沒用 | platforms.yaml 的成本模型（M1 的 4f 第二批）；actions／objects／event_types 三份（PLN、EVT） |
+| 測試 | `swarm_cbba` 的 `test_registry`（5 項：repo 的註冊表和程式一致、bit 不一致、註冊表比程式新、機隊的錯誤、載入的錯誤） |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

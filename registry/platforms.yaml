@@ -1,0 +1,36 @@
+# 平台（2-1b 註冊表 REG-1，schema 1.0，2026-11-14）
+#
+# code 是 CBBA 封包裡的平台代碼（任務的 platform、AGENT_STATE 的 vehicle_type），**只增不改**；0 保留給
+# 「任務不限平台」（ANY）和「閘道」（AGENT_STATE，不是載具）。和 cbba_node 的 agent_type 對應：uav = UAV、quadruped = UGV。
+#
+# 成本模型的參數（CBBA 出價用）：M0 只載入、檢查，**還沒拿來用**（M1 的 4f 第二批才改成從這裡讀；目前的值在
+# swarm_cbba/config/cbba_uav.yaml、cbba_v60.yaml，兩邊先寫一樣）。
+#   cruise_speed          出價用的標稱速度（m/s）
+#   energy_per_meter      每公尺耗電（%）
+#   hover_energy_per_sec  現場每秒耗電（%）
+#   safety_reserve        做完並返航後至少要剩的電量（%）
+#   endurance_s           滿電續航（s）；0 = 不用（狗）。M1：無人機的耗電改用續航比例
+#   max_bundle            一次最多排幾個任務（2-1b：UAV 1～2）
+#   must_return           做完要回起降點（出價時算返航）
+schema_version: "1.0"
+platforms:
+  - name: uav
+    code: 1
+    description: 旋翼無人機（PX4）
+    cruise_speed: 5.0           # ScoringParams 的預設（cbba_uav.yaml 沒設）
+    energy_per_meter: 0.5       # AgentState 的預設
+    hover_energy_per_sec: 0.2
+    safety_reserve: 20.0
+    endurance_s: 900            # 2-1b：室內續航 900 s；SITL 的電池也設 900 s
+    max_bundle: 2
+    must_return: true
+  - name: quadruped
+    code: 2
+    description: 四足機器狗（Ghost V60）
+    cruise_speed: 1.0           # 佔位，待伯宇實測（cbba_core/doc/ugv_tuning.md）
+    energy_per_meter: 0.1
+    hover_energy_per_sec: 0.05
+    safety_reserve: 20.0
+    endurance_s: 0
+    max_bundle: 5
+    must_return: true

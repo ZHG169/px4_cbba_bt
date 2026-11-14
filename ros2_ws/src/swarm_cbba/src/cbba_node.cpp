@@ -101,6 +101,7 @@
 #include "cbba_core/failure_codes.hpp"
 #include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
+#include "swarm_cbba/registry.hpp"
 
 namespace cbba_core
 {
@@ -328,6 +329,55 @@ public:
       throw std::invalid_argument("capabilities: unknown capability \"" + bad_cap + "\"");
     }
     s.capabilities = *caps;
+    // 2-1b 註冊表（2026-11-14，<repo>/registry）：給了就從 fleet.yaml 讀自己的平台與能力（取代 capabilities 參數），
+    // 閘道的機號從 fleet.yaml 的 gateways；tools.yaml 的位元位置要和這版程式一致，否則拒絕啟動。空 = 不用註冊表（照參數）
+    const std::string registry_dir = declare_parameter<std::string>("registry_dir", envOr("CBBA_REGISTRY_DIR", ""));
+    std::optional<swarm_cbba::Registry> registry;
+    if (!registry_dir.empty()) {
+      registry = swarm_cbba::loadRegistry(registry_dir);   // 讀不到、格式不對：丟例外，拒絕啟動
+      const auto errors = swarm_cbba::checkRegistry(*registry);
+      for (const auto & e : errors) {
+        RCLCPP_ERROR(get_logger(), "註冊表：%s", e.c_str());
+      }
+      if (!errors.empty()) {
+        throw std::runtime_error("registry " + registry_dir + " has " + std::to_string(errors.size()) + " error(s)");
+      }
+      for (const auto & name : swarm_cbba::unknownTools(*registry)) {
+        RCLCPP_WARN(get_logger(), "註冊表的能力 %s 這版程式不認得（註冊表比程式新）：宣告了也用不到", name.c_str());
+      }
+      const swarm_cbba::RobotEntry * me = registry->robot(static_cast<AgentId>(agent_id));
+      if (gateway) {
+        const bool listed = std::any_of(registry->gateways.begin(), registry->gateways.end(),
+          [agent_id](const swarm_cbba::GatewayEntry & g) {return g.id == agent_id;});
+        if (!listed) {
+          RCLCPP_WARN(get_logger(), "註冊表：閘道機號 %d 不在 fleet.yaml 的 gateways", agent_id);
+        }
+      } else if (me == nullptr) {
+        RCLCPP_WARN(get_logger(), "註冊表：機號 %d 不在 fleet.yaml，平台與能力照參數", agent_id);
+      } else {
+        const swarm_cbba::PlatformEntry * platform = registry->platform(me->platform);
+        if (platform->code != platformOf(s.type)) {
+          throw std::invalid_argument("registry: agent " + std::to_string(agent_id) + " is platform " +
+            me->platform + " in fleet.yaml, but agent_type is " + agent_type);
+        }
+        if (!cap_names.empty()) {
+          RCLCPP_WARN(get_logger(), "註冊表：capabilities 參數不用，改用 fleet.yaml 的 %s", me->name.c_str());
+        }
+        // 不認得的（註冊表比程式新）略過；其他在 checkRegistry 已經檢查過
+        std::vector<std::string> known;
+        for (const auto & c : me->capabilities) {
+          if (capabilityFromName(c)) {
+            known.push_back(c);
+          }
+        }
+        s.capabilities = parseCapabilities(known).value_or(0);
+        if (s.capabilities == 0) {
+          RCLCPP_WARN(get_logger(), "註冊表：%s 沒有宣告能力，依 agent_type 用預設", me->name.c_str());
+        }
+        RCLCPP_INFO(get_logger(), "註冊表 %s：%s（%s），能力 %s", registry_dir.c_str(), me->name.c_str(),
+          me->platform.c_str(), capabilitiesToString(availableCaps(s)).c_str());
+      }
+    }
 
     // ---------- 出價、協定、UDP ----------
     ScoringParams scoring;
@@ -385,6 +435,12 @@ public:
         throw std::invalid_argument("gateways must be agent ids 1~65534");
       }
       comm.gateways.push_back(static_cast<AgentId>(id));
+    }
+    if (registry && !registry->gateways.empty()) {   // 有註冊表時以 fleet.yaml 為準
+      comm.gateways.clear();
+      for (const auto & g : registry->gateways) {
+        comm.gateways.push_back(g.id);
+      }
     }
     comm.gateway_timeout = declare_parameter<double>("gateway_timeout", comm.gateway_timeout);
     comm.detection.capacity = static_cast<std::size_t>(

@@ -12,7 +12,9 @@
   <depend>std_msgs</depend>
   <depend>swarm_interfaces</depend>
   <depend>cbba_core</depend>
+  <depend>yaml_cpp_vendor</depend>
   <exec_depend>launch_ros</exec_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -1,23 +1,24 @@
 # 機器狗（V60）端使用說明
 
-給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-14 更新：機間協定版本 4、介面 v2.0，見第 0.1 節）
+給伯宇（狗端）。2026-10-12 · 勝翔（2026-11-14 更新：2-1b M0 的變更清單，見第 0.1 節）
 
 **一句話**：main 上的 CBBA 節點照你 handoff（2026-10-11）的格式做好了。`mission.xml`、launch 指令、yaml 不用改；
-**換掉三個套件、你的 `task_manager` 套兩個 patch（第 0.1 節），再重新編譯**。
+**換掉三個套件、你的 `task_manager` 套兩個 patch、任務檔的 `ptz_inspect` 改 `inspect`，再全部重新編譯**（第 0.1 節 A）。
 
-## 0.1 協定版本 4（2026-11-11 起，2-1b M0）要你改的
+## 0.1 2-1b M0（2026-11-11～14）的變更清單
 
-| 改動 | 對你的影響 | 怎麼做 |
-|---|---|---|
-| task_id 改 **uint64**（`Task`、`TaskResult`、`Bid`；建立者｜世代｜流水號） | `task_manager` 約 12 處 `uint32_t task_id`（`externalTaskId`、`current_task_id`、埠、task_result）要改，否則回報的 task_id 會被截斷 | `docker/dog/task_manager_uint64.patch` |
-| `Task.msg` 加 `revision`、`spec` | 不讀新欄位也能跑；但 DDS 型別雜湊變了，**沒重編的程式收不到** | 用到 `swarm_interfaces` 的全部重編 |
-| `current_task.spec`：外部 task manager（閘道、Node-RED）給的通用 steps（`{"steps": [{"action": "go_to"…}, {"action": "inspect"…}]}`，狗和無人機同一套名稱） | 不套的話照舊固定做一次雲台（spec 被忽略） | `docker/dog/task_manager_spec.patch`（`parseSpecSteps`：第一步 go_to 當站的位置、inspect 的 location → 雲台 target；`makeExternalWaypoint` 多一個 tasks、`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
-| 動作名稱統一：`ptz_inspect` 改叫 **`inspect`** | Switch 的 case、`kValidActions`、你的任務檔（`action: inspect`）都要改；雲台的 ROS action（`/ptz_inspect`、`PtzInspect.action`）不變 | 同上的 patch；新版的任務檔、新葉節點的 case 名稱請用通用名稱（`go_to`、`track`、`wait`、`speak`、`return_to_dock`、`alert_operator`） |
-| 改版：同一個 task_id、較大的 `revision`（例如目標移動） | `onCurrentTask` 的 `if (t.task_id == cur) return;` 會當成重送，照舊版做完 | **還沒做，要和你對**：同 task_id、revision 變大時先取消再插入 |
-| 介面 v2.0（2026-11-14）：`Task` 加 `priority`、`platform`、`required_capabilities`、`group_id`、`role_index`、`role_count`、`optional`、`floor`、`deadline_hard`、`release`、`expires` | 不讀也能跑，**要重編**（型別雜湊） | 重編；要用時直接讀 current_task 的欄位（舊型任務填對應後的值：火警 P0、quadruped、mobility_ground） |
-| 介面 v2.0：`TaskResult` 加 `failure_code`（8 個 E_*）、`failed_capability`、`findings_uri` | 不填照舊用 `reason`。填了 `failure_code` 時 cbba_node 照下表決定排除、你填的 `reason` 不看：E_PRECONDITION／E_UNREACHABLE／E_HW → PERMANENT，E_TIMEOUT／E_TARGET_LOST／E_COMM → TRANSIENT，E_LOW_BATTERY／E_SAFETY_STOP → STOPPED；E_HW 時 `failed_capability` 填故障的能力（例如 `rgb_camera`），這隻之後不接需要它的任務（到 cbba_node 重開） | 之後你的 Action 有失敗碼（REG-2）時，`finish()` 一起填；現在不用改 |
-| 偵測（2026-11-14）：新話題 `/v60/detection`（`swarm_interfaces/Detection`：detector、source、t、label、score、bbox、track_id、position、attrs） | 現在不用做。之後狗的偵測（例如看到火、看到人）不自己建任務，發這個話題，cbba_node 送給閘道（閘道斷線時暫存）；由閘道決定要不要建任務 | EVT-1 定偵測器時再對 |
-| 新增葉節點（Track、Wait、Speak…） | spec 裡能用的 action 要同時在 `kValidActions` 和 Switch 的 case | 你新版加 case 時一起加 `kValidActions` |
+協定升到**版本 4**、訊息升到 **`swarm_interfaces` v2.0**。分三類：A 部署前一定要做；B 不用改程式、但行為要知道；C 要和你對的。
+
+### A. 部署前一定要做
+
+| # | 項目 | 為什麼 | 怎麼做 |
+|---|---|---|---|
+| A1 | 換掉三個套件：main 的 `swarm_interfaces`、`cbba_core`、`swarm_cbba`（第 1 節） | 版本 3 和版本 4 **互相拒收**；全隊（無人機、狗、閘道）要同一版 | 第 1 節 |
+| A2 | 用到 `swarm_interfaces` 的**全部重編**（含 `task_manager`） | `Task`、`TaskResult` 加了欄位、新增 `TaskOrphaned`、`Detection`；DDS 型別雜湊變了，沒重編的程式**靜默收不到** | 第 2 節（最後有確認的指令） |
+| A3 | `task_manager` 套 **uint64 patch** | task_id 改 64 位元（建立者｜世代｜流水號）；你的 `uint32_t task_id` 約 12 處（`externalTaskId`、`current_task_id`、task_result…）會把閘道建的任務截斷 | `docker/dog/task_manager_uint64.patch` |
+| A4 | `task_manager` 套 **spec patch** | 閘道建的任務用 `current_task.spec`（2-1b 的通用 steps：`{"steps": [{"action": "go_to"…}, {"action": "inspect"…}]}`）告訴你要做什麼；不套的話 spec 被忽略、照舊固定做一次雲台 | `docker/dog/task_manager_spec.patch`（`parseSpecSteps`：第一步 go_to 是站的位置、inspect 的 location → 雲台 target、沒寫 snapshots 拍 1 張；`BAD_SPEC` → PERMANENT；說明在你的 `config/MISSION_FORMAT.md` 最後一節） |
+| A5 | 動作名稱 `ptz_inspect` 改叫 **`inspect`** | 狗和無人機用同一套動作名稱（2-1b 的 actions），閘道、Node-RED 才能同時下命令 | 同 A4 的 patch（Switch 的 case、`kValidActions`）；**你的任務檔**也要改 `action: inspect`。雲台的 ROS action（`/ptz_inspect`、`PtzInspect.action`）不變 |
+| A6 | 同一隻狗的**機號三處一致** | cbba_node 收到的 robot_state 機號不對會略過 → 這隻狗永遠不出價 | `cbba_v60.yaml` 的 `agent_id`、你 BT 的 `agent_id` 參數、`registry/fleet.yaml` 的 `id`（有用註冊表時）：dog1 = 50、dog2 = 51、dog3 = 52 |
 
 套 patch（照順序；你更新 `task_manager` 後也照這樣重套，有衝突時對照 patch 開頭的說明手動改）：
 
@@ -27,8 +28,125 @@ patch -p1 -d task_manager < <repo>/docker/dog/task_manager_uint64.patch
 patch -p1 -d task_manager < <repo>/docker/dog/task_manager_spec.patch
 ```
 
-**全隊要一起換**：版本 3 和版本 4 互相拒收；閘道（機號 200）的 AGENT_STATE 平台是 0，舊的版本 4 節點會當成壞封包。
-`cbba_v60.yaml` 已經加 `cancel_authorities: [200]`（閘道可以取消任務）。
+### B. 不用改程式，但行為要知道
+
+| # | 項目 | 對你的影響 |
+|---|---|---|
+| B1 | 任務改由**閘道**（GCS，機號 200，不出價的 cbba_node）建立 | `current_task` 的 task_id 會是版本 4 的大數字（log 印成 `00C8.0001.00000003` = 建立者 200、世代 1、流水號 3）；舊的 `new_task`（`50 × 65536 + 流水號`）保留到 M3。`cbba_v60.yaml` 已經有 `cancel_authorities: [200]`（閘道可以取消任務） |
+| B2 | **WAITING_SPEC**：閘道建的任務，TaskSpec 還沒收齊前**不發 `current_task`** | 弱網時可能晚一點才收到任務（`spec_wait` 5 s 後 cbba_node 會加強要、發 `task_spec_missing` 告警，不算失敗）；你收到的 `spec` 一定是完整的 |
+| B3 | 介面 v2.0：`Task` 加 `revision`、`spec`、`priority`、`platform`、`required_capabilities`、`group_id`、`role_index`、`role_count`、`optional`、`floor`、`deadline_hard`、`release`、`expires` | 不讀也能跑。要用時直接讀 `current_task` 的欄位；舊型任務填對應後的值（火警 P0、quadruped、mobility_ground） |
+| B4 | 介面 v2.0：`TaskResult` 加 `failure_code`、`failed_capability`、`findings_uri` | 不填照舊用 `reason`。填了 `failure_code` 時 cbba_node 照下表決定排除（你填的 `reason` 不看）：E_PRECONDITION、E_UNREACHABLE、E_HW → PERMANENT；E_TIMEOUT、E_TARGET_LOST、E_COMM → TRANSIENT；E_LOW_BATTERY、E_SAFETY_STOP → STOPPED。E_HW 時 `failed_capability` 填故障的能力（例如 `rgb_camera`），這隻之後不接需要它的任務（到 cbba_node 重開）；E_PRECONDITION 另外通知值班（`task_orphaned`） |
+| B5 | `task_orphaned` 的型別從 `Task` 改成 **`TaskOrphaned`**（task、reason、waited_sec、detail） | 你的 BT 沒訂這個話題，不影響；地面站、監控程式有訂的要改型別 |
+| B6 | 新話題 `/v60/detection`（`swarm_interfaces/Detection`：detector、source、t、label、score、bbox、track_id、position、attrs） | 現在不用做。之後狗的偵測（看到火、看到人）**不自己建任務**，發這個話題；cbba_node 送給閘道（閘道斷線時暫存、恢復後送出），由閘道決定要不要建任務 |
+| B7 | 能力過濾：任務帶 `platform`、`required_capabilities`，載具要平台符合、能力都有才出價 | 狗預設能力 `mobility_ground`、`rgb_camera`；V60 實際有的（雲台變焦 `zoom`、熱像 `thermal_camera`…）請告訴我，加進 `registry/fleet.yaml` |
+| B8 | 註冊表（`<repo>/registry/`：`tools.yaml`、`platforms.yaml`、`fleet.yaml`） | 選用：cbba_node 給 `registry_dir`（或環境變數 `CBBA_REGISTRY_DIR`）時從 `fleet.yaml` 讀平台與能力；沒給照參數。`swarm_cbba` 多了 yaml-cpp 的依賴（Jazzy 本來就有，不用另外裝） |
+| B9 | 搶占與接手照任務的優先級 P0～P3：接近目標（`commit_radius` 內）後不可被搶；持有者失聯 P0 10 s、P1 15 s、P2／P3 30 s 後別台接手 | 舊型任務結果和原本相同（火警 = P0 10 s、巡檢 = P3 30 s） |
+
+### C. 要和你對的
+
+| # | 項目 | 狀況 |
+|---|---|---|
+| C1 | **改版**：同一個 task_id、較大的 `revision`（例如目標移動），cbba_node 會重發 `current_task` | 你的 `onCurrentTask` 的 `if (t.task_id == cur) return;` 會當成重送、照舊版做完。選項：我出 patch（revision 變大時先取消再插入），或你的新版處理 |
+| C2 | 你 11/11 的新版（Switch9：Track、Wait、Speak…） | 還沒拿到；兩個 patch 可能要手動合。新的 case 請用通用名稱（`go_to`、`inspect`、`track`、`wait`、`speak`、`return_to_dock`、`alert_operator`），同時加進 `kValidActions` |
+| C3 | 失敗碼（REG-2，你定 Action 介面）→ `failure_code` | 你的 Action 有失敗碼後，`finish()` 一起填 B4 的欄位 |
+| C4 | 機號只寫一處 | 現在要手動對齊 A6 的三處；之後可以讓 launch 從 `fleet.yaml` 用 namespace 查機號再給 BT 和 cbba_node |
+| C5 | V60 的實際能力 | B7 |
+| C6 | 急停話題 | 狗是全域 `/emergency_stop`、無人機是 `/<ns>/emergency_stop`；2-1b 要「全體急停」＋單機，要統一 |
+
+### 驗收（換完之後）
+
+1. 第 2 節的確認指令（`ros2 interface show …`）全部對。
+2. 第 5 節你 README 的 T1、T2、T9 照跑。
+3. 第 0.2 節：用閘道下帶 steps 的任務，測你的 BT 照動作名稱分派。
+
+## 0.2 用 spec 測 BT 的動作名稱（2026-11-14）
+
+閘道建的任務把「要做什麼」寫在 `current_task.spec` 的 **steps**（2-1b 的通用動作，狗和無人機同一套名稱）。
+spec patch 讓你的 BT 把 steps 翻成外部點的 tasks，交給 `mission.xml` 的 Switch 照 `action` 分派。
+這一節不需要無人機、PX4、閘道以外的機器：**閘道＋你的狗（cbba_node＋BT）**就能測。
+
+### 現在能測、還沒定的
+
+| | 項目 |
+|---|---|
+| 能測 | steps 的解析與分派：`go_to`、`inspect` 已經接好；**你新加的動作**（`track`、`wait`、`speak`、`return_to_dock`、`alert_operator`…）只要 Switch 加 case、`kValidActions` 加名字就能用，解析的程式不用改；不支援的名稱回 `BAD_SPEC` |
+| 能測 | 完成、失敗的回報：做完回 `success`，閘道的 log 印「已確認完成」；失敗照 `reason`（之後可以填 `failure_code`，第 0.1 節 B4） |
+| 還沒定 | **每個動作的參數格式**（`wait` 是秒數還是條件、`track` 要哪些 params…）：要寫進註冊表的 `actions.yaml`，你定 Action 介面（REG-2）時一起定。下面例子的參數名稱只是暫定 |
+| 還沒定 | 同一個任務改版（revision 變大）時 BT 怎麼處理（第 0.1 節 C1） |
+
+### steps 的格式
+
+```json
+{"steps": [
+  {"action": "go_to",   "location": {"x": 10.0, "y": 5.0}},
+  {"action": "wait",    "params": {"duration": 5}},
+  {"action": "inspect", "location": {"x": 11.0, "y": 5.0, "z": 1.5}, "params": {"snapshots": 2, "timeout": 30}}
+]}
+```
+
+| step 的欄位 | 意思 | 翻成你的 Task |
+|---|---|---|
+| `action` | 動作名稱（通用名稱） | `action`（要在 `kValidActions`、Switch 有那個 case） |
+| `location` | 動作的位置（map ENU） | **第一步的 `go_to`**：站的位置（外部點的 x、y）；`inspect`：雲台的 `target.x／y／z`（沒給看任務位置、沒給 z 用 `target_z`）；其他動作：`params` 的 `location.x`、`location.y`、`location.z` |
+| `object` | 動作的對象（例如 `track` 的目標 id） | `params` 的 `object` |
+| `params` | 其他參數 | 攤平放進 `params`（字串）；`inspect` 沒寫 `snapshots` 時拍 1 張 |
+
+做完最後一步由 BT 自己補 `report_result`，steps 裡不用寫。spec 是空字串時照舊（舊型任務：固定做一次雲台）。
+
+### 加一個新動作（例如 `wait`）
+
+1. `bt/mission.xml` 的 Switch 加一個 case，名稱用通用名稱（`wait`），接你的葉節點。
+2. `kValidActions` 加 `"wait"`。
+3. 葉節點從 `params` 讀參數（例如 `duration`）。
+
+`parseSpecSteps` 不用改。名稱不在 `kValidActions` 時，整個任務回 `BAD_SPEC`（PERMANENT，CBBA 不再派給這隻）。
+
+### 啟動（4 個 terminal，都設同一個 `ROS_DOMAIN_ID`，都 source 好你的工作區）
+
+```bash
+# terminal 1：閘道（機號 200，不出價；提供 /gcs/inject_task）
+ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/gcs -r __node:=gcs_cbba_node \
+  --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_gateway.yaml
+
+# terminal 2：你的狗的 cbba_node（機號 50）
+ros2 launch swarm_cbba cbba.launch.py namespace:=v60
+
+# terminal 3：你的 BT（agent_id 50；用你平常的 launch，或下面這行）
+ros2 run task_manager task_manager_node --ros-args -r __ns:=/v60 -r __node:=v60_task_manager \
+  -p mission_file:=<沒有巡檢點的任務檔> -p bt_file:=$(ros2 pkg prefix task_manager)/share/task_manager/bt/mission.xml \
+  -p autostart:=true -p agent_id:=50 -p nav_action:=/v60/navigate_to_pose -p ptz_action:=/v60/ptz_inspect \
+  -p base_frame:=v60/base_link -p battery_topic:=/v60/battery
+
+# terminal 4（沒有 Nav2、雲台時才要）：假的身體（直線走、雲台等幾秒回 OK、發 TF），不用 Gazebo
+python3 <repo>/docker/scripts/fake_nav_body.py --ns v60 --start 0 0
+```
+
+- 沒有巡檢點的任務檔可以用 `<repo>/docker/dog/idle_mission.yaml`。
+- 你的 BT 要發 `robot_state`（mode = AUTO）cbba_node 才會出價；只想先看分派時，terminal 2 改用
+  `ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.yaml> -p participate:=always`（不看 robot_state）。
+
+### 測試項目（從第 5 個 terminal 下任務）
+
+下任務的指令（`STEPS` 換成下表每一項的 steps；`incident_id` 每次換一個，同一個會被當成重送）：
+
+```bash
+STEPS='{"steps":[{"action":"go_to","location":{"x":10,"y":5}},{"action":"inspect","location":{"x":11,"y":5,"z":1.5}}]}'
+ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask \
+  "{incident_id: 'bt-test-1', revision: 1, platform: 2, required_capabilities: [mobility_ground], priority: 1,
+    position: {x: 10.0, y: 5.0, z: 0.0}, value: 100.0, service_time_s: 10.0, spec: '$STEPS'}"
+```
+
+| # | steps | 預期 |
+|---|---|---|
+| S1 | `go_to` (10, 5) → `inspect` (11, 5, 1.5) | BT 走到 (10, 5)、雲台看 (11, 5, 1.5) 拍 1 張、回 `success`；閘道 log「任務 00C8.… 已確認完成」 |
+| S2 | `go_to` → `inspect`（`params: {"snapshots": 3}`）→ `inspect`（另一個 location） | 兩次雲台，第一次拍 3 張、第二次 1 張 |
+| S3 | `go_to` → `wait`（`params: {"duration": 5}`），**還沒加 `wait` 的 case 時** | BT 回 `BAD_SPEC: …`（PERMANENT），任務不執行；cbba_node log「這台不再接」 |
+| S4 | 同 S3，**加了 `wait` 的 case 之後** | 走到後停 5 s、回 `success` |
+| S5 | 你其他新動作（`track`、`speak`…），參數照你葉節點要的 | 走到對的葉節點；參數名稱和你的葉節點對不上時告訴我，一起寫進 `actions.yaml` |
+| S6 | `spec` 給空字串 | 照舊型流程（走到任務位置前、固定做一次雲台） |
+
+看的地方：你 BT 的 log（外部點的 tasks、Switch 走到哪個 case）、`ros2 topic echo /v60/current_task`（`spec` 欄位）、
+`ros2 topic echo /v60/task_result`、閘道 terminal 的「已確認完成」。
 
 ---
 
@@ -51,7 +169,7 @@ patch -p1 -d task_manager < <repo>/docker/dog/task_manager_spec.patch
 
 | 套件 | 是什麼 |
 |---|---|
-| `ros2_ws/src/swarm_interfaces` | 訊息 v1.6＝你的 v1.2（RobotState 的 `mode`、TaskResult 的 `reason`）＋ `ManualOverride.srv`＋`FireDetection`（無人機用，你用不到） |
+| `ros2_ws/src/swarm_interfaces` | 訊息 v2.0＝你的 v1.2（RobotState 的 `mode`、TaskResult 的 `reason`）＋ `ManualOverride.srv`＋`FireDetection`（無人機用）＋ 2-1b 的欄位與 `TaskOrphaned`、`Detection`、`InjectTask.srv`（第 0.1 節） |
 | `ros2_ws/src/cbba_core` | CBBA 核心、機間協定版本 4、指派流程、閘道（不依賴 ROS） |
 | `ros2_ws/src/swarm_cbba` | 統一版 `cbba_node`、`launch/cbba.launch.py`、`config/cbba_v60.yaml`、`config/cbba_uav.yaml` |
 
@@ -81,6 +199,9 @@ ros2 interface show swarm_interfaces/msg/TaskResult | grep reason        # 有 N
 ros2 interface show swarm_interfaces/srv/ManualOverride                  # Task task、bool clear / bool accepted、string message
 ros2 interface show swarm_interfaces/msg/Task | grep assignment_version  # 應該沒有輸出
 ros2 interface show swarm_interfaces/msg/Task | grep -E "uint64 task_id|revision|spec"   # 版本 4：三行都要有
+ros2 interface show swarm_interfaces/msg/Task | grep -E "required_capabilities|expires"  # 介面 v2.0：兩行都要有
+ros2 interface show swarm_interfaces/msg/TaskResult | grep failure_code                 # 介面 v2.0
+ros2 interface show swarm_interfaces/msg/Detection | head -3                            # 2026-11-14 新增
 ```
 
 `ManualOverride.srv` 是照介面規格圖（`cbba_core/doc/spec/ugv_interface.png`）放的，欄位和你 `task_manager_node.cpp` 的用法一致；

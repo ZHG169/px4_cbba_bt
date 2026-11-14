@@ -15,6 +15,7 @@ docker/                     模擬環境（sim、uavN、gcs 容器；mesh_net �
                             gz/：Gazebo 場景 fire_site.sdf（火警 tag 101、誘餌 tag 7、巡檢點）、patrol_site.sdf（3 綠＋5 紅，
                             由 gen_patrol_site.py 從 patrol_site_points.csv 產生）、demo_site.sdf、yard.sdf（伯宇的變電所，
                             yard_env.sdf.inc＋yard_points.csv 產生，2026-10-24）與 tag 0～7、101、mono_cam 模型
+registry/                   2-1b 註冊表（schema 1.0）：tools.yaml（能力＋bit）、platforms.yaml、fleet.yaml；cbba_node 的 registry_dir
 ros2_ws/src/
 ├── swarm_interfaces/       ROS 訊息 v1.6（＝機器狗端的 v1.2＋FireDetection；Task、RobotState、TaskResult、ManualOverride.srv…）
 ├── cbba_core/              CBBA 核心、機間封包、協定層、指派流程、離線模擬、測試（不依賴 ROS）；
@@ -309,6 +310,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | BT 接口（狗） | 外部 task manager 用 2-1b 的**通用 steps**（`step.action`，狗和無人機同一套名稱，11/13 使用者定）寫突發任務 → `current_task.spec`；狗 BT 的 `parseSpecSteps` 翻成外部點的 tasks（第一步 go_to 是站的位置、inspect 的 location → 雲台 target、沒寫 snapshots 拍 1 張），交給 SplitTask＋Switch；spec 空的照舊、不支援的回 `BAD_SPEC`（PERMANENT）。**`ptz_inspect` 改名 `inspect`**（雲台的 ROS action `/ptz_inspect` 不變）；itest 的狗巡邏任務檔跟著改 | `docker/dog/task_manager_spec.patch`（mission_loader、external_task、node、test_tree、任務檔、說明） | ✅ 11/13 端到端（閘道 → CBBA → 狗 BT：go_to 當站的位置、兩次 inspect、舊名 ptz_inspect 回 BAD_SPEC）；無人機（uav_adapter，air_recon → inspect）之後照做 |
 | 4f 異質成本（第一批） | 公式不變，只加可行性：硬期限（`deadline_hard` 來不及 → 不可行，插入不能擠到期限之後；執行中的 `exempt` 不檢查）、release（到達 = max(到達, release)；`AssignmentManager::dispatchTime` 等到 release − 前往時間才發 current_task）、任務的 `min_battery_reserve`（存量取較大的）、`cbba_uav.yaml` 的 `max_bundle: 2`（comm／loss 沒讀，仍 5）。第二批（無人機續航比例、平台參數讀註冊表）放 M1 | `scoring`、`cbba_agent`、`assignment_manager`、`cbba_uav.yaml`、`test_scoring`（+4）、`test_agent`（+1）、`test_gateway`（+1 Release） | ✅ 11/14 單元＋手動（閘道＋狗：硬期限來不及不出價、release 前不發，注入後約 15 s 才發） |
 | 介面 v2.0 | `Task` 加 priority、platform、required_capabilities、group_id、role_index／count、optional、floor、deadline_hard、release、expires（舊型填對應值）；`TaskResult` 加 failure_code（`failure_codes.hpp`：有認得的碼 → reason 照合約的表，BT 的 reason 不看；空的照舊）、failed_capability（E_HW → `failed_caps`，到重開）、findings_uri（只記 log）；`task_orphaned` 改型別 `TaskOrphaned`（原因 NO_WINNER、NO_CAPABLE〔`orphan_no_capable_sec` 3 s〕、EXPIRED、PRECONDITION、OPTIONAL_*）；swarm_interfaces 2.0.0 | `swarm_interfaces`、`failure_codes.hpp/.cpp`、`capabilities`（`capabilityNames`）、`cbba_node.cpp`、`test_failure_codes`（4 項）、`swarm_cbba/test/v2_iface.sh`（V1～V6：閘道＋狗，假 BT） | ✅ 11/14 單元＋`v2_iface.sh`＋`g2_e2e.sh`（EXPIRED 改在收到 reason 3 的 TASK_CLOSE 時發；沒有能做的載具時不重複報 NO_WINNER） |
+| 註冊表 | `<repo>/registry/` 的 `tools.yaml`（13 個能力＋bit）、`platforms.yaml`（uav 1、quadruped 2＋成本模型，M0 只檢查）、`fleet.yaml`（uav1～3、狗 50～52、閘道 200），schema 1.0（`registry/README.md`）；`swarm_cbba/registry.hpp`（yaml-cpp）載入＋檢查（bit 和 `capabilities.hpp` 一致等）；cbba_node 參數 `registry_dir`（或 `CBBA_REGISTRY_DIR`）：平台、能力、閘道機號從註冊表，有錯拒絕啟動 | `registry/`、`swarm_cbba/registry.hpp/.cpp`、`cbba_node.cpp`、`test_registry`（5） | ✅ 11/14 單元＋節點載入 R1～R7＋回歸 |
 | 5 DETECTION | 機器人的偵測（`detection` 話題，2-1b 第七節的欄位＋位置、attrs）→ DETECTION 封包（種類 10，轉送）→ 閘道確認（DETECTION_ACK，種類 11）、發 `detections`；沒確認每 1 s 重送；閘道斷線（`gateway_timeout` 3 s）時暫存（64 筆、同 track／2 m 內合併、限速 5 則/s），恢復後依序送出、標「暫存過」；閘道在線也看多跳（`gateways` [200]）。無人機 BT 的火警照舊 `new_task`（M3 前） | `detection.hpp/.cpp`、`wire_detection`、`cbba_comm`、`cbba_node.cpp`、`Detection.msg`、`test_wire_detection`（5）、`test_detection`（11）、`swarm_cbba/test/det_iface.sh` | ✅ 11/14 單元＋`det_iface.sh`（D1～D4）＋回歸（`v2_iface.sh`、`g2_e2e.sh`） |
 
 第 4 步的手動測試都用「閘道＋狗的 cbba_node」（`participate:=always`、domain 77、獨立的 `CBBA_LOCK_DIR`），需要時加狗的 BT
@@ -319,10 +321,13 @@ CBBA 的 UDP 不受 `ROS_DOMAIN_ID` 隔離：只重開一個節點時，任務�
 **M0（11/20）還剩下的（依順序）**：
 1. ~~介面 v2.0~~（11/14 寫好，見上表；`teammates` 是 CB-4）。改訊息 → 全隊（含狗的 BT）重編，BT 不讀新欄位就不用改程式
 2. ~~5 DETECTION~~（11/14 寫好，見上表；欄位照 2-1b 第七節＋位置、attrs，EVT-1 只加欄位）
-3. **註冊表**：`tools.yaml`、`platforms.yaml`、`fleet.yaml`（能力位元位置要和 `capabilities.hpp` 一致）
-4. **給伯宇的介面變更清單**（`README_v60.md` 第 0.1 節已有大部分：uint64、`revision`／`spec`、兩個 patch、`inspect` 改名、
-   WAITING_SPEC 期間收不到 current_task、8 個失敗碼）
-5. **全隊重編、itest 重跑**：comm、loss（`max_bundle` 仍 5）、uav／demo（`cbba_uav.yaml` 的 `max_bundle: 2` 還沒驗）
+3. ~~註冊表~~（11/14 寫好，見上表；`registry_dir` 預設不用，要在 `cbba_uav.sh`、itest 打開再定）
+4. ~~給伯宇的介面變更清單~~（11/14：`README_v60.md` 第 0.1 節改成 A 必做 6 項、B 要知道 9 項、C 要對的 6 項＋驗收步驟）
+5. ~~全隊重編、itest 重跑~~（11/14 全過）：`20261114_173818_comm`（`--dogs 3`，C0～C9 PASS；待命 10.5 kB/s，和 11/12 版本 4 相同，11/09 版本 3 是 8.5）、
+   `20261114_174034_loss`（`--dogs 3 --levels 30,70`：30% 5 s 收斂 100%、0.75／1.10 s；70% 100%、2.46／3.06 s〔第 5 週 90%、2.31／4.27 s〕；重複認領 0）、
+   `20261114_175714_uav`（U1～U6 PASS，`max_bundle: 2` 第一次在 SITL：U5 uav2 拿 2 個）、
+   `20261114_180303_demo`（yard `assign_random --seed 7 --dog bt`：全部 PASS，狗 BT 套兩個 patch，F_M1、F_T2 由狗 50、51 處理；CBF 最近 1.83 m）。
+   **M0 的 CBBA 部分完成**；還沒 commit：註冊表、給伯宇的清單、這段紀錄
 
 M1 以後：4f 第二批（無人機耗電改續航比例、平台參數讀註冊表）、uav_adapter（無人機的 action 也用通用名稱：`air_recon` → `inspect`）、
 CB-4 協同（precedence、sync_window、all_or_nothing、teammates）。

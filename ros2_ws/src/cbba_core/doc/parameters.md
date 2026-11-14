@@ -30,6 +30,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
+| `registry_dir` | 空（或環境變數 `CBBA_REGISTRY_DIR`） | 2-1b 註冊表的目錄（`<repo>/registry`，2026-11-14）：從 `fleet.yaml` 讀自己的平台與能力（取代 `capabilities`）、閘道的機號（取代 `gateways`）；`tools.yaml` 的位元位置要和程式一致，註冊表有錯就拒絕啟動。空 = 照參數 |
 | `gateways` | [200] | 閘道的機號：多跳時判斷閘道在不在線（某個聽得到的鄰居聽得到它）；直接聽得到的閘道不用列也認得（2026-11-14） |
 | `gateway_timeout` | 3 s | 這麼久沒聽到閘道（AGENT_STATE、多跳、確認）= 斷線：新的偵測只暫存，恢復後送出 |
 | `detection_buffer` | 64 | 還沒確認的偵測上限；滿了丟最舊的 |
@@ -92,6 +93,7 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 | `max_failures` | 0（不啟用） | 同一個任務 TRANSIENT 失敗到這個次數，這台永久不再出價。不啟用時只靠成功率打折：失敗 f 次，出價用成功率 1/(1+f)（期望價值、期望到達時間，`cbba_core/doc/formula/formula_design.md` 第 5 行）（2026-10-17） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
+| `registry_dir` | 空（或環境變數 `CBBA_REGISTRY_DIR`） | 2-1b 註冊表的目錄（`<repo>/registry`，2026-11-14）：從 `fleet.yaml` 讀自己的平台與能力（取代 `capabilities`）、閘道的機號（取代 `gateways`）；`tools.yaml` 的位元位置要和程式一致，註冊表有錯就拒絕啟動。空 = 照參數 |
 | `gateways` | [200] | 閘道的機號：多跳時判斷閘道在不在線（某個聽得到的鄰居聽得到它）；直接聽得到的閘道不用列也認得（2026-11-14） |
 | `gateway_timeout` | 3 s | 這麼久沒聽到閘道（AGENT_STATE、多跳、確認）= 斷線：新的偵測只暫存，恢復後送出 |
 | `detection_buffer` | 64 | 還沒確認的偵測上限；滿了丟最舊的 |

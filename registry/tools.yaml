@@ -1,0 +1,21 @@
+# 能力標籤（2-1b 註冊表 REG-1，schema 1.0，2026-11-14）
+#
+# 唯一來源：任務的 required_capabilities、載具的能力（fleet.yaml）、規劃器與檢查器的詞彙都用這裡的 name。
+# bit 是 CBBA 封包裡能力遮罩（uint64）的位元位置，**只增不改**：新增標籤用新的 bit，刪掉的標籤 bit 保留不重用
+#（標成 deprecated: true，不要刪掉這一筆）。cbba_core/capabilities.hpp 要和這裡一致（swarm_cbba 的 test_registry 檢查；
+# cbba_node 載入註冊表時也檢查，不一致就拒絕啟動）。
+schema_version: "1.0"
+capabilities:
+  - {name: mobility_ground, bit: 0, description: 地面移動}
+  - {name: mobility_air, bit: 1, description: 空中移動}
+  - {name: indoor_flight, bit: 2, description: 室內飛行（無 GPS）}
+  - {name: stairs, bit: 3, description: 上下樓梯}
+  - {name: rgb_camera, bit: 4, description: 可見光相機}
+  - {name: zoom, bit: 5, description: 光學變焦（雲台）}
+  - {name: thermal_camera, bit: 6, description: 熱像儀}
+  - {name: speaker, bit: 7, description: 喇叭（廣播、警告）}
+  - {name: spotlight, bit: 8, description: 探照燈}
+  - {name: gas_sensor, bit: 9, description: 氣體偵測}
+  - {name: manipulator, bit: 10, description: 機械臂}
+  - {name: gripper, bit: 11, description: 夾爪}
+  - {name: comm_relay, bit: 12, description: 通訊中繼}
