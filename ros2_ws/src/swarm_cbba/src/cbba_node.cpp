@@ -23,6 +23,10 @@
 //                                                            開著但 orphan_warn_sec 內沒有人得標（NO_WINNER）、全隊沒有能做的
 //                                                            載具（NO_CAPABLE）、過期（EXPIRED）、執行端回報 E_PRECONDITION、
 //                                                            optional 角色略過（O1～O3，閘道）。只通知（給地面站），不處理
+//   偵測（2-1b M0 第 5 步，2026-11-14；機器人不自己建任務，偵測交給閘道的事件流程）：
+//               detection    (swarm_interfaces/Detection)    偵測器 → CBBA：送給閘道（DETECTION 封包，等確認、沒確認就重送）；
+//                                                            閘道斷線（gateway_timeout 3 s 沒聽到）時暫存，恢復後由舊到新送出
+//               detections   (swarm_interfaces/Detection)    閘道才發：收到的新偵測（含閘道本機 detection 話題的），每筆一次
 // 介面 v2.0（2026-11-14，2-1b M0 合約第四節）：Task 加 priority、platform、required_capabilities、group／role、floor、
 // deadline_hard、release／expires（舊型任務填對應後的值）；TaskResult 加 failure_code（8 個 E_* → reason，
 // cbba_core/failure_codes.hpp）、failed_capability（E_HW：這台拿掉這個能力，到重開為止）、findings_uri（只記 log）
@@ -83,6 +87,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/u_int16.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
+#include <swarm_interfaces/msg/detection.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_assignments.hpp>
@@ -106,6 +111,7 @@ using RobotStateMsg = swarm_interfaces::msg::RobotState;
 using TaskMsg = swarm_interfaces::msg::Task;
 using TaskResultMsg = swarm_interfaces::msg::TaskResult;
 using TaskOrphanedMsg = swarm_interfaces::msg::TaskOrphaned;
+using DetectionMsg = swarm_interfaces::msg::Detection;
 using AssignmentsMsg = swarm_interfaces::msg::TaskAssignments;
 using InjectTaskSrv = swarm_interfaces::srv::InjectTask;
 
@@ -372,6 +378,20 @@ public:
     }
     comm.epoch = epoch_;
     comm.gateway = gateway;   // 非競標的協定節點：AGENT_STATE 平台 0、能力 0，不列入能力統計
+    // 偵測送閘道（2-1b M0 第 5 步，2026-11-14）：閘道的機號（多跳時判斷閘道在不在線；直接聽得到的閘道不用列也認得）、
+    // 多久沒聽到閘道算斷線（斷線時偵測只暫存）、暫存上限、合併半徑、沒確認的重送間隔、每秒最多送幾則
+    for (const auto id : declare_parameter<std::vector<std::int64_t>>("gateways", std::vector<std::int64_t>{200})) {
+      if (id < 1 || id > 65534) {
+        throw std::invalid_argument("gateways must be agent ids 1~65534");
+      }
+      comm.gateways.push_back(static_cast<AgentId>(id));
+    }
+    comm.gateway_timeout = declare_parameter<double>("gateway_timeout", comm.gateway_timeout);
+    comm.detection.capacity = static_cast<std::size_t>(
+      declare_parameter<int>("detection_buffer", static_cast<int>(comm.detection.capacity)));
+    comm.detection.merge_radius = declare_parameter<double>("detection_merge_radius", comm.detection.merge_radius);
+    comm.detection.retry = declare_parameter<double>("detection_retry", comm.detection.retry);
+    comm.detection.rate = declare_parameter<double>("detection_rate", comm.detection.rate);
 
     UdpConfig udp;
     udp.group = declare_parameter<std::string>("udp_group", udp.group);
@@ -460,6 +480,13 @@ public:
     cancel_sub_ = create_subscription<TaskMsg>(
       topic("cancel_task"), rclcpp::QoS(20).reliable(),
       [this](TaskMsg::ConstSharedPtr msg) {onCancelTask(*msg);});
+    // 偵測（2026-11-14）：偵測器一次可能來很多，佇列深一點；閘道也收（本機的固定攝影機等）
+    detection_sub_ = create_subscription<DetectionMsg>(
+      topic("detection"), rclcpp::QoS(100).reliable(),
+      [this](DetectionMsg::ConstSharedPtr msg) {onDetection(*msg);});
+    if (gateway) {
+      detections_pub_ = create_publisher<DetectionMsg>(topic("detections"), rclcpp::QoS(100).reliable());
+    }
 
     timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms), [this]() {step();});
 
@@ -854,9 +881,93 @@ private:
     publishAssignments(now);
     dropOptionals(now);
     checkSpecWait(now);
+    handleDetections(now);
     report(now);
     logStats(now);
     publishTx(now);
+  }
+
+  // ===========================================================================
+  // 偵測（2-1b M0 第 5 步，2026-11-14）
+  // ===========================================================================
+  void onDetection(const DetectionMsg & msg)
+  {
+    const double now = wallNow();
+    Detection d;
+    d.detector = msg.detector;
+    d.source = msg.source;
+    d.label = msg.label;
+    d.t = fromRosTime(msg.t);
+    if (!(d.t > 0.0)) {
+      d.t = now;   // 偵測器沒填時刻：用收到的時刻
+    }
+    d.score = msg.score;
+    d.bbox = {msg.bbox[0], msg.bbox[1], msg.bbox[2], msg.bbox[3]};
+    d.track_id = msg.track_id;
+    d.position_valid = msg.position_valid;
+    d.position = {msg.position.x, msg.position.y, msg.position.z};
+    d.floor = msg.floor;
+    d.attrs = msg.attrs;
+    if (!comm_->addDetection(d, now)) {
+      RCLCPP_WARN(get_logger(), "偵測 %s/%s 拒收：detector、source、label 要 ≤ 64 B，attrs ≤ 900 B",
+        msg.detector.c_str(), msg.label.c_str());
+      return;
+    }
+    if (!gateway_ && !comm_->gatewayOnline(now)) {
+      RCLCPP_INFO(get_logger(), "偵測 %s/%s（%.1f, %.1f）：閘道斷線，暫存（%zu 筆，其中斷線期間 %zu 筆）",
+        msg.detector.c_str(), msg.label.c_str(), d.position.x, d.position.y,
+        comm_->detectionsPending(), comm_->detectionsBuffered());
+    }
+  }
+
+  // 機器人：閘道斷線、恢復時印一行；閘道：收到的新偵測發 detections
+  void handleDetections(double now)
+  {
+    if (gateway_) {
+      for (const ReceivedDetection & r : comm_->takeDetections()) {
+        DetectionMsg m;
+        const Detection & d = r.detection;
+        m.t = toRosTime(d.t);
+        m.detector = d.detector;
+        m.source = d.source;
+        m.label = d.label;
+        m.score = static_cast<float>(d.score);
+        m.bbox = {d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]};
+        m.track_id = d.track_id;
+        m.position_valid = d.position_valid;
+        m.position.x = d.position.x;
+        m.position.y = d.position.y;
+        m.position.z = d.position.z;
+        m.floor = d.floor;
+        m.attrs = d.attrs;
+        m.agent_id = r.agent;
+        m.detection_seq = r.seq;
+        m.buffered = r.buffered;
+        m.received = toRosTime(r.received_at);
+        detections_pub_->publish(m);
+        RCLCPP_INFO(get_logger(), "偵測 agent %u #%u：%s/%s score %.2f（%.1f, %.1f, %.1f）%s，偵測後 %.2f s 收到",
+          r.agent, r.seq, d.detector.c_str(), d.label.c_str(), d.score, d.position.x, d.position.y, d.position.z,
+          r.buffered ? "，斷線期間暫存的" : "", r.received_at - d.t);
+      }
+      return;
+    }
+    const bool online = comm_->gatewayOnline(now);
+    if (online != gateway_online_) {
+      gateway_online_ = online;
+      if (online) {
+        RCLCPP_INFO(get_logger(), "閘道在線%s", comm_->detectionsPending() > 0 ?
+          ("：送出暫存的 " + std::to_string(comm_->detectionsPending()) + " 筆偵測").c_str() : "");
+      } else {
+        RCLCPP_WARN(get_logger(), "閘道斷線（%.1f s 沒聽到）：新的偵測暫存，恢復後送出；已知的任務照常",
+          comm_->config().gateway_timeout);
+      }
+    }
+    const int evicted = comm_->stats().detections_evicted;
+    if (evicted != last_evicted_) {
+      RCLCPP_WARN(get_logger(), "偵測暫存滿了（detection_buffer %zu）：丟掉最舊的 %d 筆",
+        comm_->config().detection.capacity, evicted - last_evicted_);
+      last_evicted_ = evicted;
+    }
   }
 
   // 閘道注入（InjectTask.srv → cbba_core::Gateway）
@@ -1310,6 +1421,10 @@ private:
   rclcpp::Subscription<RobotStateMsg>::SharedPtr state_sub_;
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;
+  rclcpp::Subscription<DetectionMsg>::SharedPtr detection_sub_;
+  rclcpp::Publisher<DetectionMsg>::SharedPtr detections_pub_;   // 閘道才有
+  bool gateway_online_{false};   // 機器人：上次印的閘道狀態（啟動時算斷線，聽到閘道時印「在線」）
+  int last_evicted_{0};
   rclcpp::Subscription<TaskMsg>::SharedPtr cancel_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

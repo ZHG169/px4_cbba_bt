@@ -9,6 +9,7 @@
 > - `task_orphaned` 的型別改成新的 `TaskOrphaned`（`task`＋`reason`：NO_WINNER、NO_CAPABLE、EXPIRED、PRECONDITION、
 >   OPTIONAL_NO_CAPABLE／UNASSIGNED／GROUP_DONE＋`waited_sec`＋`detail`）。
 > - 閘道用：`InjectTask.srv`、`TaskAssignments`／`TaskAssignment`（2026-11-12）。
+> - `Detection`（2026-11-14，2-1b 第七節）：機器人的偵測（`/<ns>/detection` → cbba_node → 閘道的 `/<ns>/detections`）。
 >
 > 以下第 1～7 節是 v1.6 的內容（欄位定義以 `msg/*.msg` 的註解為準）。
 
@@ -143,5 +144,5 @@ deadline_sec = 120   value = 100   duration_sec = 20   status = OPEN
 | v1.3 | 2026-10-09 | `Task`、`TaskResult` 加 `assignment_version`（正式指派的版本，BT 回報時帶回）；新增 `/<ns>/cancel_task` |
 | v1.4 | 2026-10-09 | `assignment_version` 改 uint64；新增 `ExecState`、`AssignmentRequest`、`AssignmentResponse`（BT 接受、搶占、排隊） |
 | v1.5 | 2026-10-09 | 新增 `FireDetection`（無人機機內） |
-| v2.0 | 2026-11-11～14 | 2-1b M0：task_id uint64；`Task` 加 `revision`、`spec` 與 A 層欄位（priority、platform、required_capabilities、group／role、floor、deadline_hard、release、expires）；`TaskResult` 加 `failure_code`、`failed_capability`、`findings_uri`；新增 `TaskOrphaned`、`TaskAssignment(s)`、`InjectTask.srv`。只加欄位，BT 重新編譯就能跑 |
+| v2.0 | 2026-11-11～14 | 2-1b M0：task_id uint64；`Task` 加 `revision`、`spec` 與 A 層欄位（priority、platform、required_capabilities、group／role、floor、deadline_hard、release、expires）；`TaskResult` 加 `failure_code`、`failed_capability`、`findings_uri`；新增 `TaskOrphaned`、`TaskAssignment(s)`、`InjectTask.srv`、`Detection`。只加欄位，BT 重新編譯就能跑 |
 | v1.6 | 2026-10-12 | **改成機器狗端（伯宇）的 v1.2**：`RobotState` 用 `mode`（拿掉飛行狀態欄位）、`TaskResult` 用 `reason`（拿掉 `assignment_version`）、`Task` 拿掉 `assignment_version`；刪 `ExecState`、`AssignmentRequest`、`AssignmentResponse`；新增 `ManualOverride.srv`（照狗端介面規格圖）；保留 `FireDetection` |

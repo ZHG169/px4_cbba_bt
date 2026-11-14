@@ -73,9 +73,11 @@
 #include <vector>
 
 #include "cbba_core/cbba_agent.hpp"
+#include "cbba_core/detection.hpp"
 #include "cbba_core/wire_agent_state.hpp"
 #include "cbba_core/wire_cbba_state.hpp"
 #include "cbba_core/wire_completion.hpp"
+#include "cbba_core/wire_detection.hpp"
 #include "cbba_core/wire_header.hpp"
 #include "cbba_core/wire_sync.hpp"
 #include "cbba_core/wire_task_announce.hpp"
@@ -127,6 +129,12 @@ struct CommConfig
   // 不列入任務可行性與 optional 角色的能力統計。永遠不出價（setParticipating(true) 不理會），AGENT_STATE 的
   // vehicle_type = 0、capabilities = 0。轉送、補發、完成確認、TASK_CLOSE 照常
   bool gateway{false};
+  // 偵測送閘道（2-1b M0 第 5 步，2026-11-14）：機器人的偵測暫存在 DetectionOutbox，閘道在線時送出、等確認。
+  // 閘道在線 = gateway_timeout 內聽過閘道的 AGENT_STATE（直接鄰居），或某個還聽得到的鄰居的鄰居清單裡有 gateways 裡的機號
+  //（多跳；AGENT_STATE 不轉送），或 gateway_timeout 內收過閘道的確認
+  double gateway_timeout{3.0};
+  std::vector<AgentId> gateways;  // 閘道的機號（多跳時判斷在線用）；直接鄰居的閘道不用列也認得
+  DetectionOutboxConfig detection{};
 };
 
 // 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
@@ -294,6 +302,15 @@ struct CommStats
   // optional 角色（2026-11-13）
   int optional_drops{0};        // 送出的略過（TASK_CLOSE reason 4，閘道）
   int optional_local_drops{0};  // O3 本機判定：同組必要角色都結束了，自己不再對 optional 角色出價（不關任務）
+  // 偵測（2026-11-14）
+  int detections_added{0};      // 機器人：本機產生的偵測
+  int detections_merged{0};     // 其中取代了佇列裡同一個目標的舊偵測
+  int detections_evicted{0};    // 佇列滿了丟掉的（最舊的）
+  int detections_sent{0};       // 第一次送出
+  int detection_retries{0};     // 重送（沒確認）
+  int detections_acked{0};      // 閘道確認了
+  int detections_received{0};   // 閘道：收到的新偵測（不含重複；含閘道本機的）
+  int detection_duplicates{0};  // 閘道：重複收到（機器人沒收到確認而重送）
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -423,6 +440,16 @@ public:
   std::map<DigestKey, wire::DigestEntry> digestMap() const;
   std::size_t repairQueued() const {return repair_open_.size() + repair_spec_.size() + repair_closed_.size();}
 
+  // ---------- 偵測（2-1b M0 第 5 步，2026-11-14） ----------
+  // 本機的偵測。機器人：放進佇列，閘道在線時送出、等確認（斷線時暫存）；閘道：直接放進 takeDetections()。
+  // 字串太長（validDetection）回傳 false
+  bool addDetection(const Detection & d, double now);
+  bool gatewayOnline(double now) const;
+  std::size_t detectionsPending() const {return outbox_det_.size();}
+  std::size_t detectionsBuffered() const {return outbox_det_.bufferedCount();}
+  // 閘道：收到的新偵測（取走）
+  std::vector<ReceivedDetection> takeDetections();
+
 private:
   struct PendingTask
   {
@@ -531,6 +558,11 @@ private:
   bool closeAllowed(const wire::TaskCloseBody & close) const;
   bool canCancel(AgentId actor, TaskId id) const;
 
+  // 偵測
+  void sendDetections(double now);
+  void onDetection(const Bytes & bytes, double now);
+  void onDetectionAck(const Bytes & bytes, double now);
+
   // 狀態
   std::set<AgentId> aliveSet(double now) const;   // 自己 + 直接鄰居 + 鄰居的鄰居
   std::map<TaskId, AgentId> winnerMap() const;    // 進行中的任務 → 得標者
@@ -609,6 +641,14 @@ private:
   int stable_steps_{0};
 
   CommStats stats_;
+
+  // 偵測（2026-11-14）
+  DetectionOutbox outbox_det_;
+  DetectionInbox inbox_det_;
+  std::vector<ReceivedDetection> received_det_;
+  std::map<std::pair<AgentId, std::uint64_t>, std::vector<std::uint32_t>> acks_due_;   // 閘道：(機器人, session) → 要確認的
+  double last_det_ack_{-1e9};   // 上次收到閘道的確認
+  std::uint32_t local_det_seq_{0};   // 閘道本機的偵測流水號
 };
 
 }  // namespace cbba_core

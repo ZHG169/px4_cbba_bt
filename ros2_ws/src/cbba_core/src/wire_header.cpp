@@ -11,7 +11,7 @@ namespace cbba_core::wire
 
 namespace
 {
-constexpr std::uint8_t kMaxType = static_cast<std::uint8_t>(PacketType::TASK_SPEC);
+constexpr std::uint8_t kMaxType = static_cast<std::uint8_t>(PacketType::DETECTION_ACK);
 constexpr std::size_t kLengthOffset = 18;   // payload_length 在表頭裡的位置
 }  // namespace
 
@@ -65,6 +65,8 @@ bool isRelayed(PacketType type)
     case PacketType::COMPLETION_ACK:
     case PacketType::TASK_CLOSE:
     case PacketType::TASK_SPEC:
+    case PacketType::DETECTION:
+    case PacketType::DETECTION_ACK:
       return true;
     default:
       return false;
@@ -108,6 +110,8 @@ const char * toString(PacketType type)
     case PacketType::GAP_REQUEST: return "GAP_REQUEST";
     case PacketType::SYNC_BATCH: return "SYNC_BATCH";
     case PacketType::TASK_SPEC: return "TASK_SPEC";
+    case PacketType::DETECTION: return "DETECTION";
+    case PacketType::DETECTION_ACK: return "DETECTION_ACK";
   }
   return "?";
 }

@@ -11,6 +11,7 @@ endif()
 add_library(${PROJECT_NAME}_core
   src/capabilities.cpp
   src/failure_codes.cpp
+  src/detection.cpp
   src/energy_model.cpp
   src/scoring.cpp
   src/cbba_agent.cpp
@@ -21,6 +22,7 @@ add_library(${PROJECT_NAME}_core
   src/wire_completion.cpp
   src/wire_sync.cpp
   src/wire_task_spec.cpp
+  src/wire_detection.cpp
   src/cbba_comm.cpp
   src/assignment_manager.cpp
   src/gateway.cpp
@@ -53,10 +55,12 @@ set(CBBA_CORE_TESTS
   test_wire_completion
   test_wire_sync
   test_wire_task_spec
+  test_wire_detection
   test_comm
   test_exec_constraints
   test_assignment
   test_gateway
+  test_detection
   test_mission_sim
 )
 

@@ -31,6 +31,8 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `task_result` | BT → CBBA | `swarm_interfaces/TaskResult` | reliable | 任務結束時一次：`success`、`detail`（給人看）、`reason` |
 | `new_task` | BT → CBBA | `swarm_interfaces/Task` | reliable | 本機發現的任務（無人機：火點）；`task_id` = 機號 × 65536 + 流水號 |
 | `cancel_task` | → CBBA | `swarm_interfaces/Task` | reliable | 取消任務（只看 task_id）：要是建立者或 `cancel_authorities`。機器狗端沒用到 |
+| `detection` | 偵測器 → CBBA | `swarm_interfaces/Detection` | reliable、depth 100 | 偵測（2026-11-14，2-1b M0 第 5 步）：送給閘道（DETECTION 封包，等確認、沒確認每 `detection_retry` 重送）；閘道斷線（`gateway_timeout` 3 s 沒聽到）時暫存（`detection_buffer` 64 筆，同一個 track／2 m 內合併），恢復後由舊到新送出。機器人不自己建任務：由閘道的事件流程決定。舊的 `new_task`（火警）保留到 M3 |
+| `detections` | CBBA → 事件流程 | `swarm_interfaces/Detection` | reliable、depth 100 | **閘道才發**：收到的新偵測（含閘道本機 `detection` 的），每筆一次；`agent_id`、`detection_seq`、`buffered`（斷線期間暫存的）、`received` 由閘道填 |
 
 規則：
 
@@ -65,6 +67,12 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `max_failures` | 0 | 同一任務 TRANSIENT 失敗幾次後永久不出價；0 = 不啟用（只打折） |
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
+| `gateways` | [200] | 閘道的機號：多跳時判斷閘道在不在線（某個聽得到的鄰居聽得到它）；直接聽得到的閘道不用列也認得（2026-11-14） |
+| `gateway_timeout` | 3 s | 這麼久沒聽到閘道（AGENT_STATE、多跳、確認）= 斷線：新的偵測只暫存，恢復後送出 |
+| `detection_buffer` | 64 | 還沒確認的偵測上限；滿了丟最舊的 |
+| `detection_merge_radius` | 2 m | 同一個偵測器、類別：track_id 相同，或都沒有 track_id 而且相距這麼近 → 新的取代佇列裡的舊的（0 = 不用位置合併） |
+| `detection_retry` | 1 s | 送出後這麼久沒確認就重送 |
+| `detection_rate` | 5 則/s | 偵測（含重送）每秒最多送幾則（突發 10 則） |
 | `publish_announced` | UAV：true；UGV：false | 要不要發 `task_announced`（2026-11-09）。預設只有無人機發（火點去重複），狗照舊沒有這個話題；整合測試 `itest comm／loss --dogs` 給狗 true，才量得到狗的送達。真的狗不用設 |
 | `repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period`、`resend_gap` | 8000 B/s、10 s、0.5 s、1 s、1 s | 補發（機間協定版本 3，2026-10-28，`cbba_core/doc/protocol_v3_sync.md`）：壓縮摘要 → 缺口請求 → 限速的分批回覆。全隊要一起升到版本 3（和版本 2 互相拒收）；BT、話題不受影響 |
 | `completion_retry`、`completion_max` | 1 s、10 次 | 完成確認沒收齊時的重送間隔、次數（2026-11-04 開成參數；全隊應該一樣） |

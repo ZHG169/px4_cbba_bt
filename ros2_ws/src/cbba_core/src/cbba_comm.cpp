@@ -88,7 +88,8 @@ double fromStampMs(std::uint32_t ms, double now)
 CbbaComm::CbbaComm(
   const AgentState & state, const ScoringParams & params, const CommConfig & config,
   std::uint64_t session_id)
-: agent_(state, params), config_(config), session_(session_id != 0 ? session_id : randomSession())
+: agent_(state, params), config_(config), session_(session_id != 0 ? session_id : randomSession()),
+  outbox_det_(config.detection)
 {
   if (!wire::validAgentId(state.id)) {
     throw std::invalid_argument("agent id must be 1~65534");
@@ -558,6 +559,8 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     case PacketType::GAP_REQUEST: onGapRequest(bytes); break;
     case PacketType::SYNC_BATCH: onSyncBatch(*h, bytes, now); break;
     case PacketType::TASK_SPEC: onTaskSpec(bytes, now); break;
+    case PacketType::DETECTION: onDetection(bytes, now); break;
+    case PacketType::DETECTION_ACK: onDetectionAck(bytes, now); break;
   }
 }
 
@@ -660,6 +663,9 @@ std::vector<Bytes> CbbaComm::poll(double now)
 
   // 補發佇列：狀態送完之後，用剩下的額度
   drainRepair(now);
+
+  // 偵測：機器人送佇列裡到期的；閘道送確認
+  sendDetections(now);
 
   std::vector<Bytes> out;
   out.swap(outbox_);
@@ -2282,6 +2288,214 @@ bool CbbaComm::closeAllowed(const wire::TaskCloseBody & close) const
   }
   return !newerThan(assignment(close.task_id),
            Assignment{close.assign_version, close.actor_id, AssignState::ACTIVE});
+}
+
+// ===========================================================================
+// 偵測送閘道（2-1b M0 第 5 步，2026-11-14；detection.hpp、wire_detection.hpp）
+// ===========================================================================
+namespace
+{
+wire::DetectionBody toBody(const Detection & d)
+{
+  wire::DetectionBody b;
+  b.t_ms = d.t > 0.0 ? static_cast<std::uint64_t>(std::llround(d.t * 1000.0)) : 0;
+  b.flags = d.position_valid ? wire::kDetectionPositionValid : 0;
+  b.score = static_cast<float>(d.score);
+  b.x = static_cast<float>(d.position.x);
+  b.y = static_cast<float>(d.position.y);
+  b.z = static_cast<float>(d.position.z);
+  b.floor = d.floor;
+  b.bbox = d.bbox;
+  b.track_id = d.track_id;
+  b.detector = d.detector;
+  b.source = d.source;
+  b.label = d.label;
+  b.attrs = d.attrs;
+  return b;
+}
+
+Detection fromBody(const wire::DetectionBody & b)
+{
+  Detection d;
+  d.t = static_cast<double>(b.t_ms) / 1000.0;
+  d.position_valid = (b.flags & wire::kDetectionPositionValid) != 0;
+  d.score = b.score;
+  d.position = {b.x, b.y, b.z};
+  d.floor = b.floor;
+  d.bbox = b.bbox;
+  d.track_id = b.track_id;
+  d.detector = b.detector;
+  d.source = b.source;
+  d.label = b.label;
+  d.attrs = b.attrs;
+  return d;
+}
+}  // namespace
+
+bool CbbaComm::addDetection(const Detection & d, double now)
+{
+  if (!validDetection(d)) {
+    return false;
+  }
+  ++stats_.detections_added;
+  if (config_.gateway) {
+    // 閘道本機的偵測（例如固定攝影機）：不經過網路
+    ReceivedDetection r;
+    r.agent = id();
+    r.session = session_;
+    r.seq = ++local_det_seq_;
+    r.detection = d;
+    r.received_at = now;
+    received_det_.push_back(std::move(r));
+    ++stats_.detections_received;
+    return true;
+  }
+  switch (outbox_det_.add(d, gatewayOnline(now))) {
+    case DetectionOutbox::AddResult::ADDED: break;
+    case DetectionOutbox::AddResult::MERGED: ++stats_.detections_merged; break;
+    case DetectionOutbox::AddResult::EVICTED: ++stats_.detections_evicted; break;
+  }
+  return true;
+}
+
+bool CbbaComm::gatewayOnline(double now) const
+{
+  if (now - last_det_ack_ <= config_.gateway_timeout) {
+    return true;
+  }
+  for (const auto & [agent, n] : neighbors_) {
+    if (n.gateway && n.has_status && now - n.last_status <= config_.gateway_timeout) {
+      return true;
+    }
+  }
+  // 多跳：還聽得到的鄰居聽得到閘道（鄰居清單是 AGENT_STATE 帶的，最多舊 neighbor_timeout）
+  for (AgentId a : aliveNeighbors(now)) {
+    const auto & theirs = neighbors_.at(a).neighbors;
+    for (AgentId g : config_.gateways) {
+      if (g != id() && theirs.count(g) > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+std::vector<ReceivedDetection> CbbaComm::takeDetections()
+{
+  std::vector<ReceivedDetection> out;
+  out.swap(received_det_);
+  return out;
+}
+
+void CbbaComm::sendDetections(double now)
+{
+  // 閘道：這一輪收到的偵測，每台機器人（session）一則確認（最多 kMaxAckSeqs 筆一則）
+  for (auto & [target, seqs] : acks_due_) {
+    for (std::size_t pos = 0; pos < seqs.size(); pos += wire::kMaxAckSeqs) {
+      const wire::Header h = newHeader(PacketType::DETECTION_ACK);
+      wire::DetectionAckBody ack;
+      ack.relay = wire::originOf(h);
+      ack.target_id = target.first;
+      ack.target_session = target.second;
+      const std::size_t end = std::min(pos + wire::kMaxAckSeqs, seqs.size());
+      ack.seqs.assign(seqs.begin() + static_cast<std::ptrdiff_t>(pos), seqs.begin() + static_cast<std::ptrdiff_t>(end));
+      dedup_.firstSeen(PacketType::DETECTION_ACK, ack.relay, now);
+      send(wire::encodeDetectionAck(h, ack), PacketType::DETECTION_ACK);
+    }
+  }
+  acks_due_.clear();
+
+  // 機器人：閘道在線時送佇列裡到期的（沒送過的、送過 retry 秒還沒確認的）；斷線時只暫存
+  if (config_.gateway || outbox_det_.size() == 0 || !gatewayOnline(now)) {
+    return;
+  }
+  for (const DetectionOutbox::Item & item : outbox_det_.due(now)) {
+    const wire::Header h = newHeader(PacketType::DETECTION);   // 重送也換新的序號、origin（協定的規則）
+    wire::DetectionBody b = toBody(item.detection);
+    b.relay = wire::originOf(h);
+    b.detection_seq = item.seq;
+    if (item.buffered) {
+      b.flags |= wire::kDetectionBuffered;
+    }
+    dedup_.firstSeen(PacketType::DETECTION, b.relay, now);
+    const bool retry = item.tries > 1;
+    if (retry) {
+      ++stats_.detection_retries;
+    } else {
+      ++stats_.detections_sent;
+    }
+    send(wire::encodeDetection(h, b), PacketType::DETECTION, retry ? TxKind::RETRY : TxKind::BASE);
+  }
+}
+
+void CbbaComm::onDetection(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeDetection(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::DETECTION, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  if (b->relay.origin_id != id()) {
+    relay(bytes);   // 閘道可能不是直接鄰居；閘道也轉送（可能有別的閘道）
+  }
+  if (!config_.gateway) {
+    return;
+  }
+  // 重複的也回確認：機器人重送就是因為沒收到上一次的確認
+  acks_due_[{b->relay.origin_id, b->relay.origin_session}].push_back(b->detection_seq);
+  if (!inbox_det_.firstSeen(b->relay.origin_id, b->relay.origin_session, b->detection_seq, now)) {
+    ++stats_.detection_duplicates;
+    return;
+  }
+  ReceivedDetection r;
+  r.agent = b->relay.origin_id;
+  r.session = b->relay.origin_session;
+  r.seq = b->detection_seq;
+  r.detection = fromBody(*b);
+  r.buffered = (b->flags & wire::kDetectionBuffered) != 0;
+  r.received_at = now;
+  received_det_.push_back(std::move(r));
+  ++stats_.detections_received;
+}
+
+void CbbaComm::onDetectionAck(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeDetectionAck(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::DETECTION_ACK, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  if (b->target_id != id()) {
+    if (b->relay.origin_id != id()) {
+      relay(bytes);
+    }
+    return;
+  }
+  if (b->target_session != session_) {
+    return;   // 給重開機前的自己（那時的佇列已經沒了）
+  }
+  last_det_ack_ = now;
+  for (std::uint32_t seq : b->seqs) {
+    if (outbox_det_.ack(seq)) {
+      ++stats_.detections_acked;
+    }
+  }
 }
 
 }  // namespace cbba_core

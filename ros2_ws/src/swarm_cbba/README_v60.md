@@ -16,6 +16,7 @@
 | 改版：同一個 task_id、較大的 `revision`（例如目標移動） | `onCurrentTask` 的 `if (t.task_id == cur) return;` 會當成重送，照舊版做完 | **還沒做，要和你對**：同 task_id、revision 變大時先取消再插入 |
 | 介面 v2.0（2026-11-14）：`Task` 加 `priority`、`platform`、`required_capabilities`、`group_id`、`role_index`、`role_count`、`optional`、`floor`、`deadline_hard`、`release`、`expires` | 不讀也能跑，**要重編**（型別雜湊） | 重編；要用時直接讀 current_task 的欄位（舊型任務填對應後的值：火警 P0、quadruped、mobility_ground） |
 | 介面 v2.0：`TaskResult` 加 `failure_code`（8 個 E_*）、`failed_capability`、`findings_uri` | 不填照舊用 `reason`。填了 `failure_code` 時 cbba_node 照下表決定排除、你填的 `reason` 不看：E_PRECONDITION／E_UNREACHABLE／E_HW → PERMANENT，E_TIMEOUT／E_TARGET_LOST／E_COMM → TRANSIENT，E_LOW_BATTERY／E_SAFETY_STOP → STOPPED；E_HW 時 `failed_capability` 填故障的能力（例如 `rgb_camera`），這隻之後不接需要它的任務（到 cbba_node 重開） | 之後你的 Action 有失敗碼（REG-2）時，`finish()` 一起填；現在不用改 |
+| 偵測（2026-11-14）：新話題 `/v60/detection`（`swarm_interfaces/Detection`：detector、source、t、label、score、bbox、track_id、position、attrs） | 現在不用做。之後狗的偵測（例如看到火、看到人）不自己建任務，發這個話題，cbba_node 送給閘道（閘道斷線時暫存）；由閘道決定要不要建任務 | EVT-1 定偵測器時再對 |
 | 新增葉節點（Track、Wait、Speak…） | spec 裡能用的 action 要同時在 `kValidActions` 和 Switch 的 case | 你新版加 case 時一起加 `kValidActions` |
 
 套 patch（照順序；你更新 `task_manager` 後也照這樣重套，有衝突時對照 patch 開頭的說明手動改）：

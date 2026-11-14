@@ -419,6 +419,18 @@ task_id (uint64) = creator (16) | epoch (16) | seq (32)
 | `task_orphaned` | 型別改成 `TaskOrphaned`（task、reason、waited_sec、detail）。原因：NO_WINNER（原本的 30 s；全隊沒有能做的載具時不報，已經報過 NO_CAPABLE）、NO_CAPABLE（`capableAgents` 是空的，持續 `orphan_no_capable_sec` 3 s；閘道上就是「機隊可行性」的告警）、EXPIRED（收到建立者的 TASK_CLOSE reason 3 時，每個節點一次；建立者自己也是）、PRECONDITION、OPTIONAL_NO_CAPABLE／UNASSIGNED／GROUP_DONE（閘道 4e 的 O1～O3） |
 | 測試 | `test_failure_codes`（4 項：8 個碼的對照、不認得的、數值和 reason 相同、能力名稱陣列） |
 
+### 實作（2026-11-14，第 5 步：DETECTION）
+
+| 項目 | 程式 |
+|---|---|
+| 欄位 | `cbba_core::Detection`／`swarm_interfaces/Detection`：2-1b 第七節的 detector、source、t、label、score、bbox、track_id，加 position（＋有效旗標）、floor、attrs（JSON，EVT-1 要的其他屬性放這裡，CBBA 不解析）。EVT-1 之後只加欄位 |
+| 封包 | DETECTION（種類 10）、DETECTION_ACK（種類 11），都轉送（`wire_detection.hpp`）。閘道去重複的鍵是 (機器人, session, 偵測流水號)：重送換新的封包序號（協定的規則），不能用轉送區塊去重複 |
+| 機器人 | `DetectionOutbox`：每筆偵測留到閘道確認；閘道在線時送、沒確認每 `detection_retry` 1 s 重送（弱網、斷線同一套）；斷線時只暫存（標「暫存過」），恢復後由舊到新送；同一個偵測器＋類別，track_id 相同或（都沒有 track_id）相距 ≤ 2 m → 新的取代舊的；滿了（64）丟最舊的；限速每秒 5 則、突發 10 |
+| 閘道在線 | `CbbaComm::gatewayOnline`：`gateway_timeout`（3 s）內聽過閘道的 AGENT_STATE（直接鄰居），或還聽得到的鄰居的鄰居清單裡有 `gateways` 的機號（多跳），或收過閘道的確認 |
+| 閘道 | `DetectionInbox` 去重複（重複的照樣回確認）；`takeDetections()` → cbba_node 發 `detections`（填 agent_id、detection_seq、buffered、received）；閘道本機的 `detection` 不經網路直接交出。之後的事件流程（去重、信心融合、範本）在 EVT-1 |
+| 沒改 | 無人機 BT 的火警照舊用 `new_task`（舊型，保留到 M3）；偵測器還沒發 `detection`（EVT-1 接上 `apriltag_fire_detector`） |
+| 測試 | `test_wire_detection`（5 項）、`test_detection`（11 項：合併、上限、限速與重送、暫存標記、去重複、送達與確認、斷線暫存後依序送出、50% 掉包每筆一次、多跳、閘道本機）；`swarm_cbba/test/det_iface.sh`（閘道＋狗的 cbba_node） |
+
 ### 「統一由閘道建立任務」
 
 使用者 2026-11-11：之後 CBBA 任務**統一由閘道建立**（creator = 閘道的機號）。和 2-1b 第七節一致：機器人鏡頭的偵測

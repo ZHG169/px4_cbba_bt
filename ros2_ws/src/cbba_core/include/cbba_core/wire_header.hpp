@@ -65,6 +65,8 @@ enum class PacketType : std::uint8_t
   GAP_REQUEST = 7,     // 缺口請求（版本 3）：「這個建立者的這段流水號，我的狀態是這張點陣圖」，不轉送
   SYNC_BATCH = 8,      // 分批回覆（版本 3）：多筆任務定義、結束紀錄、TaskSpec 段，限速，不轉送
   TASK_SPEC = 9,       // TaskSpec 的一段（版本 4，2026-11-12）：執行要的 steps 等，轉送
+  DETECTION = 10,      // 機器人的偵測 → 閘道（版本 4，2026-11-14），轉送
+  DETECTION_ACK = 11,  // 閘道收到偵測的確認 → 機器人（版本 4，2026-11-14），轉送
 };
 
 constexpr std::uint16_t kMagic = 0x4342;
