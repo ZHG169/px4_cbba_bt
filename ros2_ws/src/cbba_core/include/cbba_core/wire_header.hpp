@@ -67,6 +67,7 @@ enum class PacketType : std::uint8_t
   TASK_SPEC = 9,       // TaskSpec 的一段（版本 4，2026-11-12）：執行要的 steps 等，轉送
   DETECTION = 10,      // 機器人的偵測 → 閘道（版本 4，2026-11-14），轉送
   DETECTION_ACK = 11,  // 閘道收到偵測的確認 → 機器人（版本 4，2026-11-14），轉送
+  TASK_PROGRESS = 12,  // 角色的執行進度（版本 4，CB-4 第一批，2026-11-16），轉送；沒升級的節點在 parseHeader 丟掉
 };
 
 constexpr std::uint16_t kMagic = 0x4342;

@@ -15,7 +15,7 @@ find_package(cbba_core REQUIRED)   # CBBA 核心、機間協定版本 2、正式
 find_package(yaml-cpp REQUIRED)    # 2-1b 註冊表（registry/*.yaml，2026-11-14）
 
 # 無人機和機器狗同一支：agent_type、能量模型由 params yaml 決定
-add_executable(cbba_node src/cbba_node.cpp src/registry.cpp)
+add_executable(cbba_node src/cbba_node.cpp src/registry.cpp src/spec_gates.cpp)
 target_include_directories(cbba_node PRIVATE include)
 target_link_libraries(cbba_node cbba_core::cbba_core_core rclcpp::rclcpp ${std_msgs_TARGETS}
   ${swarm_interfaces_TARGETS} yaml-cpp::yaml-cpp)
@@ -31,6 +31,10 @@ if(BUILD_TESTING)
   target_compile_definitions(test_registry PRIVATE
     REGISTRY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../registry"
     SITE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../site-config/yard")
+  # spec 的 wait_for → step-level gate（CB-4 第一批，2026-11-16）
+  ament_add_gtest(test_spec_gates test/test_spec_gates.cpp src/spec_gates.cpp)
+  target_include_directories(test_spec_gates PRIVATE include)
+  target_link_libraries(test_spec_gates cbba_core::cbba_core_core yaml-cpp::yaml-cpp)
 endif()
 
 ament_package()

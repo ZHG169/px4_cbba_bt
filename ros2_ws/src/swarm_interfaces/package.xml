@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>swarm_interfaces</name>
-  <version>2.0.0</version>
+  <version>2.1.0</version>
   <description>無人機與機器狗之間 CBBA 協商的訊息定義（介面 v2.0，見 README.md）</description>
   <maintainer email="a0977704724@gmail.com">zhg</maintainer>
   <license>MIT</license>

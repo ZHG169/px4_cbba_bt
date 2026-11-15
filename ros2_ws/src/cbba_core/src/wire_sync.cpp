@@ -20,7 +20,8 @@ bool validItemType(std::uint8_t type)
 {
   return type == static_cast<std::uint8_t>(PacketType::TASK_ANNOUNCE) ||
          type == static_cast<std::uint8_t>(PacketType::TASK_CLOSE) ||
-         type == static_cast<std::uint8_t>(PacketType::TASK_SPEC);
+         type == static_cast<std::uint8_t>(PacketType::TASK_SPEC) ||
+         type == static_cast<std::uint8_t>(PacketType::TASK_PROGRESS);   // 進度快照（CB-4，2026-11-16）
 }
 }  // namespace
 

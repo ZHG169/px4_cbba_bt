@@ -19,6 +19,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TaskAssignments.msg"
   "msg/TaskOrphaned.msg"
   "msg/Detection.msg"
+  "msg/TaskProgress.msg"
+  "msg/StepGate.msg"
+  "msg/Teammate.msg"
+  "msg/Teammates.msg"
   "srv/ManualOverride.srv"
   "srv/InjectTask.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs

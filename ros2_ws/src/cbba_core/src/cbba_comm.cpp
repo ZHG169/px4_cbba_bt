@@ -561,6 +561,7 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     case PacketType::TASK_SPEC: onTaskSpec(bytes, now); break;
     case PacketType::DETECTION: onDetection(bytes, now); break;
     case PacketType::DETECTION_ACK: onDetectionAck(bytes, now); break;
+    case PacketType::TASK_PROGRESS: onTaskProgress(bytes, now); break;
   }
 }
 
@@ -661,6 +662,13 @@ std::vector<Bytes> CbbaComm::poll(double now)
     sendAgentState(now);
   }
 
+  // 角色進度（CB-4）：自己是執行者的錯開重送、定期快照；發現新鄰居時進度快照排進補發
+  sendProgress(now);
+  if (progress_snapshot_due_) {
+    progress_snapshot_due_ = false;
+    queueProgressSnapshot();
+  }
+
   // 補發佇列：狀態送完之後，用剩下的額度
   drainRepair(now);
 
@@ -742,6 +750,7 @@ NeighborInfo & CbbaComm::neighborOf(const wire::Header & h)
   NeighborInfo & n = neighbors_[h.sender_id];
   if (n.session != h.session_id) {
     n.session = h.session_id;
+    progress_snapshot_due_ = true;   // 新鄰居（或重開機）：把同組任務的進度補給它（CB-4）
     n.has_snapshot = false;
     n.pending_parts.clear();
     n.pending_view.clear();
@@ -1174,11 +1183,12 @@ void CbbaComm::drainRepair(double now)
   wire::Header item_header;
   item_header.sender_id = id();
   item_header.session_id = session_;
-  // 順序：進行中任務的定義與結束 → TaskSpec 的段（版本 4）→ 已結束任務的
-  while (!repair_open_.empty() || !repair_spec_.empty() || !repair_closed_.empty()) {
+  // 順序：進行中任務的定義與結束 → 進度快照（CB-4）→ TaskSpec 的段（版本 4）→ 已結束任務的
+  while (!repair_open_.empty() || !repair_progress_.empty() || !repair_spec_.empty() || !repair_closed_.empty()) {
     std::vector<wire::SyncItem> items;
     std::vector<std::pair<std::map<TaskId, RepairNeed> *, TaskId>> taken;
     std::vector<std::pair<TaskId, std::uint8_t>> taken_spec;
+    std::vector<TaskId> taken_progress;
     std::size_t size = wire::kSyncBatchBaseSize;
     bool full = false;
     // 放得進去就放（第一筆一定放：單筆超過上限時照樣送，不會卡住佇列）
@@ -1219,6 +1229,23 @@ void CbbaComm::drainRepair(double now)
       }
       taken.emplace_back(&repair_open_, task_id);
     }
+    for (auto it = repair_progress_.begin(); !full && it != repair_progress_.end(); ++it) {
+      std::vector<wire::SyncItem> mine;
+      const auto rec = progress_.find(*it);
+      if (rec != progress_.end() && isOpen(*it)) {
+        if (auto item = wire::toSyncItem(wire::encodeTaskProgress(item_header, progressBody(*it, rec->second)))) {
+          mine.push_back(std::move(*item));
+        }
+      }
+      if (!fits(mine)) {
+        full = true;
+        break;
+      }
+      for (wire::SyncItem & item : mine) {
+        items.push_back(std::move(item));
+      }
+      taken_progress.push_back(*it);
+    }
     for (auto it = repair_spec_.begin(); !full && it != repair_spec_.end(); ++it) {
       std::vector<wire::SyncItem> mine;
       const auto st = specs_.find(it->first);
@@ -1254,11 +1281,15 @@ void CbbaComm::drainRepair(double now)
         for (const auto & key : taken_spec) {
           repair_spec_.erase(key);
         }
+        for (const TaskId task_id : taken_progress) {
+          repair_progress_.erase(task_id);
+        }
       };
     if (items.empty()) {   // 佇列裡的都已經沒有東西可送（例如結束紀錄、TaskSpec 不見了）
       drop_taken();
-      if (taken.empty() && taken_spec.empty()) {
+      if (taken.empty() && taken_spec.empty() && taken_progress.empty()) {
         repair_open_.clear();
+        repair_progress_.clear();
         repair_spec_.clear();
         repair_closed_.clear();
       }
@@ -1310,6 +1341,18 @@ void CbbaComm::onSyncBatch(const wire::Header & h, const Bytes & bytes, double n
       }
       dedup_.firstSeen(PacketType::TASK_SPEC, b->relay, now);
       applySpecPart(*b);
+    } else if (item.type == PacketType::TASK_PROGRESS) {
+      const auto b = wire::decodeTaskProgress(packet);
+      if (!b) {
+        ++stats_.malformed;
+        continue;
+      }
+      if (rejectedOrigin(b->relay)) {
+        ++stats_.conflict_dropped;
+        continue;
+      }
+      dedup_.firstSeen(PacketType::TASK_PROGRESS, b->relay, now);
+      applyProgress(*b, now);
     } else {
       const auto b = wire::decodeTaskClose(packet);
       if (!b) {
@@ -2496,6 +2539,229 @@ void CbbaComm::onDetectionAck(const Bytes & bytes, double now)
       ++stats_.detections_acked;
     }
   }
+}
+
+// ===========================================================================
+// 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md）
+// ===========================================================================
+ReportCheck CbbaComm::reportProgress(TaskId task_id, ProgressPhase phase, std::uint8_t step_index,
+  MilestoneMask reached, double now)
+{
+  if (!isOpen(task_id)) {
+    return ReportCheck::NOT_OPEN;
+  }
+  const Assignment cur = assignment(task_id);
+  if (cur.assignee != id() || !isLocking(cur.state)) {
+    return ReportCheck::STALE;
+  }
+  const Task & task = agent_.tasks().at(task_id);
+  const auto it = progress_.find(task_id);
+  const bool has = it != progress_.end();
+  const bool same_version = has && it->second.assign_version == cur.version;
+  MilestoneMask bits = static_cast<MilestoneMask>(
+    (reached & static_cast<MilestoneMask>(~milestoneBit(Milestone::COMPLETED))) | milestoneBit(Milestone::ACCEPTED));
+  if (same_version) {
+    bits = static_cast<MilestoneMask>(bits | it->second.executor_bits);
+  }
+  if (has && it->second.revision == task.revision) {
+    bits = static_cast<MilestoneMask>(bits | it->second.event_bits);
+  }
+  // 和上一份一樣：不送（定期快照照常）
+  if (same_version && it->second.phase == phase && it->second.step_index == step_index &&
+    (it->second.executor_bits | (it->second.revision == task.revision ? it->second.event_bits : 0)) == bits)
+  {
+    return ReportCheck::ACCEPTED;
+  }
+  wire::TaskProgressBody b;
+  b.relay = wire::RelayHeader{id(), session_, 0};   // 送出時換成那一份的 origin
+  b.task_id = task_id;
+  b.revision = task.revision;
+  b.assign_version = cur.version;
+  b.executor = id();
+  b.progress_seq = same_version ? static_cast<std::uint16_t>(std::min<int>(it->second.progress_seq + 1, 0xFFFF)) : 1;
+  b.phase = static_cast<std::uint8_t>(phase);
+  b.step_index = step_index;
+  b.milestones = bits;
+  mergeProgress(progress_[task_id], has, b, now);
+  ++stats_.progress_reports;
+  ProgressTx & tx = progress_tx_[task_id];
+  tx.due = {now, now + config_.progress_repeat[0], now + config_.progress_repeat[1]};
+  tx.next_periodic = now + config_.progress_period;
+  return ReportCheck::ACCEPTED;
+}
+
+void CbbaComm::sendProgress(double now)
+{
+  for (auto it = progress_tx_.begin(); it != progress_tx_.end();) {
+    const TaskId task_id = it->first;
+    ProgressTx & tx = it->second;
+    const Assignment cur = assignment(task_id);
+    const auto rec = progress_.find(task_id);
+    // 不是自己的了（撤銷、換人、結束）：不再送
+    if (!isOpen(task_id) || cur.assignee != id() || !isLocking(cur.state) || rec == progress_.end() ||
+      rec->second.assign_version != cur.version)
+    {
+      it = progress_tx_.erase(it);
+      continue;
+    }
+    bool due = false;
+    bool retry = false;
+    if (!tx.due.empty() && now >= tx.due.front()) {
+      retry = tx.due.size() < 3;   // 錯開的第 2、3 份是補掉包
+      tx.due.erase(tx.due.begin());
+      due = true;
+    } else if (tx.due.empty() && now >= tx.next_periodic) {
+      tx.next_periodic = now + config_.progress_period;
+      due = true;
+      retry = true;
+    }
+    if (due) {
+      const wire::Header h = newHeader(PacketType::TASK_PROGRESS);   // 每次都換新序號（協定的規則）
+      wire::TaskProgressBody b = progressBody(task_id, rec->second);
+      b.relay = wire::originOf(h);
+      rec->second.origin = b.relay;
+      dedup_.firstSeen(PacketType::TASK_PROGRESS, b.relay, now);
+      ++stats_.progress_sent;
+      send(wire::encodeTaskProgress(h, b), PacketType::TASK_PROGRESS, retry ? TxKind::RETRY : TxKind::BASE);
+    }
+    ++it;
+  }
+}
+
+void CbbaComm::onTaskProgress(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeTaskProgress(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::TASK_PROGRESS, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  if (b->relay.origin_id != id()) {
+    relay(bytes);   // 同組的角色可能不是直接鄰居
+  }
+  applyProgress(*b, now);
+}
+
+// 只收正式執行者的：origin 要是 executor；同一個指派版本時執行者要和已知的一樣（較新的版本還沒收到指派紀錄時先收，
+// 較舊的版本照合併規則只影響事件結果型）
+bool CbbaComm::applyProgress(const wire::TaskProgressBody & b, double now)
+{
+  const Assignment cur = assignment(b.task_id);
+  if (b.relay.origin_id != b.executor || (cur.version == b.assign_version && cur.assignee != b.executor)) {
+    ++stats_.progress_rejected;
+    return false;
+  }
+  const auto it = progress_.find(b.task_id);
+  const bool has = it != progress_.end();
+  if (!mergeProgress(progress_[b.task_id], has, b, now)) {
+    return false;
+  }
+  ++stats_.progress_applied;
+  return true;
+}
+
+void CbbaComm::queueProgressSnapshot()
+{
+  for (const auto & [task_id, rec] : progress_) {
+    const auto t = agent_.tasks().find(task_id);
+    if (t == agent_.tasks().end() || t->second.ext.group_id == 0 || !isOpen(task_id)) {
+      continue;   // 結束的任務不用：TASK_CLOSE 有補發，完成就是全部里程碑
+    }
+    if (repair_progress_.insert(task_id).second) {
+      ++stats_.progress_snapshots;
+    }
+  }
+}
+
+const ProgressRecord * CbbaComm::progress(TaskId task_id) const
+{
+  const auto it = progress_.find(task_id);
+  return it != progress_.end() ? &it->second : nullptr;
+}
+
+MilestoneMask CbbaComm::milestones(TaskId task_id, double now) const
+{
+  const auto t = agent_.tasks().find(task_id);
+  if (t == agent_.tasks().end()) {
+    return 0;
+  }
+  const Assignment cur = assignment(task_id);
+  const bool completed = !isOpen(task_id) && closeReason(task_id) == wire::kCloseDone;
+  return effectiveMilestones(progress(task_id), cur.version, t->second.revision, isLocking(cur.state),
+    expired(task_id, now), completed);
+}
+
+std::vector<TaskId> CbbaComm::groupTasks(TaskId group_id) const
+{
+  std::vector<std::pair<std::uint8_t, TaskId>> found;
+  if (group_id != 0) {
+    for (const auto & [task_id, task] : agent_.tasks()) {
+      if (task.ext.group_id == group_id && origins_.count(task_id) > 0) {
+        found.emplace_back(task.ext.role_index, task_id);
+      }
+    }
+  }
+  std::sort(found.begin(), found.end());
+  std::vector<TaskId> out;
+  for (const auto & f : found) {
+    out.push_back(f.second);
+  }
+  return out;
+}
+
+std::optional<TaskId> CbbaComm::roleTask(TaskId group_id, std::uint8_t role_index) const
+{
+  for (const TaskId task_id : groupTasks(group_id)) {
+    if (agent_.tasks().at(task_id).ext.role_index == role_index) {
+      return task_id;
+    }
+  }
+  return std::nullopt;
+}
+
+GateState CbbaComm::gateState(TaskId task_id, const WaitFor & wait, double now) const
+{
+  const auto t = agent_.tasks().find(task_id);
+  if (t == agent_.tasks().end() || t->second.ext.group_id == 0) {
+    return GateState::WAITING;
+  }
+  const auto pred = roleTask(t->second.ext.group_id, wait.role_index);
+  if (!pred) {
+    return GateState::WAITING;   // 前面的角色還不認得（任務定義還沒到）
+  }
+  if (!isOpen(*pred)) {
+    const auto reason = closeReason(*pred);
+    if (reason == wire::kCloseDone) {
+      return GateState::OPEN;   // completed = 全部里程碑
+    }
+    if (reason == wire::kCloseOptionalDropped && agent_.tasks().at(*pred).ext.skip_satisfies) {
+      return GateState::OPEN;
+    }
+    return GateState::UNSATISFIABLE;   // 取消、過期、略過但 skip_satisfies = false
+  }
+  if (expired(*pred, now)) {
+    return GateState::UNSATISFIABLE;
+  }
+  return (milestones(*pred, now) & milestoneBit(wait.milestone)) != 0 ? GateState::OPEN : GateState::WAITING;
+}
+
+std::optional<Vec3> CbbaComm::agentPosition(AgentId agent) const
+{
+  if (agent == id()) {
+    return agent_.state().position;
+  }
+  const auto it = neighbors_.find(agent);
+  if (it == neighbors_.end() || !it->second.has_status) {
+    return std::nullopt;
+  }
+  return it->second.position;
 }
 
 }  // namespace cbba_core

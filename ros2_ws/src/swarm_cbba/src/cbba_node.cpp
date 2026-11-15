@@ -92,7 +92,9 @@
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_assignments.hpp>
 #include <swarm_interfaces/msg/task_orphaned.hpp>
+#include <swarm_interfaces/msg/task_progress.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
+#include <swarm_interfaces/msg/teammates.hpp>
 #include <swarm_interfaces/srv/inject_task.hpp>
 
 #include "cbba_core/assignment_manager.hpp"
@@ -103,6 +105,7 @@
 #include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
 #include "swarm_cbba/registry.hpp"
+#include "swarm_cbba/spec_gates.hpp"
 
 namespace cbba_core
 {
@@ -116,6 +119,10 @@ using TaskOrphanedMsg = swarm_interfaces::msg::TaskOrphaned;
 using DetectionMsg = swarm_interfaces::msg::Detection;
 using AssignmentsMsg = swarm_interfaces::msg::TaskAssignments;
 using InjectTaskSrv = swarm_interfaces::srv::InjectTask;
+using TaskProgressMsg = swarm_interfaces::msg::TaskProgress;
+using TeammatesMsg = swarm_interfaces::msg::Teammates;
+using TeammateMsg = swarm_interfaces::msg::Teammate;
+using StepGateMsg = swarm_interfaces::msg::StepGate;
 
 std::string envOr(const char * name, const std::string & fallback)
 {
@@ -583,6 +590,11 @@ public:
     if (gateway) {
       detections_pub_ = create_publisher<DetectionMsg>(topic("detections"), rclcpp::QoS(100).reliable());
     }
+    // 角色協同（CB-4 第一批，2026-11-16）：BT 回報進度、CBBA 發同組角色的狀況與這個角色每一步的 gate
+    progress_sub_ = create_subscription<TaskProgressMsg>(
+      topic("task_progress"), rclcpp::QoS(10).reliable(),
+      [this](TaskProgressMsg::ConstSharedPtr msg) {onTaskProgress(*msg);});
+    teammates_pub_ = create_publisher<TeammatesMsg>(topic("teammates"), rclcpp::QoS(1).reliable().transient_local());
 
     timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms), [this]() {step();});
 
@@ -978,6 +990,7 @@ private:
     dropOptionals(now);
     checkSpecWait(now);
     handleDetections(now);
+    publishTeammates(now);
     report(now);
     logStats(now);
     publishTx(now);
@@ -1014,6 +1027,170 @@ private:
     RCLCPP_INFO(get_logger(), "註冊表的平台 %s：速度 %.2f m/s、每公尺 %.4f %%、每秒 %.4f %%%s、存量 %.0f %%、bundle 上限 %zu",
       p.name.c_str(), s.cruise_speed, s.energy_per_meter, s.hover_energy_per_sec,
       endurance > 0.0 && !explicit_energy ? "（續航換算）" : "", s.safety_reserve, p.max_bundle);
+  }
+
+  // ===========================================================================
+  // 角色協同（CB-4 第一批，2026-11-16，cbba_core/doc/cb4_design.md）
+  // ===========================================================================
+  // BT 的進度：要是目前 current_task 上的任務；轉成 TASK_PROGRESS 送全隊。phase BLOCKED（停在 wait_for）時
+  // 保持正式指派，停住的時間不計入執行逾時
+  void onTaskProgress(const TaskProgressMsg & msg)
+  {
+    const double now = wallNow();
+    const std::string name = taskName(msg.task_id);
+    const auto & active = assignments_->active();
+    if (!active || active->task != msg.task_id) {
+      RCLCPP_WARN(get_logger(), "task_progress %s 忽略：不是目前 current_task 上的任務（目前是 %s）", name.c_str(),
+        active ? taskName(active->task).c_str() : "無");
+      return;
+    }
+    if (msg.phase > kMaxPhase) {
+      RCLCPP_WARN(get_logger(), "task_progress %s 忽略：phase %u 超出範圍", name.c_str(), msg.phase);
+      return;
+    }
+    std::vector<std::string> unknown;
+    MilestoneMask reached = parseMilestones(msg.milestones, &unknown);
+    for (const std::string & u : unknown) {
+      RCLCPP_WARN(get_logger(), "task_progress %s：不認得的里程碑「%s」，忽略", name.c_str(), u.c_str());
+    }
+    const MilestoneMask by_node = milestoneBit(Milestone::ACCEPTED) | milestoneBit(Milestone::COMPLETED);
+    if ((reached & by_node) != 0) {
+      RCLCPP_WARN(get_logger(), "task_progress %s：accepted、completed 由 cbba_node 判定，BT 不用回報", name.c_str());
+      reached = static_cast<MilestoneMask>(reached & ~by_node);
+    }
+    const auto phase = static_cast<ProgressPhase>(msg.phase);
+    const ReportCheck check = comm_->reportProgress(msg.task_id, phase, msg.step_index, reached, now);
+    if (check != ReportCheck::ACCEPTED) {
+      RCLCPP_WARN(get_logger(), "task_progress %s 拒絕（%s）", name.c_str(), toString(check));
+      return;
+    }
+    assignments_->setBlocked(msg.task_id, phase == ProgressPhase::BLOCKED, now);
+    std::string names;
+    for (const std::string & n : milestoneNames(reached)) {
+      names += (names.empty() ? "" : "、") + n;
+    }
+    RCLCPP_INFO(get_logger(), "task_progress %s：%s、step %u%s%s%s", name.c_str(), toString(phase), msg.step_index,
+      names.empty() ? "" : "、新里程碑 ", names.c_str(),
+      msg.detail.empty() ? "" : ("（" + msg.detail + "）").c_str());
+  }
+
+  // 同組角色的狀況＋我這個角色每一步的 gate：有變化時馬上發、否則每 1 s
+  void publishTeammates(double now)
+  {
+    TeammatesMsg msg;
+    const auto & active = assignments_->active();
+    const TaskId tid = active ? active->task : 0;
+    const auto it = comm_->agent().tasks().find(tid);
+    std::string sig;
+    if (tid != 0 && it != comm_->agent().tasks().end() && it->second.ext.group_id != 0) {
+      const Task & me = it->second;
+      if (!gates_ || gates_->task != tid || gates_->revision != me.revision) {
+        GateCache cache;
+        cache.task = tid;
+        cache.revision = me.revision;
+        cache.gates = swarm_cbba::parseSpecGates(comm_->taskSpec(tid).value_or(std::string()), me.ext.precedence,
+          me.ext.role_index);
+        for (const std::string & w : cache.gates.warnings) {
+          RCLCPP_WARN(get_logger(), "任務 %s 的 spec：%s", taskName(tid).c_str(), w.c_str());
+        }
+        for (const auto & g : cache.gates.steps) {
+          std::string text;
+          for (const WaitFor & w : g.wait_for) {
+            text += (text.empty() ? "" : "、") + std::string("role ") + std::to_string(w.role_index) + " " +
+              toString(w.milestone);
+          }
+          RCLCPP_INFO(get_logger(), "任務 %s（role %u）step %u 要等：%s", taskName(tid).c_str(), me.ext.role_index,
+            g.step_index, text.c_str());
+        }
+        gates_ = std::move(cache);
+      }
+      msg.task_id = tid;
+      msg.group_id = me.ext.group_id;
+      msg.role_index = me.ext.role_index;
+      for (const TaskId t : comm_->groupTasks(me.ext.group_id)) {
+        msg.roles.push_back(teammate(t, now));
+        const TeammateMsg & r = msg.roles.back();
+        sig += std::to_string(r.task_id) + ":" + std::to_string(r.status) + ":" + std::to_string(r.holder) + ":" +
+          std::to_string(r.phase) + ":" + std::to_string(r.step_index) + ":";
+        for (const std::string & m : r.milestones) {
+          sig += m + ",";
+        }
+        sig += ";";
+      }
+      for (const auto & g : gates_->gates.steps) {
+        StepGateMsg sg;
+        sg.step_index = g.step_index;
+        GateState worst = GateState::OPEN;
+        for (const WaitFor & w : g.wait_for) {
+          const GateState st = comm_->gateState(tid, w, now);
+          if (st != GateState::OPEN) {
+            sg.waiting_for.push_back("role " + std::to_string(w.role_index) + ": " + toString(w.milestone) +
+              (st == GateState::UNSATISFIABLE ? "（不會滿足）" : ""));
+          }
+          if (static_cast<int>(st) > static_cast<int>(worst)) {
+            worst = st;
+          }
+        }
+        sg.state = static_cast<std::uint8_t>(worst);
+        const auto prev = gates_->last_state.find(g.step_index);
+        if (prev == gates_->last_state.end() || prev->second != sg.state) {
+          RCLCPP_INFO(get_logger(), "gate %s step %u：%s%s%s", taskName(tid).c_str(), g.step_index,
+            prev == gates_->last_state.end() ? "" : (std::string(toString(static_cast<GateState>(prev->second))) +
+            " → ").c_str(), toString(worst), sg.waiting_for.empty() ? "" : ("（等 " + sg.waiting_for.front() + "）").c_str());
+          gates_->last_state[g.step_index] = sg.state;
+        }
+        sig += "g" + std::to_string(sg.step_index) + ":" + std::to_string(sg.state) + ";";
+        msg.gates.push_back(std::move(sg));
+      }
+    } else {
+      gates_.reset();
+    }
+    sig = std::to_string(tid) + "|" + sig;
+    if (sig != teammates_sig_ || now >= next_teammates_) {
+      teammates_sig_ = sig;
+      next_teammates_ = now + 1.0;
+      teammates_pub_->publish(msg);
+    }
+  }
+
+  TeammateMsg teammate(TaskId t, double now) const
+  {
+    TeammateMsg m;
+    const Task & task = comm_->agent().tasks().at(t);
+    m.task_id = t;
+    m.role_index = task.ext.role_index;
+    m.optional = task.ext.optional;
+    const Assignment a = comm_->assignment(t);
+    const bool locking = isLocking(a.state);
+    if (comm_->taskOpen(t)) {
+      m.status = locking ? TeammateMsg::STATUS_ASSIGNED : TeammateMsg::STATUS_OPEN;
+    } else {
+      const auto reason = comm_->closeReason(t);
+      m.status = reason == wire::kCloseDone ? TeammateMsg::STATUS_DONE :
+        reason == wire::kCloseOptionalDropped ? TeammateMsg::STATUS_SKIPPED :
+        reason == wire::kCloseExpired ? TeammateMsg::STATUS_EXPIRED : TeammateMsg::STATUS_CANCELLED;
+    }
+    m.holder = locking ? a.assignee : 0;
+    m.phase = m.status == TeammateMsg::STATUS_DONE ? TaskProgressMsg::PHASE_DONE : TaskProgressMsg::PHASE_UNKNOWN;
+    m.step_index = TaskProgressMsg::STEP_UNKNOWN;
+    const ProgressRecord * p = comm_->progress(t);
+    if (p != nullptr && m.status != TeammateMsg::STATUS_DONE && p->assign_version >= a.version) {
+      m.phase = static_cast<std::uint8_t>(p->phase);
+      m.step_index = p->step_index;
+    }
+    if (p != nullptr) {
+      m.updated = toRosTime(p->updated);
+    }
+    m.milestones = milestoneNames(comm_->milestones(t, now));
+    if (m.holder != 0) {
+      if (const auto pos = comm_->agentPosition(m.holder)) {
+        m.position_valid = true;
+        m.position.x = pos->x;
+        m.position.y = pos->y;
+        m.position.z = pos->z;
+      }
+    }
+    return m;
   }
 
   // ===========================================================================
@@ -1551,6 +1728,19 @@ private:
   rclcpp::Subscription<TaskResultMsg>::SharedPtr result_sub_;
   rclcpp::Subscription<TaskMsg>::SharedPtr new_task_sub_;
   rclcpp::Subscription<DetectionMsg>::SharedPtr detection_sub_;
+  // 角色協同（CB-4 第一批）
+  rclcpp::Subscription<TaskProgressMsg>::SharedPtr progress_sub_;
+  rclcpp::Publisher<TeammatesMsg>::SharedPtr teammates_pub_;
+  struct GateCache
+  {
+    TaskId task{0};
+    std::uint16_t revision{0};
+    swarm_cbba::SpecGates gates;
+    std::map<std::uint8_t, std::uint8_t> last_state;   // step → 上次的 gate 狀態（印變化）
+  };
+  std::optional<GateCache> gates_;
+  std::string teammates_sig_;
+  double next_teammates_{0.0};
   rclcpp::Publisher<DetectionMsg>::SharedPtr detections_pub_;   // 閘道才有
   bool gateway_online_{false};   // 機器人：上次印的閘道狀態（啟動時算斷線，聽到閘道時印「在線」）
   int last_evicted_{0};

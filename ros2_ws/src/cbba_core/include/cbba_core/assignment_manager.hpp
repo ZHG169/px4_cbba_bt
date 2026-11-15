@@ -117,6 +117,10 @@ public:
 
   // 每個 tick 都給（BT 沒在回報時 fresh = false）
   void setExec(const ExecInput & exec, double now);
+  // CB-4（2026-11-16）：BT 停在 wait_for 還沒滿足的 step（task_progress 的 phase BLOCKED）。保持正式指派，
+  // 停住的時間不計入執行逾時（overrun：預估的完成時刻往後延）
+  void setBlocked(TaskId task, bool blocked, double now);
+  bool blocked() const {return blocked_since_.has_value();}
   // 每個 tick（comm.poll 之後）：檢查持有的指派、逾時，決定要送的請求與 assigned_task
   void step(double now);
   // BT 的回覆：版本不是目前在等的那一個就忽略（延遲的接受不能啟動任務）
@@ -179,6 +183,8 @@ private:
   TaskId committed_task_{0};   // 發給 BT 的 current_task 是哪個 revision（改版時重發）
   double active_expected_{0.0};    // 執行中任務預估的完成時刻（開始時估）
   bool overrun_{false};
+  std::optional<double> blocked_since_;   // 執行中的任務停在 gate 的開始時刻
+  TaskId blocked_task_{0};
   double last_mismatch_warn_{-1e9};
 
   TaskId candidate_{0};

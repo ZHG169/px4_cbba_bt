@@ -148,6 +148,10 @@ TEST(Registry, RepoRegistryLoadsAndMatchesCode)
   EXPECT_EQ(uav->extra_preconditions, std::vector<std::string>{"airborne"});
   EXPECT_EQ(inspect->implementation("quadruped")->interface, "/ptz_inspect");
   EXPECT_EQ(reg.common_failure_codes.size(), 5u);
+  // 角色的里程碑（CB-4）：8 個，bit 和 cbba_core/milestones.hpp 一樣（checkRegistry 檢查）
+  ASSERT_EQ(reg.milestones.size(), 8u);
+  EXPECT_EQ(reg.milestones[4].name, "target_localized");
+  EXPECT_EQ(reg.milestones[4].kind, "event");
 
   // 物件：原文的 8 類＋我們的 fire；person 不從頭上飛過、狗 1.5 m／UAV 3 m；machine 依設備
   EXPECT_EQ(reg.object_classes.size(), 9u);
@@ -455,6 +459,26 @@ TEST(Registry, AddingEventTypeIsJustOneEntry)
   EXPECT_FALSE(reg.eventType("gas_leak")->has_vlm);   // 沒寫的用預設
   EXPECT_EQ(reg.eventType("gas_leak")->zone_attr, "any");
   EXPECT_EQ(reg.detectors.back().name, "gas_sensor_v1");
+}
+
+TEST(Registry, MilestoneMismatchIsError)
+{
+  // 里程碑的 bit、kind 和程式不一樣、少了程式認得的 → 錯誤
+  TempRegistry tmp;
+  std::string actions = readFile(fs::path(REGISTRY_DIR) / "actions.yaml");
+  const auto replace = [&actions](const std::string & from, const std::string & to) {
+      const auto at = actions.find(from);
+      ASSERT_NE(at, std::string::npos) << from;
+      actions.replace(at, from.size(), to);
+    };
+  replace("{name: arrived, bit: 2, kind: executor", "{name: arrived, bit: 9, kind: executor");
+  replace("{name: has_observation, bit: 6, kind: event", "{name: has_observation, bit: 6, kind: executor");
+  replace("  - {name: completed, bit: 7", "  - {name: done, bit: 7");
+  tmp.write("actions.yaml", actions);
+  const auto errors = checkRegistry(loadRegistry(tmp.dir()));
+  EXPECT_TRUE(hasError(errors, "里程碑 arrived 的 bit 是 9"));
+  EXPECT_TRUE(hasError(errors, "里程碑 has_observation 的 kind 是 executor"));
+  EXPECT_TRUE(hasError(errors, "少了程式認得的里程碑 completed"));
 }
 
 TEST(Registry, ObjectAndEventErrors)

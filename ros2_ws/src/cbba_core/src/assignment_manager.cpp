@@ -99,7 +99,11 @@ void AssignmentManager::updateConstraints(double now)
   c.max_queued_fires = config_.max_queued_fires;
   c.max_queue_wait = config_.max_queue_wait;
   // 執行中的任務超過預估還沒完成（例如無人機懸停監控火點、等地面處置）：不知道還要多久，不排在它後面
-  const bool overrun = active_ && !exec_.fresh && now > active_expected_;
+  if (blocked_since_ && (!active_ || active_->task != blocked_task_)) {
+    blocked_since_.reset();   // 換了任務（或沒有執行中的）：停住的狀態跟著結束
+  }
+  // 停在 gate（BLOCKED）的時間不算：停住時不判定超時，解除時預估的完成時刻往後延（setBlocked）
+  const bool overrun = active_ && !exec_.fresh && !blocked_since_ && now > active_expected_;
   if (overrun != overrun_) {
     overrun_ = overrun;
     if (overrun) {
@@ -135,6 +139,22 @@ bool AssignmentManager::updateCommitted()
   committed_ = committed;
   committed_task_ = task;
   return committed_;
+}
+
+void AssignmentManager::setBlocked(TaskId task, bool blocked, double now)
+{
+  if (!active_ || active_->task != task) {
+    return;   // 不是執行中的任務（舊的回報、保留中的）
+  }
+  if (blocked && !blocked_since_) {
+    blocked_since_ = now;
+    blocked_task_ = task;
+    info(taskName(task) + " 停在 wait_for（BLOCKED）：保持正式指派，停住的時間不計入執行逾時");
+  } else if (!blocked && blocked_since_) {
+    active_expected_ += now - *blocked_since_;
+    info(taskName(task) + " 解除等待（停了 " + std::to_string(static_cast<int>(now - *blocked_since_)) + " s）");
+    blocked_since_.reset();
+  }
 }
 
 // 開始執行：記下預估的完成時刻（從目前位置前往＋停留＋overrun_margin）

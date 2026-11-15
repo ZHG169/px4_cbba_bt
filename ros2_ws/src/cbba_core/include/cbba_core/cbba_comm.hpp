@@ -74,6 +74,7 @@
 
 #include "cbba_core/cbba_agent.hpp"
 #include "cbba_core/detection.hpp"
+#include "cbba_core/group_progress.hpp"
 #include "cbba_core/wire_agent_state.hpp"
 #include "cbba_core/wire_cbba_state.hpp"
 #include "cbba_core/wire_completion.hpp"
@@ -81,6 +82,7 @@
 #include "cbba_core/wire_header.hpp"
 #include "cbba_core/wire_sync.hpp"
 #include "cbba_core/wire_task_announce.hpp"
+#include "cbba_core/wire_task_progress.hpp"
 #include "cbba_core/wire_task_spec.hpp"
 
 namespace cbba_core
@@ -135,6 +137,10 @@ struct CommConfig
   double gateway_timeout{3.0};
   std::vector<AgentId> gateways;  // 閘道的機號（多跳時判斷在線用）；直接鄰居的閘道不用列也認得
   DetectionOutboxConfig detection{};
+  // 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md）：狀態變化時馬上送一份、之後再送 progress_repeat 兩份
+  //（錯開，補掉包）；執行中每 progress_period 重送最新的快照
+  double progress_period{2.0};
+  std::array<double, 2> progress_repeat{{0.2, 0.6}};
 };
 
 // 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
@@ -311,6 +317,12 @@ struct CommStats
   int detections_acked{0};      // 閘道確認了
   int detections_received{0};   // 閘道：收到的新偵測（不含重複；含閘道本機的）
   int detection_duplicates{0};  // 閘道：重複收到（機器人沒收到確認而重送）
+  // 角色進度（CB-4，2026-11-16）
+  int progress_reports{0};      // 本機 BT 的回報（有變化的）
+  int progress_sent{0};         // 送出的 TASK_PROGRESS（含錯開的重送、定期快照）
+  int progress_applied{0};      // 收到、合併後有變化的
+  int progress_rejected{0};     // 不是正式執行者的回報（同一個指派版本、執行者不同）
+  int progress_snapshots{0};    // 發現新鄰居時排進補發的進度筆數
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -438,7 +450,10 @@ public:
   wire::CbbaStateBody cbbaStateBody(double now) const;   // 分批之前的完整內容（不含摘要）
   // 壓縮摘要（版本 3）：建立者 → 最小、最大流水號、知道幾個、已結束幾個、CRC
   std::map<DigestKey, wire::DigestEntry> digestMap() const;
-  std::size_t repairQueued() const {return repair_open_.size() + repair_spec_.size() + repair_closed_.size();}
+  std::size_t repairQueued() const
+  {
+    return repair_open_.size() + repair_spec_.size() + repair_closed_.size() + repair_progress_.size();
+  }
 
   // ---------- 偵測（2-1b M0 第 5 步，2026-11-14） ----------
   // 本機的偵測。機器人：放進佇列，閘道在線時送出、等確認（斷線時暫存）；閘道：直接放進 takeDetections()。
@@ -449,6 +464,23 @@ public:
   std::size_t detectionsBuffered() const {return outbox_det_.bufferedCount();}
   // 閘道：收到的新偵測（取走）
   std::vector<ReceivedDetection> takeDetections();
+
+  // ---------- 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md） ----------
+  // 本機 BT 回報（task_progress 話題）：要是自己目前保留或執行中的正式指派（否則 STALE）。reached 是這次新達成的里程碑
+  //（只增不減，accepted 自動加）。和上一份相同就不送；有變化時馬上送一份、錯開再送兩份
+  ReportCheck reportProgress(TaskId id, ProgressPhase phase, std::uint8_t step_index, MilestoneMask reached,
+    double now);
+  const ProgressRecord * progress(TaskId id) const;
+  // gate 用的里程碑（effectiveMilestones：目前的指派版本、revision、過期、完成）
+  MilestoneMask milestones(TaskId id, double now) const;
+  // 同組（group_id）已知的任務，照 role_index 排；role 那一個角色的任務
+  std::vector<TaskId> groupTasks(TaskId group_id) const;
+  std::optional<TaskId> roleTask(TaskId group_id, std::uint8_t role_index) const;
+  // task 這個角色的一個 wait_for 現在的狀態（前面的角色：完成 → OPEN；略過 → 看它的 skip_satisfies；取消、過期 →
+  // UNSATISFIABLE；還開著 → 有沒有達成那個里程碑；還不認得 → WAITING）
+  GateState gateState(TaskId task, const WaitFor & wait, double now) const;
+  // 某台的位置（自己、或收過 AGENT_STATE 的鄰居）
+  std::optional<Vec3> agentPosition(AgentId agent) const;
 
 private:
   struct PendingTask
@@ -562,6 +594,21 @@ private:
   void sendDetections(double now);
   void onDetection(const Bytes & bytes, double now);
   void onDetectionAck(const Bytes & bytes, double now);
+
+  // 角色進度（CB-4）
+  void onTaskProgress(const Bytes & bytes, double now);
+  bool applyProgress(const wire::TaskProgressBody & b, double now);   // 驗證＋合併；true = 有變化
+  void sendProgress(double now);
+  void queueProgressSnapshot();
+  struct ProgressTx
+  {
+    std::vector<double> due;         // 錯開的重送時刻（第一份是 now）
+    double next_periodic{0.0};
+  };
+  std::map<TaskId, ProgressRecord> progress_;
+  std::map<TaskId, ProgressTx> progress_tx_;   // 自己是執行者、要送的
+  std::set<TaskId> repair_progress_;           // 補發佇列：進度快照（發現新鄰居時）
+  bool progress_snapshot_due_{false};
 
   // 狀態
   std::set<AgentId> aliveSet(double now) const;   // 自己 + 直接鄰居 + 鄰居的鄰居

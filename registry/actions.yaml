@@ -45,6 +45,19 @@ conditions:
   - {name: operator_notified, description: "已通知值班"}
   - {name: docked, description: "已回到充電樁／起降點"}
 
+# 角色的里程碑（CB-4 第一批，2026-11-16，cbba_core/doc/cb4_design.md）：spec 步驟的 wait_for 用名稱、TASK_PROGRESS 用 bit。
+# bit 只增不改（和 cbba_core/milestones.hpp 一致，test_registry 檢查）。kind：executor（跟著那一次正式指派，換人就清掉）、
+# event（事件結果：換人後保留，只在同一個 incident revision、沒過期時算）、completion（任務完成，視為全部達成）
+milestones:
+  - {name: accepted, bit: 0, kind: executor, description: 正式指派、發出 current_task（cbba_node 判定）}
+  - {name: en_route, bit: 1, kind: executor, description: 開始前往}
+  - {name: arrived, bit: 2, kind: executor, description: 到達該角色第一個 go_to 的位置}
+  - {name: started, bit: 3, kind: executor, description: 開始第一個非移動的 step}
+  - {name: target_localized, bit: 4, kind: event, description: 已定位目標}
+  - {name: target_locked, bit: 5, kind: executor, description: 追蹤已鎖定}
+  - {name: has_observation, bit: 6, kind: event, description: 已取得觀測}
+  - {name: completed, bit: 7, kind: completion, description: 任務完成（TASK_CLOSE reason 1，cbba_node 判定）}
+
 actions:
   # ===== 可規劃 =====
   go_to:

@@ -14,6 +14,7 @@
 
 #include "cbba_core/capabilities.hpp"
 #include "cbba_core/failure_codes.hpp"
+#include "cbba_core/milestones.hpp"
 
 namespace swarm_cbba
 {
@@ -506,6 +507,20 @@ Registry loadRegistry(const std::string & dir)
       reg.conditions.push_back(ConditionEntry{need<std::string>(conditions[i], "name", w),
           optionalField<std::string>(conditions[i], "description", "", w)});
     }
+    const YAML::Node milestones = listOf(root, "milestones", top);
+    for (std::size_t i = 0; i < milestones.size(); ++i) {
+      const Where w = itemOf(file, "milestones", i);
+      MilestoneEntry m;
+      m.name = need<std::string>(milestones[i], "name", w);
+      const int bit = need<int>(milestones[i], "bit", w);
+      if (bit < 0 || bit > 15) {
+        fail(w, "bit 要是 0～15（TASK_PROGRESS 的 milestones 是 16 位元）");
+      }
+      m.bit = static_cast<unsigned>(bit);
+      m.kind = need<std::string>(milestones[i], "kind", w);
+      m.description = optionalField<std::string>(milestones[i], "description", "", w);
+      reg.milestones.push_back(m);
+    }
     for (const auto & kv : mapOf(root, "actions", top)) {
       const std::string name = kv.first.as<std::string>();
       reg.actions.push_back(loadAction(name, kv.second, Where{file, name}));
@@ -758,6 +773,41 @@ std::vector<std::string> checkRegistry(const Registry & reg)
       } else if (!contains(c->allowed_actions, a.name)) {
         errors.push_back(at + " 的 objects 有 " + cls + "，但 objects.yaml 的 " + cls + " 的 allowed_actions 沒有 " + a.name);
       }
+    }
+  }
+
+  // milestones（CB-4）：和 cbba_core/milestones.hpp 一致
+  std::set<std::string> milestone_names;
+  std::set<unsigned> milestone_bits;
+  for (const MilestoneEntry & m : reg.milestones) {
+    const std::string at = "actions.yaml：里程碑 " + m.name;
+    if (!milestone_names.insert(m.name).second) {
+      errors.push_back(at + " 重複");
+    }
+    if (!milestone_bits.insert(m.bit).second) {
+      errors.push_back(at + " 的 bit " + std::to_string(m.bit) + " 重複");
+    }
+    if (!oneOf(m.kind, {"executor", "event", "completion"})) {
+      errors.push_back(at + " 的 kind " + m.kind + " 要是 executor／event／completion");
+    }
+    if (const auto code = cbba_core::milestoneFromName(m.name)) {
+      const unsigned expect = static_cast<unsigned>(*code);
+      const cbba_core::MilestoneMask b = cbba_core::milestoneBit(*code);
+      const char * kind = (b & cbba_core::kEventMilestones) != 0 ? "event" :
+        *code == cbba_core::Milestone::COMPLETED ? "completion" : "executor";
+      if (m.bit != expect) {
+        errors.push_back(at + " 的 bit 是 " + std::to_string(m.bit) + "，程式（cbba_core/milestones.hpp）是 " +
+          std::to_string(expect));
+      }
+      if (m.kind != kind) {
+        errors.push_back(at + " 的 kind 是 " + m.kind + "，程式是 " + kind);
+      }
+    }
+  }
+  for (unsigned i = 0; i < cbba_core::kMilestoneCount; ++i) {
+    const char * name = cbba_core::toString(static_cast<cbba_core::Milestone>(i));
+    if (milestone_names.count(name) == 0) {
+      errors.push_back(std::string("actions.yaml：少了程式認得的里程碑 ") + name + "（bit " + std::to_string(i) + "）");
     }
   }
 

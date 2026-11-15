@@ -120,6 +120,15 @@ struct ActionEntry
   const ActionParam * param(const std::string & name) const;
 };
 
+// 角色的里程碑（CB-4，2026-11-16）：actions.yaml 的 milestones，bit 要和 cbba_core/milestones.hpp 一致
+struct MilestoneEntry
+{
+  std::string name;
+  unsigned bit{0};
+  std::string kind;            // executor、event、completion
+  std::string description;
+};
+
 struct ConditionEntry
 {
   std::string name;
@@ -187,6 +196,7 @@ struct Registry
   std::vector<GatewayEntry> gateways;
   std::vector<std::string> common_failure_codes;   // actions.yaml：每個動作都可能回的
   std::vector<ConditionEntry> conditions;          // actions.yaml：前置條件、效果的詞彙
+  std::vector<MilestoneEntry> milestones;          // actions.yaml：角色的里程碑（CB-4）
   std::vector<ActionEntry> actions;
   std::vector<ObjectClass> object_classes;
   std::vector<DetectorEntry> detectors;
@@ -214,6 +224,7 @@ Registry loadRegistry(const std::string & dir);
 //            preconditions、effects 要在 conditions；失敗碼（含 common）要是 8 個 E_* 之一；必須可取消；
 //            至少一個平台實作、平台要在 platforms；sequence 只能用這個平台有實作的 internal 動作；
 //            **objects 和物件類別的 allowed_actions 要互相一致**
+//   milestones：name、bit 不重複；bit < 16；**每個的 bit、kind 要和 cbba_core/milestones.hpp 一樣**，程式認得的都要在
 //   objects：locate、rules、findings 是規定的詞；allowed_actions 要是有的動作；safety_distance_m 的平台要在 platforms、值 ≥ 0
 //   detectors：labels 非空；名稱、label ≤ 64 B（DETECTION 封包的上限）；source_kinds 是規定的值；min_score 0～1
 //   event_types：category template 要有 detectors、default_rule；open 要有 vlm、requires_approval；detectors 要在清單；
