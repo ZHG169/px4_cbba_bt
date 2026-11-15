@@ -179,7 +179,7 @@ def animate_mission(out_dir, scenario, fps, speedup):
     state = (f"converged {summary['convergence_time']:.2f} s"
              if summary.get("converged") else "NOT converged")
     ax.set_title(f"Mission replay — loss {summary.get('loss', 0) * 100:.0f}%, {state}, "
-                 f"battery weight {summary.get('battery_weight', 1):g}")
+                 f"energy weight {summary.get('energy_weight', summary.get('battery_weight', 0)):g}")
 
     # 電量長條圖
     names = [agent_name(a["type"], int(a["agent_id"])) for a in agents]
@@ -326,7 +326,7 @@ def animate_weights(gif_path, run_dirs, hold_sec):
                        edgecolors=SURFACE if winner else MUTED, linewidths=1.8, zorder=4)
             ax.annotate(f"T{t['task_id']}", (float(t["x"]), float(t["y"])), xytext=(8, 6),
                         textcoords="offset points", fontsize=8.5)
-        ax.set_title(f"Battery weight = {summary.get('battery_weight', 0):g}", fontsize=13)
+        ax.set_title(f"Energy weight = {summary.get('energy_weight', summary.get('battery_weight', 0)):g}", fontsize=13)
 
         names = [agent_name(a["type"], int(a["agent_id"])) for a in agents]
         start = [float(a["battery"]) for a in agents]

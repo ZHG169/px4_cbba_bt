@@ -1,6 +1,8 @@
-// 計分的單元測試：手算結果、異質出價、電池 Cases A/B/C、回程、逾期、排序
+// 出價（時間折扣報酬 TDR，M1，2026-11-15）的單元測試：手算、異質出價、電池 Cases A/B/C、回程、期限、排序、
+// 邊際遞減的統計、失敗打折、硬期限、release、任務的電量下限、half_life（設計見 doc/formula/tdr_design.md）
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <random>
 
 #include "cbba_core/scoring.hpp"
@@ -38,32 +40,42 @@ AgentState makeUav(double x, double y, double battery = 100.0)
   return a;
 }
 
-ScoringParams makeParams(double battery_weight = 1.0)
+ScoringParams makeParams(double energy_weight = 50.0)
 {
   ScoringParams p;
   p.cruise_speed = 5.0;
   p.speed_margin = 0.8;   // 規劃速度 4 m/s
-  p.battery_weight = battery_weight;
-  p.cost_ref = 50.0;
+  p.energy_weight = energy_weight;
+  return p;
+}
+
+// 不打折（各優先級的預設 half_life 都是 0）：只看耗電
+ScoringParams noDecay(double energy_weight = 50.0)
+{
+  ScoringParams p = makeParams(energy_weight);
+  p.half_life_by_priority = {{0.0, 0.0, 0.0, 0.0}};
   return p;
 }
 }  // namespace
 
 TEST(Scoring, HandComputedSingleTask)
 {
-  // d=40, 到達=10 s, 剩餘期限=60 s -> Lt=1/6, C_ST=6.6667
-  // 能量: 去程 20 + 懸停 2 + 回程 20 = 42, 可用 80 -> 0.525
-  // C_total = 6.6667 * 1.525 = 10.1667, score = 80 / (1 + 10.1667/50) = 66.482
+  // AIR_RECON（P3，預設 half_life 600 s）、d = 40 m、規劃速度 4 m/s → 到達 10 s
+  // 報酬 80 × 2^(−10/600) = 79.081；耗電 去程 20＋懸停 2＋回程 20 = 42，可用 80 → 0.525，耗電成本 50 × 0.525 = 26.25
+  // 出價 = 79.081 − 26.25 = 52.831（空路徑的報酬是 0）
   const AgentState uav = makeUav(0, 0);
   const Task task = makeTask(1, TaskType::AIR_RECON, 40, 0, 60, 80, 10);
   const Insertion ins = bestInsertion(uav, {}, task, 0.0, makeParams());
   ASSERT_TRUE(ins.feasible);
-  EXPECT_NEAR(ins.eval.st_cost, 6.6667, 1e-3);
+  EXPECT_NEAR(ins.eval.legs[0].arrival, 10.0, 1e-9);
+  EXPECT_DOUBLE_EQ(ins.eval.legs[0].half_life, 600.0);
+  EXPECT_NEAR(ins.eval.reward, 79.0811, 1e-3);
   EXPECT_NEAR(ins.eval.path_energy, 42.0, 1e-9);
   EXPECT_NEAR(ins.eval.battery_after, 58.0, 1e-9);
-  EXPECT_NEAR(ins.eval.battery_cost, 0.525, 1e-9);
-  EXPECT_NEAR(ins.marginal_cost, 10.1667, 1e-3);
-  EXPECT_NEAR(ins.score, 66.482, 1e-2);
+  EXPECT_NEAR(ins.eval.battery_fraction, 0.525, 1e-9);
+  EXPECT_NEAR(ins.eval.energy_cost, 26.25, 1e-9);
+  EXPECT_NEAR(ins.gain, 52.8311, 1e-3);
+  EXPECT_NEAR(ins.score, 52.8311, 1e-3);
   EXPECT_FALSE(ins.eval.legs[0].overdue);
 }
 
@@ -96,12 +108,13 @@ TEST(Scoring, HeterogeneousBidsOnlyOwnTaskTypes)
 
 TEST(Scoring, ScoreNeverExceedsTaskValue)
 {
+  // 就在任務點上：不用飛、不打折、不耗電 → 出價 = 價值
   const AgentState uav = makeUav(0, 0);
-  const Task here = makeTask(1, TaskType::AIR_RECON, 0, 0);   // 就在任務點上
+  const Task here = makeTask(1, TaskType::AIR_RECON, 0, 0);
   const Insertion ins = bestInsertion(uav, {}, here, 0.0, makeParams());
   ASSERT_TRUE(ins.feasible);
   EXPECT_LE(ins.score, here.value);
-  EXPECT_GT(ins.score, 0.0);
+  EXPECT_NEAR(ins.score, here.value, 1e-9);
 }
 
 TEST(Scoring, CaseA_EqualBatteryNearerWins)
@@ -131,14 +144,14 @@ TEST(Scoring, CaseC_BatteryBurdenChangesWinner)
   const AgentState near = makeUav(10, 0, 32.0);   // d=10
   const AgentState far = makeUav(8, 0, 100.0);    // d=12
 
-  // 不看電池時近的贏
+  // 不看耗電（w_E = 0）時近的贏（先到）
   EXPECT_GT(
     bestInsertion(near, {}, task, 0.0, makeParams(0.0)).score,
     bestInsertion(far, {}, task, 0.0, makeParams(0.0)).score);
 
-  // 電池權重 10 時換遠的贏
-  const Insertion near_w = bestInsertion(near, {}, task, 0.0, makeParams(10.0));
-  const Insertion far_w = bestInsertion(far, {}, task, 0.0, makeParams(10.0));
+  // w_E = 50：近的那台用掉大部分可用電量，換遠的贏
+  const Insertion near_w = bestInsertion(near, {}, task, 0.0, makeParams(50.0));
+  const Insertion far_w = bestInsertion(far, {}, task, 0.0, makeParams(50.0));
   ASSERT_TRUE(near_w.feasible);
   ASSERT_TRUE(far_w.feasible);
   EXPECT_GT(far_w.score, near_w.score);
@@ -154,9 +167,9 @@ TEST(Scoring, CanReachButCannotReturnIsInfeasible)
   EXPECT_DOUBLE_EQ(ins.score, 0.0);
 }
 
-TEST(Scoring, OverdueTaskStillGetsPositiveButLowerScore)
+TEST(Scoring, SoftDeadlineDoesNotChangeTheScore)
 {
-  // 期限是軟限制：來不及時分數降低，但不歸零
+  // 軟期限不影響分數（「急」由 half_life 表達）；來不及時只標 overdue
   const AgentState uav = makeUav(0, 0);
   const Insertion on_time =
     bestInsertion(uav, {}, makeTask(1, TaskType::AIR_RECON, 40, 0, 60), 0.0, makeParams());
@@ -165,28 +178,31 @@ TEST(Scoring, OverdueTaskStillGetsPositiveButLowerScore)
   ASSERT_TRUE(late.feasible);
   EXPECT_TRUE(late.eval.legs[0].overdue);
   EXPECT_FALSE(on_time.eval.legs[0].overdue);
-  EXPECT_GT(late.score, 0.0);
-  EXPECT_LT(late.score, on_time.score);
+  EXPECT_NEAR(late.score, on_time.score, 1e-9);
 }
 
-TEST(Scoring, PastDeadlineDoesNotBreakTheCost)
+TEST(Scoring, ScoreDoesNotDependOnTaskAge)
 {
-  // 現在時間已經超過期限：剩餘期限用下限值，成本仍為有限正數
+  // 沒有期限、或期限已經過了：分數只看「從現在起」多久到，和任務放了多久無關、不會逾期
   const AgentState uav = makeUav(0, 0);
-  const Task task = makeTask(1, TaskType::AIR_RECON, 20, 0, 30);
-  const Insertion ins = bestInsertion(uav, {}, task, 100.0, makeParams());
-  ASSERT_TRUE(ins.feasible);
-  EXPECT_TRUE(std::isfinite(ins.marginal_cost));
-  EXPECT_GT(ins.marginal_cost, 0.0);
-  EXPECT_GT(ins.score, 0.0);
+  Task t = makeTask(1, TaskType::AIR_RECON, 30, 0, 300.0, 100.0);
+  t.explicit_deadline = false;
+  const double fresh = bestInsertion(uav, {}, t, 0.0, makeParams()).score;
+  for (double now : {250.0, 400.0, 3600.0}) {
+    const Insertion later = bestInsertion(uav, {}, t, now, makeParams());
+    EXPECT_NEAR(later.score, fresh, 1e-9) << now;
+    EXPECT_FALSE(later.eval.legs[0].overdue) << now;
+  }
 }
 
 TEST(Scoring, UrgentTaskIsScheduledFirst)
 {
-  // 兩個任務距離相同、方向相反。急迫的（期限 60 秒）應排在不急的（600 秒）前面。
+  // 兩個任務距離相同、方向相反。急的（half_life 30 s）排在不急的（600 s）前面：晚到 5 s，急的少得多
   const AgentState uav = makeUav(0, 0);
-  const Task urgent = makeTask(1, TaskType::AIR_RECON, 10, 0, 60);
-  const Task relaxed = makeTask(2, TaskType::AIR_RECON, -10, 0, 600);
+  Task urgent = makeTask(1, TaskType::AIR_RECON, 10, 0, 600);
+  urgent.ext.half_life_s = 30;
+  Task relaxed = makeTask(2, TaskType::AIR_RECON, -10, 0, 600);
+  relaxed.ext.half_life_s = 600;
   const Insertion ins = bestInsertion(uav, {relaxed}, urgent, 0.0, makeParams());
   ASSERT_TRUE(ins.feasible);
   EXPECT_EQ(ins.position, 0u);
@@ -205,12 +221,11 @@ TEST(Scoring, SlowerActualSpeedLowersScore)
 
 TEST(Scoring, MarginalScoreDoesNotIncreaseWithLongerPath)
 {
-  // 介面規格的條件 3：已接的任務越多，對其他任務的分數只能持平或降低。
-  // 插入式的「原始分數」不保證成立（新任務順路時分數會變高），這裡統計違反的比例。
+  // 邊際遞減（DMG）：已接的任務越多，對其他任務的出價只能持平或降低。只有時間折扣時成立（Choi 2009），
+  // 加上耗電成本後，新任務剛好順路時可能變高（tdr_design.md「收斂」）。這裡統計違反的比例；
   // 實際送出的出價由 CbbaAgent 的出價上限保證不增，見 test_agent 與 test_lossy_network。
   std::mt19937 rng(12345);
   std::uniform_real_distribution<double> pos(-50.0, 50.0);
-  std::uniform_real_distribution<double> deadline(30.0, 300.0);
   const ScoringParams params = makeParams();
 
   int samples = 0;
@@ -218,8 +233,8 @@ TEST(Scoring, MarginalScoreDoesNotIncreaseWithLongerPath)
   double worst_increase = 0.0;
   for (int trial = 0; trial < 2000; ++trial) {
     const AgentState uav = makeUav(pos(rng), pos(rng), 200.0);
-    const Task a = makeTask(1, TaskType::AIR_RECON, pos(rng), pos(rng), deadline(rng));
-    const Task b = makeTask(2, TaskType::AIR_RECON, pos(rng), pos(rng), deadline(rng));
+    const Task a = makeTask(1, TaskType::AIR_RECON, pos(rng), pos(rng));
+    const Task b = makeTask(2, TaskType::AIR_RECON, pos(rng), pos(rng));
 
     const Insertion alone = bestInsertion(uav, {}, b, 0.0, params);
     const Insertion first = bestInsertion(uav, {}, a, 0.0, params);
@@ -238,6 +253,22 @@ TEST(Scoring, MarginalScoreDoesNotIncreaseWithLongerPath)
             << " rate=" << rate * 100.0 << "% worst_increase=" << worst_increase << "\n";
   RecordProperty("violation_rate", std::to_string(rate));
   EXPECT_GT(samples, 1000);
+
+  // 不算耗電時（純時間折扣）不會違反
+  const ScoringParams time_only = makeParams(0.0);
+  std::mt19937 rng2(54321);
+  int pure_violations = 0;
+  for (int trial = 0; trial < 500; ++trial) {
+    const AgentState uav = makeUav(pos(rng2), pos(rng2), 200.0);
+    const Task a = makeTask(1, TaskType::AIR_RECON, pos(rng2), pos(rng2));
+    const Task b = makeTask(2, TaskType::AIR_RECON, pos(rng2), pos(rng2));
+    const Insertion alone = bestInsertion(uav, {}, b, 0.0, time_only);
+    const Insertion after = bestInsertion(uav, {a}, b, 0.0, time_only);
+    if (alone.feasible && after.feasible && after.score > alone.score + time_only.score_epsilon) {
+      ++pure_violations;
+    }
+  }
+  EXPECT_EQ(pure_violations, 0);
 }
 
 // ===========================================================================
@@ -245,38 +276,38 @@ TEST(Scoring, MarginalScoreDoesNotIncreaseWithLongerPath)
 // ===========================================================================
 TEST(Scoring, FullSuccessProbKeepsOriginalScore)
 {
-  // success_prob = 1（沒失敗過）：和原本的公式完全相同（數字同 HandComputedSingleTask）
+  // success_prob = 1（沒失敗過）：數字同 HandComputedSingleTask
   const AgentState uav = makeUav(0, 0);
   Task task = makeTask(1, TaskType::AIR_RECON, 40, 0, 60, 80, 10);
   task.success_prob = 1.0;
   const Insertion ins = bestInsertion(uav, {}, task, 0.0, makeParams());
   ASSERT_TRUE(ins.feasible);
-  EXPECT_NEAR(ins.marginal_cost, 10.1667, 1e-3);
-  EXPECT_NEAR(ins.score, 66.482, 1e-2);
+  EXPECT_NEAR(ins.score, 52.8311, 1e-3);
 }
 
 TEST(Scoring, UrgentTaskPenalizedMore)
 {
-  // 實作說明的範例：失敗一次（p = 0.5）、距離 20 m、規劃速度 4 m/s、執行 10 s、不算電池
-  //   火警 value 80、剩 30 s：到達 5 → 20 s，75.0 → 31.6（42%）
-  //   巡檢 value 40、剩 600 s：39.9 → 19.7（49%）：期限長，時間項幾乎不起作用，只剩價值減半
+  // 失敗一次（p = 0.5）、距離 20 m、規劃速度 4 m/s、執行 10 s、不算耗電：期望重試 (1 − p)/p ×（5＋10）= 15 s
+  //   急的（half_life 60 s、價值 80）：80 × 2^(−5/60) = 75.51 → 0.5 × 80 × 2^(−20/60) = 31.75（42 %）
+  //   不急的（600 s、價值 40）：39.77 → 19.54（49 %）：只剩價值減半
   const AgentState uav = makeUav(0, 0);
   const ScoringParams params = makeParams(0.0);
-  auto score = [&](double deadline, double value, double p) {
-      Task t = makeTask(1, TaskType::AIR_RECON, 20, 0, deadline, value, 10);
+  auto score = [&](std::uint16_t half_life, double value, double p) {
+      Task t = makeTask(1, TaskType::AIR_RECON, 20, 0, 600, value, 10);
+      t.ext.half_life_s = half_life;
       t.success_prob = p;
       return bestInsertion(uav, {}, t, 0.0, params).score;
     };
-  EXPECT_NEAR(score(30, 80, 1.0), 75.0, 0.05);
-  EXPECT_NEAR(score(30, 80, 0.5), 31.58, 0.05);
-  EXPECT_NEAR(score(600, 40, 1.0), 39.87, 0.05);
-  EXPECT_NEAR(score(600, 40, 0.5), 19.74, 0.05);
-  EXPECT_LT(score(30, 80, 0.5) / score(30, 80, 1.0), score(600, 40, 0.5) / score(600, 40, 1.0));
+  EXPECT_NEAR(score(60, 80, 1.0), 75.510, 0.01);
+  EXPECT_NEAR(score(60, 80, 0.5), 31.748, 0.01);
+  EXPECT_NEAR(score(600, 40, 1.0), 39.770, 0.01);
+  EXPECT_NEAR(score(600, 40, 0.5), 19.543, 0.01);
+  EXPECT_LT(score(60, 80, 0.5) / score(60, 80, 1.0), score(600, 40, 0.5) / score(600, 40, 1.0));
 }
 
 TEST(Scoring, FailureDelaysLaterTasks)
 {
-  // 路徑上第一個任務 p = 0.5：它多 (1 − p)/p × (前往 5 s＋執行 10 s) = 15 s，後面的任務一起延後
+  // 路徑上第一個任務 p = 0.5：它多 (1 − p)/p × (前往 5 s＋執行 10 s) = 15 s，後面的任務一起延後、報酬變少
   const AgentState uav = makeUav(0, 0);
   const ScoringParams params = makeParams(0.0);
   Task a = makeTask(1, TaskType::AIR_RECON, 20, 0, 600, 80, 10);
@@ -287,7 +318,8 @@ TEST(Scoring, FailureDelaysLaterTasks)
   const PathEval slow = evaluatePath(uav, {a, b}, 0.0, params);
   EXPECT_NEAR(slow.legs[0].arrival, 20.0, 1e-9);    // 5 + 15
   EXPECT_NEAR(slow.legs[1].arrival, 35.0, 1e-9);    // 30 + 5
-  EXPECT_GT(slow.total_cost, base.total_cost);
+  EXPECT_LT(slow.legs[1].reward, base.legs[1].reward);
+  EXPECT_LT(slow.score, base.score);
 }
 
 TEST(Scoring, ActiveHeadWithRemainingTimeIsNotDelayed)
@@ -306,9 +338,9 @@ TEST(Scoring, ActiveHeadWithRemainingTimeIsNotDelayed)
 // ===========================================================================
 // 任務定義的時間與電量限制（4f 第一批，2026-11-13）
 // ===========================================================================
-TEST(Scoring, HardDeadlineIsInfeasibleSoftIsJustCostly)
+TEST(Scoring, HardDeadlineIsInfeasibleSoftIsNot)
 {
-  // 到達 10 s、期限 5 s：軟期限照樣出價（分數低），硬期限不可行（0）；執行中的（exempt）不檢查
+  // 到達 10 s、期限 5 s：軟期限照樣出價，硬期限不可行（0）；執行中的（exempt）不檢查
   const AgentState uav = makeUav(0, 0);
   Task soft = makeTask(1, TaskType::NONE, 40, 0, 5.0);
   soft.platform = 1;
@@ -320,6 +352,16 @@ TEST(Scoring, HardDeadlineIsInfeasibleSoftIsJustCostly)
   EXPECT_EQ(no.score, 0.0);
   EXPECT_FALSE(evaluatePath(uav, {hard}, 0.0, makeParams()).feasible);
   EXPECT_TRUE(evaluatePath(uav, {hard}, 0.0, makeParams(), -1.0, hard.id).feasible);
+}
+
+TEST(Scoring, NoDeadlineHardFlagIsIgnored)
+{
+  // deadline_hard 但沒有期限：沒有東西可以來不及，永遠可行
+  const AgentState uav = makeUav(0, 0);
+  Task t = makeTask(1, TaskType::AIR_RECON, 30, 0);
+  t.explicit_deadline = false;
+  t.ext.deadline_hard = true;
+  EXPECT_TRUE(evaluatePath(uav, {t}, 10000.0, makeParams()).feasible);
 }
 
 TEST(Scoring, InsertionMustNotPushHardDeadlineTaskLate)
@@ -338,7 +380,7 @@ TEST(Scoring, InsertionMustNotPushHardDeadlineTaskLate)
 
 TEST(Scoring, ReleaseMakesItWait)
 {
-  // 到達 10 s、release 30 s：等到 30 s 才算到達；等越久分數越低，後面的任務跟著延後
+  // 到達 10 s、release 30 s：等到 30 s 才算到達；晚到分數較低，後面的任務跟著延後
   const AgentState uav = makeUav(0, 0);
   Task now_task = makeTask(1, TaskType::NONE, 40, 0, 120.0);
   now_task.platform = 1;
@@ -368,4 +410,93 @@ TEST(Scoring, TaskBatteryReserveRaisesTheFloor)
   EXPECT_FALSE(evaluatePath(uav, {t}, 0.0, makeParams()).feasible);
   t.ext.min_battery_reserve = 10;   // 比載具的低：照載具的
   EXPECT_TRUE(evaluatePath(uav, {t}, 0.0, makeParams()).feasible);
+}
+
+// ===========================================================================
+// half_life（時間折扣）
+// ===========================================================================
+TEST(Scoring, HalfLifeFromTaskOrPriority)
+{
+  // 任務有帶就用任務的；沒帶照優先級的預設（P0 60、P1 120、P2 300、P3 600）；舊型火警 P0、空中偵察 P3
+  const ScoringParams params = makeParams();
+  Task fire = makeTask(1, TaskType::GROUND_INTERVENTION, 0, 0, 600, 100);
+  Task recon = makeTask(2, TaskType::AIR_RECON, 0, 0, 600, 100);
+  Task p1 = makeTask(3, TaskType::NONE, 0, 0, 600, 100);
+  p1.priority = 1;
+  EXPECT_DOUBLE_EQ(halfLifeOf(fire, params), 60.0);
+  EXPECT_DOUBLE_EQ(halfLifeOf(recon, params), 600.0);
+  EXPECT_DOUBLE_EQ(halfLifeOf(p1, params), 120.0);
+  recon.ext.half_life_s = 45;
+  EXPECT_DOUBLE_EQ(halfLifeOf(recon, params), 45.0);
+  // 每 half_life 秒價值剩一半；不會超過原本的價值；預設是 0 時不打折
+  EXPECT_NEAR(decayedValue(fire, 60.0, params), 50.0, 1e-9);
+  EXPECT_NEAR(decayedValue(fire, 120.0, params), 25.0, 1e-9);
+  EXPECT_NEAR(decayedValue(fire, -5.0, params), 100.0, 1e-9);
+  EXPECT_DOUBLE_EQ(decayedValue(fire, 120.0, noDecay()), 100.0);
+}
+
+TEST(Scoring, HalfLifeWidensGapBetweenNearAndFar)
+{
+  // 急的任務（half_life 短）：近的載具和遠的差距比不打折時大
+  const AgentState near = makeUav(20, 0);
+  const AgentState far = makeUav(-30, 0);   // 60 m：來回 60 % 電量，還在可行範圍
+  Task t = makeTask(1, TaskType::AIR_RECON, 30, 0, 600.0, 100.0);
+  const double near0 = bestInsertion(near, {}, t, 0.0, noDecay()).score;
+  const double far0 = bestInsertion(far, {}, t, 0.0, noDecay()).score;
+  ASSERT_GT(near0, far0);
+  ASSERT_GT(far0, 0.0);
+  t.ext.half_life_s = 20;
+  const double near1 = bestInsertion(near, {}, t, 0.0, noDecay()).score;
+  const double far1 = bestInsertion(far, {}, t, 0.0, noDecay()).score;
+  EXPECT_LT(near1, near0);
+  EXPECT_LT(far1, far0);
+  EXPECT_GT(near1 / std::max(far1, 1e-9), near0 / far0);   // 差距變大
+}
+
+TEST(Scoring, HalfLifePrefersEarlierInsertion)
+{
+  // 起降點在 (−40, 0)。路徑上已有 (10, 0)，新任務在 (−30, 0)：
+  //   不打折：先 (10, 0) 再 (−30, 0) 順路回家，耗電少 → 排在後面
+  //   新任務 half_life 20 s：先去它（7.5 s 到，比 12.5 s 多 12 分）勝過多繞的耗電（約 8 分）→ 插在前面
+  AgentState uav = makeUav(0, 0, 200.0);
+  uav.home = {-40.0, 0.0, 0.0};
+  const Task first = makeTask(1, TaskType::AIR_RECON, 10, 0, 600.0, 100.0);
+  Task other = makeTask(2, TaskType::AIR_RECON, -30, 0, 600.0, 100.0);
+  const Insertion slow = bestInsertion(uav, {first}, other, 0.0, noDecay());
+  ASSERT_TRUE(slow.feasible);
+  EXPECT_EQ(slow.position, 1u);
+  other.ext.half_life_s = 20;
+  const Insertion fast = bestInsertion(uav, {first}, other, 0.0, noDecay());
+  ASSERT_TRUE(fast.feasible);
+  EXPECT_EQ(fast.position, 0u);
+}
+
+TEST(Scoring, DelayingOtherTasksCountsInTheBid)
+{
+  // TDR：插入讓路徑上其他任務晚到，它們少掉的報酬算在出價裡。手上的任務很急（30 s）時，
+  // 同一個新任務的出價比手上的任務不急（600 s）時低
+  const AgentState uav = makeUav(0, 0, 200.0);
+  //   新任務 half_life 60 s：插在前面 5 s 到（94.4）、排在後面 12.1 s 到（87.0）
+  //   手上的任務 600 s：插在前面它只少 0.8 → 出價 93.6；30 s：它少 13.4 → 插前面只剩 81.0，改排後面 87.0
+  Task held = makeTask(1, TaskType::AIR_RECON, 20, 0, 600.0, 100.0);
+  Task incoming = makeTask(2, TaskType::AIR_RECON, 0, 20, 600.0, 100.0);
+  incoming.ext.half_life_s = 60;
+  held.ext.half_life_s = 600;
+  const double relaxed = bestInsertion(uav, {held}, incoming, 0.0, noDecay(0.0)).score;
+  held.ext.half_life_s = 30;
+  const double urgent = bestInsertion(uav, {held}, incoming, 0.0, noDecay(0.0)).score;
+  EXPECT_NEAR(relaxed, 93.58, 0.05);
+  EXPECT_NEAR(urgent, 86.97, 0.05);
+  EXPECT_LT(urgent, relaxed);
+}
+
+TEST(Scoring, NotWorthItGivesNoBid)
+{
+  // 報酬增加 ≤ 0（價值小、耗電成本大）：可行但不出價
+  const AgentState uav = makeUav(0, 0);
+  const Task cheap = makeTask(1, TaskType::AIR_RECON, 60, 0, 600.0, 5.0);   // 來回 60 % 電量，價值 5
+  const Insertion ins = bestInsertion(uav, {}, cheap, 0.0, makeParams());
+  EXPECT_TRUE(ins.feasible);
+  EXPECT_LT(ins.gain, 0.0);
+  EXPECT_DOUBLE_EQ(ins.score, 0.0);
 }

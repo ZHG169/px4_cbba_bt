@@ -3,8 +3,8 @@
 # code 是 CBBA 封包裡的平台代碼（任務的 platform、AGENT_STATE 的 vehicle_type），**只增不改**；0 保留給
 # 「任務不限平台」（ANY）和「閘道」（AGENT_STATE，不是載具）。和 cbba_node 的 agent_type 對應：uav = UAV、quadruped = UGV。
 #
-# 成本模型的參數（CBBA 出價用）：M0 只載入、檢查，**還沒拿來用**（M1 的 4f 第二批才改成從這裡讀；目前的值在
-# swarm_cbba/config/cbba_uav.yaml、cbba_v60.yaml，兩邊先寫一樣）。
+# 成本模型的參數（CBBA 出價用）：cbba_node 給 registry_dir 時讀（M1 1d，2026-11-15）。優先順序：程式預設 < 這裡 < 明確給的參數
+#（命令列 -p、params 檔；不同時印警告）。程式預設和這裡的數值一樣，所以不給 registry_dir 時結果相同。
 #   cruise_speed          出價用的標稱速度（m/s）
 #   energy_per_meter      每公尺耗電（%）
 #   hover_energy_per_sec  現場每秒耗電（%）
@@ -17,8 +17,8 @@ platforms:
   - name: uav
     code: 1
     description: 旋翼無人機（PX4）
-    cruise_speed: 5.0           # ScoringParams 的預設（cbba_uav.yaml 沒設）
-    energy_per_meter: 0.5       # AgentState 的預設
+    cruise_speed: 0.5           # 照無人機 BT 的預設（uav_px4_bt/config/uav_bt.yaml）；SITL 用 CBBA_SPEED 蓋過（itest uav 5、demo 3）
+    energy_per_meter: 0.5       # endurance_s > 0：每公尺、每秒耗電由續航換算（100 / 續航、再除以速度），這兩個不用
     hover_energy_per_sec: 0.2
     safety_reserve: 20.0
     endurance_s: 900            # 2-1b：室內續航 900 s；SITL 的電池也設 900 s
@@ -27,7 +27,7 @@ platforms:
   - name: quadruped
     code: 2
     description: 四足機器狗（Ghost V60）
-    cruise_speed: 1.0           # 佔位，待伯宇實測（cbba_core/doc/ugv_tuning.md）
+    cruise_speed: 1.0           # 佔位，待伯宇實測（狗的 BT 沒有速度設定，速度在 Nav2；cbba_core/doc/ugv_tuning.md）
     energy_per_meter: 0.1
     hover_energy_per_sec: 0.05
     safety_reserve: 20.0

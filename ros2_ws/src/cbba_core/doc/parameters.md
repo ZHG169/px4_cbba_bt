@@ -20,8 +20,8 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | 參數 | 預設 | 什麼時候要改 |
 |---|---|---|
 | `energy_per_meter`、`hover_energy_per_sec` | 0.5、0.2（SITL：0.022、0.111） | **一定要校正**。換機型、換電池、上實機都要重量 |
-| `cost_ref` | 50 m | 換場地時，取場地半寬左右 |
-| `battery_weight` | 1.0 | 只在 0～2 之間調；超過 2 沒有額外效果 |
+| `energy_weight` | 50 | TDR（2026-11-15）的耗電權重 w_E：用掉全部可用電量相當於少多少分；暫定，`docs/sim_scenario_plan.md` 第八節的實驗調 |
+| `half_life_by_priority` | [60, 120, 300, 600] s | 任務沒帶 half_life 時 P0～P3 的預設；越短越偏好先到的載具 |
 | `lost_timeout` | 1.5 s | 網路很差、常誤判失聯時加大（全隊要一樣） |
 | `takeover_by_priority` | [10, 15, 30, 30] s | 失聯接手：已接受任務的持有者失聯後多久重新競標，依優先級 P0～P3（2026-11-13；舊的 `takeover_fire`＝P0、`takeover_patrol`＝P1～P3 仍可用，當成它的預設）。全隊要一樣 |
 | `assign_hold` | 0.4 s | 同一個任務要連續排在路徑第一位這麼久，才發到 `current_task`（2026-10-12 起 0.4，機器狗端 spec §2.3 規則 1：2 個廣播週期；原本 0.6）。協商途中的 10 ms 級來回換手不會傳給 BT；調低要驗證不會造成指派震盪 |
@@ -31,6 +31,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
 | `registry_dir` | 空（或環境變數 `CBBA_REGISTRY_DIR`） | 2-1b 註冊表的目錄（`<repo>/registry`，2026-11-14）：從 `fleet.yaml` 讀自己的平台與能力（取代 `capabilities`）、閘道的機號（取代 `gateways`）；`tools.yaml` 的位元位置要和程式一致，註冊表有錯就拒絕啟動。空 = 照參數 |
+| `endurance_s` | 無人機 900 s、狗 0 | 續航換算的能量模型（M1，2026-11-15）：> 0 時每秒耗電 = 100 / endurance_s、每公尺 = 每秒 / `cruise_speed`（多旋翼依時間耗電）；`energy_per_meter`、`hover_energy_per_sec` 有明確給時以它們為準。`cbba_uav.sh` 傳 `SIM_BAT_DRAIN` |
 | `gateways` | [200] | 閘道的機號：多跳時判斷閘道在不在線（某個聽得到的鄰居聽得到它）；直接聽得到的閘道不用列也認得（2026-11-14） |
 | `gateway_timeout` | 3 s | 這麼久沒聽到閘道（AGENT_STATE、多跳、確認）= 斷線：新的偵測只暫存，恢復後送出 |
 | `detection_buffer` | 64 | 還沒確認的偵測上限；滿了丟最舊的 |
@@ -94,6 +95,7 @@ AGENT_STATE 的 flight_state_valid、armed、offboard、landed 在 2026-10-12 �
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
 | `registry_dir` | 空（或環境變數 `CBBA_REGISTRY_DIR`） | 2-1b 註冊表的目錄（`<repo>/registry`，2026-11-14）：從 `fleet.yaml` 讀自己的平台與能力（取代 `capabilities`）、閘道的機號（取代 `gateways`）；`tools.yaml` 的位元位置要和程式一致，註冊表有錯就拒絕啟動。空 = 照參數 |
+| `endurance_s` | 無人機 900 s、狗 0 | 續航換算的能量模型（M1，2026-11-15）：> 0 時每秒耗電 = 100 / endurance_s、每公尺 = 每秒 / `cruise_speed`（多旋翼依時間耗電）；`energy_per_meter`、`hover_energy_per_sec` 有明確給時以它們為準。`cbba_uav.sh` 傳 `SIM_BAT_DRAIN` |
 | `gateways` | [200] | 閘道的機號：多跳時判斷閘道在不在線（某個聽得到的鄰居聽得到它）；直接聽得到的閘道不用列也認得（2026-11-14） |
 | `gateway_timeout` | 3 s | 這麼久沒聽到閘道（AGENT_STATE、多跳、確認）= 斷線：新的偵測只暫存，恢復後送出 |
 | `detection_buffer` | 64 | 還沒確認的偵測上限；滿了丟最舊的 |
@@ -130,8 +132,8 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `battery_weight` | 1.0 | 電池因子的權重。1 表示用完可用電量的路徑，成本變兩倍。實測只在 0～2 之間會改變分配 |
-| `cost_ref` | 50 m | 成本轉分數的基準：邊際成本 = 50 時分數是 value 的一半。不影響同一個任務誰贏，影響的是**不同價值的任務之間怎麼取捨**。取場地半寬左右 |
+| `energy_weight` | 50 | **時間折扣報酬（TDR，2026-11-15，`doc/formula/tdr_design.md`）**的耗電權重 w_E：路徑報酬 = Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量。用掉全部可用電量相當於少 50 分。全隊要一樣 |
+| `half_life_by_priority` | [60, 120, 300, 600] s | 任務沒帶 `half_life_s` 時依優先級 P0～P3 的預設：晚到 half_life 秒價值剩一半。0 = 不打折。全隊要一樣 |
 | `max_bundle` | 5 | 一台最多同時排幾個任務。限制計算量（約 O(任務數 × n³)）和規劃視野 |
 
 公式與實驗見 `cbba_parameters.md`。
@@ -223,11 +225,10 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 | 常數 | 值 | 說明 |
 |---|---|---|
 | `speed_margin` | 0.8 | 規劃用速度 = `cruise_speed` × 0.8，把到達時間估晚一點，寧可以為會遲到也不要答應了卻趕不上 |
-| `min_deadline` | 1.0 s | 剩餘期限的下限，避免除以零。逾期的任務成本很大但還是可以接（軟限制） |
 | `score_epsilon` | 1e-3 | 分數相差在這以內視為平手，由機號小的得標。分數用 float32 傳，精度約 1e-5 |
 | `rebid_threshold` | 0.1 | 重新評估時，分數變動超過 10% 才更新。避免分數小幅抖動讓任務在兩台之間換手 |
 
-`battery_weight`、`cost_ref`、`max_bundle` 已開成 ROS 參數（見上）。
+`energy_weight`、`half_life_by_priority`、`max_bundle` 已開成 ROS 參數（見上）。2026-11-15 換成 TDR 時拿掉 `battery_weight`、`cost_ref`、`time_ref`、`min_deadline`（舊公式見 `doc/formula/formula_design.md`）。
 
 ---
 

@@ -1,6 +1,7 @@
 #include "cbba_core/scoring.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include "cbba_core/capabilities.hpp"
@@ -8,6 +9,23 @@
 
 namespace cbba_core
 {
+
+double halfLifeOf(const Task & task, const ScoringParams & params)
+{
+  if (task.ext.half_life_s > 0) {
+    return static_cast<double>(task.ext.half_life_s);
+  }
+  return std::max(params.half_life_by_priority[priorityLevel(task)], 0.0);
+}
+
+double decayedValue(const Task & task, double arrival, const ScoringParams & params)
+{
+  const double h = halfLifeOf(task, params);
+  if (!(h > 0.0)) {
+    return task.value;
+  }
+  return task.value * std::exp2(-std::max(arrival, 0.0) / h);
+}
 
 PathEval evaluatePath(
   const AgentState & agent, const std::vector<Task> & ordered_tasks, double now,
@@ -31,7 +49,8 @@ PathEval evaluatePath(
     leg.distance = distance(current, task.position);
     leg.arrival = clock + leg.distance / speed;
     leg.completion = leg.arrival + task.duration_sec;
-    if (eval.legs.empty() && head_remaining >= 0.0) {
+    const bool head_running = eval.legs.empty() && head_remaining >= 0.0;
+    if (head_running) {
       // 已經在執行：完成時間用 BT 的預估
       leg.completion = head_remaining;
       leg.arrival = std::min(leg.arrival, head_remaining);
@@ -43,23 +62,23 @@ PathEval evaluatePath(
       leg.completion += wasted;
     }
     // release：還不能開始就等（執行中、用 BT 剩餘時間的第一個任務不用）
-    const bool head_running = eval.legs.empty() && head_remaining >= 0.0;
     if (!head_running && task.ext.release > 0.0 && task.ext.release - now > leg.arrival) {
       const double wait = task.ext.release - now - leg.arrival;
       leg.arrival += wait;
       leg.completion += wait;
     }
-    const double remaining = (task.created + task.deadline_sec) - now;
-    leg.remaining_deadline = std::max(remaining, params.min_deadline);
-    leg.overdue = leg.arrival > remaining;
-    if (leg.overdue && task.ext.deadline_hard && task.explicit_deadline && task.id != exempt) {
-      hard_late = true;   // 硬期限來不及：這條路徑不可行
+    // 期限只用在硬期限的可行性；軟期限不影響分數（「急」由 half_life 表達）
+    if (task.explicit_deadline) {
+      leg.overdue = leg.arrival > (task.created + task.deadline_sec) - now;
+      if (leg.overdue && task.ext.deadline_hard && task.id != exempt) {
+        hard_late = true;   // 硬期限來不及：這條路徑不可行
+      }
     }
     reserve = std::max(reserve, static_cast<double>(task.ext.min_battery_reserve));
-    leg.temporal = leg.arrival / leg.remaining_deadline;
-    leg.cost = leg.distance * leg.temporal;
+    leg.half_life = halfLifeOf(task, params);
+    leg.reward = task.success_prob * decayedValue(task, leg.arrival, params);   // 期望價值
 
-    eval.st_cost += leg.cost;
+    eval.reward += leg.reward;
     eval.legs.push_back(leg);
     current = task.position;
     clock = leg.completion;
@@ -68,29 +87,15 @@ PathEval evaluatePath(
   const PathEnergy energy = pathEnergy(agent, ordered_tasks);
   eval.path_energy = energy.total;
   eval.battery_after = agent.battery - energy.total;
-
   if (ordered_tasks.empty()) {
-    eval.battery_cost = 0.0;
-    eval.total_cost = 0.0;
-    return eval;
+    return eval;   // 原地待命：報酬 0、不耗電
   }
 
-  eval.battery_cost = batteryCost(agent.battery, energy.total, reserve);
-  eval.feasible = std::isfinite(eval.battery_cost) && !hard_late;
-  eval.total_cost = eval.feasible ?
-    eval.st_cost * (1.0 + params.battery_weight * eval.battery_cost) : kInf;
+  eval.battery_fraction = batteryCost(agent.battery, energy.total, reserve);
+  eval.feasible = std::isfinite(eval.battery_fraction) && !hard_late;
+  eval.energy_cost = eval.feasible ? params.energy_weight * eval.battery_fraction : kInf;
+  eval.score = eval.feasible ? eval.reward - eval.energy_cost : -kInf;
   return eval;
-}
-
-double costToScore(double value, double marginal_cost, double cost_ref)
-{
-  if (!std::isfinite(marginal_cost) || !(value > 0.0)) {
-    return 0.0;
-  }
-  if (!(cost_ref > 0.0)) {
-    throw std::invalid_argument("cost_ref must be positive");
-  }
-  return value / (1.0 + std::max(marginal_cost, 0.0) / cost_ref);
 }
 
 Insertion bestInsertion(
@@ -116,28 +121,28 @@ Insertion bestInsertion(
     if (!eval.feasible || (limits.allow && !limits.allow(eval, pos, candidate))) {
       continue;
     }
-    double marginal = eval.total_cost - current.total_cost;
+    double gain = eval.score - current.score;
     if (pos == 0 && limits.preempt_drops_head && !path.empty()) {
-      // 搶占：被搶占的任務會交回重新競標，比較「拿掉它之後」插入前後的成本
+      // 搶占：被搶占的任務會交回重新競標，比較「拿掉它之後」插入前後的報酬
       std::vector<Task> rest(path.begin() + 1, path.end());
       std::vector<Task> with = rest;
       with.insert(with.begin(), task);
       const PathEval before = evaluatePath(agent, rest, now, params, -1.0, limits.exempt);
       const PathEval after = evaluatePath(agent, with, now, params, -1.0, limits.exempt);
       if (before.feasible && after.feasible) {
-        marginal = after.total_cost - before.total_cost;
+        gain = after.score - before.score;
       }
     }
-    if (marginal < best.marginal_cost) {
+    if (!best.feasible || gain > best.gain) {
       best.feasible = true;
       best.position = pos;
-      best.marginal_cost = marginal;
+      best.gain = gain;
       best.eval = std::move(eval);
     }
   }
 
   if (best.feasible) {
-    best.score = costToScore(task.success_prob * task.value, best.marginal_cost, params.cost_ref);   // 期望價值
+    best.score = std::max(best.gain, 0.0);   // 報酬沒有增加就不出價
   }
   return best;
 }

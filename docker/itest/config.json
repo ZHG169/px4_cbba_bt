@@ -81,7 +81,7 @@
   },
 
   "comm": {
-    "start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:=uav{id}_cbba_node -p agent_id:={id} -p agent_type:=UAV",
+    "start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:=uav{id}_cbba_node -p agent_id:={id} -p agent_type:=UAV -p cruise_speed:=5.0 -p max_bundle:=5",
     "stop_pattern": "__node:=uav{id}_cbba_node( |$)",
     "positions": {"1": [0.0, 0.0], "2": [0.0, 20.0], "3": [20.0, 0.0]},
     "warmup": 6.0,

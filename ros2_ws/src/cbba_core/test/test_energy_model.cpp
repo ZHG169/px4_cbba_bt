@@ -79,3 +79,17 @@ TEST(EnergyModel, EmptyPathCostsNothing)
   const PathEnergy e = pathEnergy(agent, {});
   EXPECT_DOUBLE_EQ(e.total, 0.0);
 }
+
+TEST(EnergyModel, EnduranceDerivedCoefficients)
+{
+  // 續航 900 s（2-1b 的 UAV、SITL 的模擬電池）：每秒 0.111 %；0.5 m/s 時每公尺 0.222 %、5 m/s 時 0.0222 %（M1）
+  const auto slow = energyFromEndurance(900.0, 0.5);
+  EXPECT_NEAR(slow.hover_energy_per_sec, 100.0 / 900.0, 1e-12);
+  EXPECT_NEAR(slow.energy_per_meter, 100.0 / 900.0 / 0.5, 1e-12);
+  EXPECT_NEAR(energyFromEndurance(900.0, 5.0).energy_per_meter, 100.0 / 4500.0, 1e-12);
+  // 懸停滿 900 s 剛好用完 100 %；以 cruise_speed 飛 900 s 也是
+  EXPECT_NEAR(slow.hover_energy_per_sec * 900.0, 100.0, 1e-9);
+  EXPECT_NEAR(slow.energy_per_meter * 0.5 * 900.0, 100.0, 1e-9);
+  EXPECT_THROW(energyFromEndurance(0.0, 1.0), std::invalid_argument);
+  EXPECT_THROW(energyFromEndurance(900.0, 0.0), std::invalid_argument);
+}

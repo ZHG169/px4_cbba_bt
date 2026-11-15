@@ -1,30 +1,27 @@
-// 火場版的成本與分數計算
+// 出價：時間折扣報酬（TDR；M1，2026-11-15；設計與數值例子見 doc/formula/tdr_design.md）
 //
-// 成本沿用 Velhal 2022 的「空間成本 x 時間成本」形式，再乘上電池因子：
-//   每個任務   cost_j = Ls_j * Lt_j
-//              Ls_j   = 從前一個位置飛到任務點的距離
-//              Lt_j   = 到達時間 / 距離期限剩餘的時間（1 以上表示逾期）
-//   整條路徑   C_ST    = sum(cost_j)
-//              C_total = C_ST * (1 + battery_weight * 路徑耗能 / 可用電量)
-//   電量不足以做完並返航時，路徑不可行。
+// CBBA 原論文（Choi, Brunet, How 2009）的報酬形式：任務的價值隨到達時間打折，出價是「加入這個任務後整條路徑的報酬增加多少」。
+//   路徑報酬   S(p) = Σ_j  p_j × v_j × 2^(−τ_j / h_j)  −  w_E × E(p) / (電量 − 存量)
+//   出價       c_j  = max_n [ S(p ⊕_n j) − S(p) ]；≤ 0 不出價（做這個任務不划算）
+//     v_j   任務的價值
+//     τ_j   照這條路徑到達 j 的時間（從現在起算）：距離 / (速度 × speed_margin)，加上 release 的等待、失敗過的期望重試時間
+//     h_j   half_life：任務的 ext.half_life_s，沒帶用 half_life_by_priority[P]（P0～P3）；0 = 不打折
+//     p_j   這台做 j 的估計成功率 1 / (1 + TRANSIENT 失敗次數)（2026-10-17；只在本機）
+//     E(p)  路徑耗電（含返航，energy_model.hpp）；存量 = max(載具的 safety_reserve, 路徑上各任務的 min_battery_reserve)
+//     w_E   energy_weight：用掉全部可用電量相當於少多少分（和價值同單位）
+//   插入的任務讓路徑上其他任務晚到，它們少掉的報酬直接算在出價裡（舊公式只算時間成本的變化）。
 //
-// 對外使用分數（越高越好，0 表示做不到）：
-//   score = value / (1 + 邊際成本 / cost_ref)
+// 可行性（不可行 = 出價 0）：平台與能力（capabilities.hpp 的 fitness）、做完返航後電量 ≥ 存量、
+//   硬期限（ext.deadline_hard 且有期限）來不及；執行中的任務（exempt）不檢查硬期限。軟期限不影響分數（「急」由 half_life 表達）。
 //
-// 失敗過的任務（2026-10-17，宜臻「CBBA 任務失敗排除與人工接管：實作說明」的需求 1）：成功率 p = Task::success_prob
-//   期望價值       value → p × value
-//   期望到達時間   到達時間 + (1 − p) / p × (前往時間 + 執行時間)：成功前預期失敗 (1 − p) / p 次（幾何分佈）；
-//                  路徑後面的任務一起延後。執行中、有 BT 剩餘時間（head_remaining）的第一個任務不加
-//   p = 1（沒失敗過）時和原本的公式完全相同。電量的可行性仍以一次嘗試計算
+// 失敗過的任務（2026-10-17，宜臻的實作說明需求 1）：期望價值 p × v；期望到達時間多 (1 − p)/p ×（前往＋執行），
+//   路徑後面的任務一起延後；執行中、有 BT 剩餘時間（head_remaining）的第一個任務不加。
 //
-// 任務定義的時間與電量限制（4f 第一批，2026-11-13，合約第二節「異質成本」）：公式不變，只加可行性與到達時間的條件
-//   硬期限   ext.deadline_hard（且有期限）：到達時間超過期限 → 整條路徑不可行。執行中的任務（exempt）不檢查：做到一半期限到了
-//            不撤銷，照常做完
-//   release  ext.release：最早可以開始的時刻。早到要等：到達時間 = max(實際到達, release)，等的時間算進時間成本、後面的跟著延後
-//   電量     做完並返航後至少要剩 max(載具的 safety_reserve, 路徑上各任務的 ext.min_battery_reserve)
-//   舊型任務這些欄位都是 0，結果和原本完全相同
+// 取代 2026-10-05 的「空間成本 × 時間成本 × 電池因子」（doc/formula/formula_design.md，舊版）：
+//   cost_ref、battery_weight、time_ref、min_deadline 拿掉
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <vector>
@@ -37,10 +34,10 @@ namespace cbba_core
 struct ScoringParams
 {
   double cruise_speed{5.0};      // 標稱速度 (m/s)；載具自己有設定時以載具的為準
-  double speed_margin{0.8};      // 規劃時用 cruise_speed * speed_margin，預留餘裕
-  double battery_weight{1.0};    // 電池因子的權重；1 表示用完可用電量的路徑成本變兩倍
-  double cost_ref{50.0};         // 成本轉分數的基準（公尺）
-  double min_deadline{1.0};      // 剩餘期限的下限（秒），避免除以零
+  double speed_margin{0.8};      // 估到達時間用 cruise_speed * speed_margin，預留餘裕
+  double energy_weight{50.0};    // w_E：用掉全部可用電量相當於少多少分（暫定，docs/sim_scenario_plan.md 第八節的實驗調）
+  // 任務沒帶 half_life 時依優先級 P0～P3 的預設（秒）；0 = 不打折
+  std::array<double, 4> half_life_by_priority{{60.0, 120.0, 300.0, 600.0}};
   double score_epsilon{1e-3};    // 兩個分數相差在此以內視為平手
   std::size_t max_bundle{5};     // 一次最多接幾個任務
   double rebid_threshold{0.1};   // 重新評估時，分數變動超過此比例才更新
@@ -50,42 +47,44 @@ struct ScoringParams
 struct LegEval
 {
   TaskId task_id{0};
-  double distance{0.0};            // Ls
+  double distance{0.0};
   double arrival{0.0};             // 到達時間（從現在起算，秒）
   double completion{0.0};          // 完成時間（從現在起算，秒）
-  double remaining_deadline{0.0};  // 距離期限還有多久（秒）
-  double temporal{0.0};            // Lt = arrival / remaining_deadline
-  double cost{0.0};                // Ls * Lt
-  bool overdue{false};             // 到達時已超過期限
+  double half_life{0.0};           // 用的 half_life（秒；0 = 不打折）
+  double reward{0.0};              // p × v × 2^(−到達 / half_life)
+  bool overdue{false};             // 有期限、到達時已超過（硬期限時不可行）
 };
 
 struct PathEval
 {
-  bool feasible{true};       // 電量不夠、或硬期限來不及時不可行（軟期限只影響成本）
-  double st_cost{0.0};       // C_ST
-  double path_energy{0.0};   // 含回程
-  double battery_after{0.0}; // 做完並返航後的電量
-  double battery_cost{0.0};  // 路徑耗能 / 可用電量
-  double total_cost{0.0};    // C_total；不可行時為無限大
+  bool feasible{true};             // 電量不夠、或硬期限來不及時不可行
+  double reward{0.0};              // Σ 各任務的報酬
+  double path_energy{0.0};         // 含回程
+  double battery_after{0.0};       // 做完並返航後的電量
+  double battery_fraction{0.0};    // 路徑耗電 / 可用電量
+  double energy_cost{0.0};         // energy_weight × battery_fraction
+  double score{0.0};               // reward − energy_cost；不可行時為 −無限大，空路徑為 0
   std::vector<LegEval> legs;
 };
 
-// 依給定順序執行 tasks 的成本與可行性。
+// 這個任務用的 half_life（秒）：任務的 ext.half_life_s，沒有就照優先級的預設；0 = 不打折
+double halfLifeOf(const Task & task, const ScoringParams & params);
+// 到達時間（從現在起算，秒）時的價值：v × 2^(−到達 / half_life)（不含成功率）；不會超過 v
+double decayedValue(const Task & task, double arrival, const ScoringParams & params);
+
+// 依給定順序執行 tasks 的報酬與可行性。
 // head_remaining ≥ 0：第一個任務已經在執行，還要這麼多秒才完成（BT 回報的預估），用它代替估計的到達＋執行時間
 // exempt：執行中的任務，不檢查它的硬期限（0 = 沒有）
 PathEval evaluatePath(
   const AgentState & agent, const std::vector<Task> & ordered_tasks, double now,
   const ScoringParams & params, double head_remaining = -1.0, TaskId exempt = 0);
 
-// 邊際成本轉分數；不可行時回傳 0
-double costToScore(double value, double marginal_cost, double cost_ref);
-
 struct Insertion
 {
-  bool feasible{false};
+  bool feasible{false};         // 有可行的插入位置（報酬增加可能 ≤ 0，那時 score 是 0）
   std::size_t position{0};      // 插入 path 的位置
-  double marginal_cost{kInf};
-  double score{0.0};
+  double gain{-kInf};           // 路徑報酬增加多少
+  double score{0.0};            // 出價 = max(gain, 0)
   PathEval eval;                // 插入後整條路徑的評估
 };
 
@@ -102,7 +101,7 @@ struct InsertionLimits
   std::function<bool(const PathEval &, std::size_t, const std::vector<Task> &)> allow;
 };
 
-// 嘗試把 task 插入 path 的每個位置（min_position 以後、allow 允許的），回傳邊際成本最小的可行位置。
+// 嘗試把 task 插入 path 的每個位置（min_position 以後、allow 允許的），回傳路徑報酬增加最多的可行位置。
 // 平台或能力不符（capabilities.hpp 的 fitness）、任務不是 OPEN、或沒有可行位置時，feasible 為 false、score 為 0。
 Insertion bestInsertion(
   const AgentState & agent, const std::vector<Task> & path, const Task & task, double now,

@@ -44,4 +44,14 @@ struct PathEnergy
 // tasks 為空時能量為 0（原地待命，不計回程）。
 PathEnergy pathEnergy(const AgentState & agent, const std::vector<Task> & tasks);
 
+// 續航換算的能量模型（M1，2026-11-15）：電量依時間下降的載具（多旋翼：懸停和巡航的功率差不多，PX4 的模擬電池也是
+// 依時間線性下降），滿電能用 endurance_s 秒 → 每秒 100 / endurance_s %、每公尺 = 每秒 / cruise_speed。
+// endurance_s 或 cruise_speed 不是正數時丟出 std::invalid_argument
+struct EnduranceEnergy
+{
+  double hover_energy_per_sec{0.0};
+  double energy_per_meter{0.0};
+};
+EnduranceEnergy energyFromEndurance(double endurance_s, double cruise_speed);
+
 }  // namespace cbba_core

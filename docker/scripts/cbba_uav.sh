@@ -18,8 +18,8 @@
 #                   ＋ fire_detector_node；參數和 task_manager 相同
 #    task_executor  px4_waypoint_node/task_executor
 #
-#  能量模型對齊 PX4 的模擬電池（px4_sitl.sh 設 SIM_BAT_DRAIN）：模擬電池依時間耗電，所以
-#    懸停每秒 = 100 / SIM_BAT_DRAIN（%）、每公尺 = 懸停每秒 / CBBA_SPEED。
+#  能量模型對齊 PX4 的模擬電池（px4_sitl.sh 設 SIM_BAT_DRAIN）：模擬電池依時間耗電，cbba_node 用 endurance_s 換算
+#    懸停每秒 = 100 / SIM_BAT_DRAIN（%）、每公尺 = 懸停每秒 / CBBA_SPEED（2026-11-15 起換算搬進 cbba_node，這裡只傳續航）。
 #  CBBA_START_GATE=<檔案>：cbba_node 等這個檔案出現才啟動（其他節點照常，飛機照常起飛）；itest demo 用來讓全隊同時開始。
 #  CBBA_TAKEOFF_GATE=<檔案>：BT 等這個檔案出現才啟動（才解鎖起飛）；itest demo 用來讓全隊同時起飛。
 #  CBBA_SPEED（預設 0.5 m/s，2026-10-24 從 5 改）、CBBA_ALTITUDE（預設 5 m；yard 場景用 8 m）同時給 cbba_node 和執行者，
@@ -88,7 +88,7 @@ ALT="$(awk -v v="${CBBA_ALTITUDE:-5.0}" 'BEGIN { printf "%.3f", v }')"
 IFS=, read -r ORIGIN_X ORIGIN_Y <<< "${UAV_SPAWN_ORIGIN:-0,0}"
 SPAWN="$(awk -v x="${ORIGIN_X}" -v y="${ORIGIN_Y}" -v n="${UAV_ID}" -v s="${UAV_SPAWN_SPACING:-2.0}" \
     'BEGIN { printf "[%.2f,%.2f,0.0]", x, y + (n - 1) * s }')"
-HOVER=$(awk -v d="${DRAIN}" 'BEGIN { printf "%.4f", 100.0 / d }')
+HOVER=$(awk -v d="${DRAIN}" 'BEGIN { printf "%.4f", 100.0 / d }')                    # 只給 log 看；換算在 cbba_node
 PER_M=$(awk -v d="${DRAIN}" -v v="${SPEED}" 'BEGIN { printf "%.4f", 100.0 / d / v }')
 echo "[cbba_uav] 能量模型：懸停 ${HOVER} %/s、每公尺 ${PER_M} %（續航 ${DRAIN} s、${SPEED} m/s）；巡檢高度 ${ALT} m；出生點 ${SPAWN}"
 
@@ -146,7 +146,7 @@ start_cbba() {
         --params-file "$(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_uav.yaml" \
         -p agent_id:="${UAV_ID}" \
         -p cruise_speed:="${SPEED}" -p recon_altitude:="${ALT}" \
-        -p hover_energy_per_sec:="${HOVER}" -p energy_per_meter:="${PER_M}" "$@"
+        -p endurance_s:="$(awk -v d="${DRAIN}" 'BEGIN { printf "%.1f", d }')" "$@"   # 一定要小數：整數會被 ROS 2 拒絕（double 參數）
 }
 start_cbba "$@" 2>&1 | prefix cbba &
 PIDS+=($!)

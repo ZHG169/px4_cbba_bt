@@ -257,7 +257,7 @@ def plot_allocation(out_dir, scenario=None):
         state = (f"converged in {summary['convergence_time']:.2f} s"
                  if summary.get("converged") else "NOT converged")
         title += (f" — packet loss {summary['loss'] * 100:.0f}%, {state}, "
-                  f"battery weight {summary['battery_weight']:g}")
+                  f"energy weight {summary.get('energy_weight', summary.get('battery_weight', 0)):g}")
     ax.set_title(title)
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")

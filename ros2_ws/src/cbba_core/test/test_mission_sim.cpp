@@ -111,11 +111,14 @@ TEST(MissionSim, BatteryRtlWithTaskIsWrongAccept)
 
 TEST(MissionSim, FailedTaskTakenOverByAnotherAgent)
 {
-  // 近的那台耗電被低估、做不完返航；任務交回競標池，由另一台完成（記一次接錯，結果是完成）
+  // 近的那台耗電被低估、做不完返航；任務交回競標池，由另一台完成（記一次接錯，結果是完成）。
+  // 2026-11-15 起出價是 TDR：能耗項 w_E × 耗電 / 可用電量會讓電量 40% 的近的那台輸給 100% 的遠的那台（這是 TDR 刻意的），
+  // 這裡要測的是「接了做不完 → 交回、別台接手」，所以關掉能耗項（w_E = 0），只比時間折扣，近的那台先得標
   MissionAgent near = uav(1, 0, 0, 40);
   near.drain_rate *= 3.0;
-  const MissionResult r = runMission({near, uav(2, 0, -80, 100)}, {task(1, 60, 0, 0.0, 10.0)},
-      MissionConfig{}, 1);
+  MissionConfig c;
+  c.params.energy_weight = 0.0;
+  const MissionResult r = runMission({near, uav(2, 0, -80, 100)}, {task(1, 60, 0, 0.0, 10.0)}, c, 1);
   EXPECT_LT(r.tasks[0].first_assigned, 1.0);   // 一開始是近的那台得標
   EXPECT_EQ(r.wrong_accepts, 1);
   EXPECT_EQ(r.tasks[0].failures, 1);

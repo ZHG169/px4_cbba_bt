@@ -98,6 +98,7 @@
 #include "cbba_core/assignment_manager.hpp"
 #include "cbba_core/capabilities.hpp"
 #include "cbba_core/cbba_comm.hpp"
+#include "cbba_core/energy_model.hpp"
 #include "cbba_core/failure_codes.hpp"
 #include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
@@ -171,7 +172,8 @@ TaskMsg toMsg(const Task & t)
   m.position.y = t.position.y;
   m.position.z = t.position.z;
   m.created = toRosTime(t.created);
-  m.deadline_sec = static_cast<float>(t.deadline_sec);
+  // 沒有期限的任務送 0（和 new_task、InjectTask 的「0 = 沒有」一致）；核心裡的 300 s 只是佔位，出價不用它（M1）
+  m.deadline_sec = t.explicit_deadline ? static_cast<float>(t.deadline_sec) : 0.0F;
   m.value = static_cast<float>(t.value);
   m.duration_sec = static_cast<float>(t.duration_sec);
   m.status = static_cast<std::uint8_t>(t.status);
@@ -303,7 +305,9 @@ public:
     s.id = agent_id_;
     s.type = uav ? AgentType::UAV : AgentType::UGV;
     if (uav) {
-      s.cruise_speed = 5.0;   // PX4 多旋翼的 MPC_XY_CRUISE
+      // 和無人機 BT 的預設一致（uav_px4_bt/config/uav_bt.yaml 的 cruise_speed 0.5，2026-11-15）；
+      // 原本 5.0（PX4 的 MPC_XY_CRUISE），但 BT 實際飛 0.5，出價估的時間會差 10 倍。cbba_uav.sh、itest 用 -p 給實際的速度
+      s.cruise_speed = 0.5;
     } else {
       // 狗的能量模型是佔位值（未校正）：步行約 1 m/s；續航、耗電要用狗的實測資料換掉（見 cbba_core/doc/ugv_tuning.md）
       s.safety_reserve = 20.0;
@@ -319,6 +323,24 @@ public:
     s.energy_per_meter = declare_parameter<double>("energy_per_meter", s.energy_per_meter);
     s.hover_energy_per_sec = declare_parameter<double>("hover_energy_per_sec", s.hover_energy_per_sec);
     s.cruise_speed = declare_parameter<double>("cruise_speed", s.cruise_speed);
+    // 續航換算的能量模型（M1，2026-11-15）：endurance_s > 0 時，每秒耗電 = 100 / endurance_s、每公尺 = 每秒 / cruise_speed
+    //（多旋翼依時間耗電；原本 cbba_uav.sh 從 SIM_BAT_DRAIN 算好再用 -p 傳，搬到這裡實機不經腳本也對）。
+    // 預設：無人機 900 s（2-1b 的續航、SITL 的模擬電池），狗 0（照每公尺、每秒的參數）。
+    // energy_per_meter、hover_energy_per_sec 有明確給（命令列、params 檔）時以它們為準
+    const double endurance = declare_parameter<double>("endurance_s", uav ? 900.0 : 0.0);
+    {
+      const auto & given = get_node_parameters_interface()->get_parameter_overrides();
+      const bool explicit_energy = given.count("energy_per_meter") > 0 || given.count("hover_energy_per_sec") > 0;
+      if (endurance > 0.0 && !explicit_energy) {
+        const EnduranceEnergy e = energyFromEndurance(endurance, s.cruise_speed);
+        s.hover_energy_per_sec = e.hover_energy_per_sec;
+        s.energy_per_meter = e.energy_per_meter;
+      }
+      RCLCPP_INFO(get_logger(), "能量模型：每公尺 %.4f %%、每秒 %.4f %%（%s）、存量 %.0f %%、速度 %.2f m/s",
+        s.energy_per_meter, s.hover_energy_per_sec,
+        endurance > 0.0 && !explicit_energy ? ("續航 " + std::to_string(static_cast<int>(endurance)) + " s 換算").c_str() :
+        "參數", s.safety_reserve, s.cruise_speed);
+    }
     // 能力標籤（2-1b M0 合約第一節，2026-11-11）：之後從 fleet.yaml 讀；空 = 依 agent_type 的預設
     // （UAV：mobility_air、rgb_camera；UGV：mobility_ground、rgb_camera），和原本的相容表結果相同
     const auto cap_names = declare_parameter<std::vector<std::string>>(
@@ -333,6 +355,8 @@ public:
     // 閘道的機號從 fleet.yaml 的 gateways；tools.yaml 的位元位置要和這版程式一致，否則拒絕啟動。空 = 不用註冊表（照參數）
     const std::string registry_dir = declare_parameter<std::string>("registry_dir", envOr("CBBA_REGISTRY_DIR", ""));
     std::optional<swarm_cbba::Registry> registry;
+    // bundle 上限的預設依平台（和 platforms.yaml 一樣：UAV 2、狗 5）；有註冊表時用它的 max_bundle（M1 1d，2026-11-15）
+    std::size_t platform_bundle = uav ? 2 : 5;
     if (!registry_dir.empty()) {
       registry = swarm_cbba::loadRegistry(registry_dir);   // 讀不到、格式不對：丟例外，拒絕啟動
       const auto errors = swarm_cbba::checkRegistry(*registry);
@@ -376,15 +400,31 @@ public:
         }
         RCLCPP_INFO(get_logger(), "註冊表 %s：%s（%s），能力 %s", registry_dir.c_str(), me->name.c_str(),
           me->platform.c_str(), capabilitiesToString(availableCaps(s)).c_str());
+        applyPlatform(*platform, s);
+        platform_bundle = platform->max_bundle;
       }
     }
 
     // ---------- 出價、協定、UDP ----------
     ScoringParams scoring;
-    scoring.battery_weight = declare_parameter<double>("battery_weight", scoring.battery_weight);
-    scoring.cost_ref = declare_parameter<double>("cost_ref", scoring.cost_ref);
+    // 出價：時間折扣報酬（TDR，M1，2026-11-15；cbba_core/doc/formula/tdr_design.md）。全隊要一樣
+    //   energy_weight：用掉全部可用電量相當於少多少分；half_life_by_priority：任務沒帶 half_life 時 P0～P3 的預設（秒，0 = 不打折）
+    scoring.energy_weight = declare_parameter<double>("energy_weight", scoring.energy_weight);
+    {
+      const auto hl = declare_parameter<std::vector<double>>("half_life_by_priority",
+          std::vector<double>(scoring.half_life_by_priority.begin(), scoring.half_life_by_priority.end()));
+      if (hl.size() != 4) {
+        throw std::invalid_argument("half_life_by_priority needs 4 values (P0..P3)");
+      }
+      for (std::size_t p = 0; p < 4; ++p) {
+        scoring.half_life_by_priority[p] = hl[p];
+      }
+    }
     scoring.max_bundle = static_cast<std::size_t>(
-      declare_parameter<int>("max_bundle", static_cast<int>(scoring.max_bundle)));
+      declare_parameter<int>("max_bundle", static_cast<int>(platform_bundle)));
+    if (registry && scoring.max_bundle != platform_bundle) {
+      RCLCPP_WARN(get_logger(), "註冊表：max_bundle 用參數的 %zu（platforms.yaml 是 %zu）", scoring.max_bundle, platform_bundle);
+    }
     // 同一個任務 TRANSIENT 失敗到這個次數就永久不出價；0 = 不啟用（只靠成功率打折）
     scoring.max_failures = declare_parameter<int>("max_failures", scoring.max_failures);
 
@@ -941,6 +981,39 @@ private:
     report(now);
     logStats(now);
     publishTx(now);
+  }
+
+  // platforms.yaml 的成本模型（M1 1d，2026-11-15）：優先順序 程式預設 < 註冊表 < 明確給的參數（命令列、params 檔，
+  // 測試、SITL 用）；明確給的和註冊表不同時印警告。endurance_s > 0 的平台每公尺、每秒耗電由續航換算
+  void applyPlatform(const swarm_cbba::PlatformEntry & p, AgentState & s)
+  {
+    const auto & given = get_node_parameters_interface()->get_parameter_overrides();
+    const auto pick = [&](const char * name, double & field, double value) {
+        if (given.count(name) == 0) {
+          field = value;
+        } else if (std::fabs(field - value) > 1e-9) {
+          RCLCPP_WARN(get_logger(), "註冊表：%s 用參數的 %.4g（platforms.yaml 的 %s 是 %.4g）", name, field,
+            p.name.c_str(), value);
+        }
+      };
+    pick("cruise_speed", s.cruise_speed, p.cruise_speed);
+    pick("safety_reserve", s.safety_reserve, p.safety_reserve);
+    const bool explicit_energy = given.count("energy_per_meter") > 0 || given.count("hover_energy_per_sec") > 0;
+    double endurance = p.endurance_s;
+    if (given.count("endurance_s") > 0) {
+      endurance = get_parameter("endurance_s").as_double();
+    }
+    if (endurance > 0.0 && !explicit_energy) {
+      const EnduranceEnergy e = energyFromEndurance(endurance, s.cruise_speed);
+      s.hover_energy_per_sec = e.hover_energy_per_sec;
+      s.energy_per_meter = e.energy_per_meter;
+    } else {
+      pick("energy_per_meter", s.energy_per_meter, p.energy_per_meter);
+      pick("hover_energy_per_sec", s.hover_energy_per_sec, p.hover_energy_per_sec);
+    }
+    RCLCPP_INFO(get_logger(), "註冊表的平台 %s：速度 %.2f m/s、每公尺 %.4f %%、每秒 %.4f %%%s、存量 %.0f %%、bundle 上限 %zu",
+      p.name.c_str(), s.cruise_speed, s.energy_per_meter, s.hover_energy_per_sec,
+      endurance > 0.0 && !explicit_energy ? "（續航換算）" : "", s.safety_reserve, p.max_bundle);
   }
 
   // ===========================================================================

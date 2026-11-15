@@ -1,10 +1,10 @@
 // 離線模擬工具：讀取場景檔，執行 CBBA 協商，把結果寫成 CSV（再用 scripts/plot_results.py 畫圖）
 // run 另外輸出 bids.csv：協商結束後每台載具對每個任務算出的成本與出價，用來說明為什麼是誰得標
 //
-//   cbba_sim run     <場景檔>          [--loss 0.3] [--seed 1] [--battery-weight 1.0] [--out 目錄]
+//   cbba_sim run     <場景檔>          [--loss 0.3] [--seed 1] [--energy-weight 50] [--out 目錄]
 //   cbba_sim sweep   <場景檔|random>   [--trials 200] [--agents 3] [--tasks 6] [--out 目錄]
 //   cbba_sim weights <場景檔>          [--out 目錄]
-//   cbba_sim insert  <任務點檔>        [--trials 100] [--weights 0,1,5,20,100] [--batteries 100,70,45] [--out 目錄]
+//   cbba_sim insert  <任務點檔>        [--trials 100] [--weights 0,25,50,100,200] [--batteries 100,70,45] [--out 目錄]
 //       巡檢＋隨機插入的任務模擬（docs/sim_scenario_plan.md）：G 點一開始就有，R 點在隨機時刻插入；
 //       每個權重用同一組亂數（配對比較），統計完成／逾期／接了沒飛到／沒人接
 #include <algorithm>
@@ -40,7 +40,7 @@ struct Options
   int tasks{6};
   ScoringParams params;
   // insert
-  std::vector<double> weights{0.0, 1.0, 5.0, 20.0, 100.0};
+  std::vector<double> weights{0.0, 25.0, 50.0, 100.0, 200.0};   // 耗電權重 w_E（TDR，2026-11-15）
   std::vector<double> batteries{100.0, 70.0, 45.0};
   std::vector<double> endurance{300.0};   // PX4 的 SIM_BAT_DRAIN（秒）：一個值＝每台一樣
   double drain_error{0.1};
@@ -82,12 +82,12 @@ void usage()
     "  --seed N              亂數種子（預設 1）\n"
     "  --trials N            sweep 每個丟包率的次數（預設 200）\n"
     "  --agents N --tasks M  sweep random 時的規模（預設 3、6）\n"
-    "  --battery-weight W    電池權重（預設 1.0）\n"
+    "  --energy-weight W     耗電權重 w_E：用掉全部可用電量相當於少多少分（預設 50；舊名 --battery-weight）\n"
     "  --speed V             預設速度 m/s（場景檔有指定時以場景檔為準）\n"
-    "  --cost-ref C          成本轉分數的基準（預設 50）\n"
+
     "  --max-bundle N        一次最多接幾個任務（預設 5）\n"
     "insert 的選項（--trials 預設 100、--seed 決定插入時刻與網路）：\n"
-    "  --weights 0,1,5,20,100   比較的電池權重\n"
+    "  --weights 0,25,50,100,200   比較的耗電權重 w_E\n"
     "  --batteries 100,70,45    各台的初始電量（台數 = 個數；出生點 (0, (i-1)×spacing)）\n"
     "  --endurance 300          續航秒數（PX4 SIM_BAT_DRAIN，可以每台一個值）：耗電 100/續航 %/s\n"
     "  --drain-error 0.1        實際耗電和模型的誤差：每次試驗、每台在 ±這個比例內隨機\n"
@@ -120,12 +120,10 @@ bool parse(int argc, char ** argv, Options & opt)
         opt.agents = std::stoi(value);
       } else if (key == "--tasks") {
         opt.tasks = std::stoi(value);
-      } else if (key == "--battery-weight") {
-        opt.params.battery_weight = std::stod(value);
+      } else if (key == "--energy-weight" || key == "--battery-weight") {
+        opt.params.energy_weight = std::stod(value);
       } else if (key == "--speed") {
         opt.params.cruise_speed = std::stod(value);
-      } else if (key == "--cost-ref") {
-        opt.params.cost_ref = std::stod(value);
       } else if (key == "--max-bundle") {
         opt.params.max_bundle = static_cast<std::size_t>(std::stoul(value));
       } else if (key == "--weights") {
@@ -205,9 +203,9 @@ void writeAssignment(
 {
   auto agents_csv = openOut(dir, "agents.csv");
   agents_csv << "agent_id,type,x,y,battery,safety_reserve,battery_after,path_energy,"
-    "num_tasks,st_cost\n";
+    "num_tasks,reward,energy_cost,score\n";
   auto assign_csv = openOut(dir, "assignment.csv");
-  assign_csv << "agent_id,order,task_id,x,y,arrival,completion,remaining_deadline,overdue,bid\n";
+  assign_csv << "agent_id,order,task_id,x,y,arrival,completion,half_life,reward,overdue,bid\n";
 
   std::map<TaskId, AgentId> holder;
   for (const CbbaAgent & agent : agents) {
@@ -216,14 +214,15 @@ void writeAssignment(
     agents_csv << int(s.id) << "," << toString(s.type) << "," << s.position.x << ","
                << s.position.y << "," << s.battery << "," << s.safety_reserve << ","
                << (agent.path().empty() ? s.battery : eval.battery_after) << ","
-               << eval.path_energy << "," << agent.path().size() << "," << eval.st_cost << "\n";
+               << eval.path_energy << "," << agent.path().size() << "," << eval.reward << ","
+               << eval.energy_cost << "," << eval.score << "\n";
     for (std::size_t k = 0; k < eval.legs.size(); ++k) {
       const LegEval & leg = eval.legs[k];
       const Task & task = agent.tasks().at(leg.task_id);
       holder[leg.task_id] = s.id;
       assign_csv << int(s.id) << "," << k + 1 << "," << leg.task_id << "," << task.position.x
                  << "," << task.position.y << "," << leg.arrival << "," << leg.completion << ","
-                 << leg.remaining_deadline << "," << (leg.overdue ? 1 : 0) << ","
+                 << leg.half_life << "," << leg.reward << "," << (leg.overdue ? 1 : 0) << ","
                  << agent.score(leg.task_id) << "\n";
     }
   }
@@ -232,8 +231,8 @@ void writeAssignment(
   //   marginal_*：把任務插入「自己最終路徑（去掉這個任務）」的最佳位置，等同 CBBA 的出價方式
   //   alone_*   ：只做這一個任務（從起點直飛再返航）
   auto bids_csv = openOut(dir, "bids.csv");
-  bids_csv << "task_id,agent_id,compatible,feasible,marginal_cost,score,alone_feasible,"
-    "alone_cost,alone_score,alone_arrival,alone_battery_after,winner\n";
+  bids_csv << "task_id,agent_id,compatible,feasible,gain,score,alone_feasible,"
+    "alone_gain,alone_score,alone_arrival,alone_battery_after,winner\n";
   for (const Task & task : scenario.tasks) {
     for (const CbbaAgent & agent : agents) {
       const AgentState & s = agent.state();
@@ -247,9 +246,9 @@ void writeAssignment(
       const auto it = holder.find(task.id);
       bids_csv << task.id << "," << int(s.id) << "," << (fitness(s, task) == Fitness::OK ? 1 : 0)
                << "," << (with_path.feasible ? 1 : 0) << ","
-               << (with_path.feasible ? with_path.marginal_cost : -1.0) << "," << with_path.score
+               << (with_path.feasible ? with_path.gain : 0.0) << "," << with_path.score
                << "," << (alone.feasible ? 1 : 0) << ","
-               << (alone.feasible ? alone.marginal_cost : -1.0) << "," << alone.score << ","
+               << (alone.feasible ? alone.gain : 0.0) << "," << alone.score << ","
                << arrival << "," << (alone.feasible ? alone.eval.battery_after : s.battery) << ","
                << (it != holder.end() && it->second == s.id ? 1 : 0) << "\n";
     }
@@ -283,8 +282,8 @@ int cmdRun(const Options & opt)
   }
   auto summary = openOut(opt.out, "summary.csv");
   summary << "key,value\n"
-          << "loss," << opt.loss << "\nseed," << opt.seed << "\nbattery_weight,"
-          << opt.params.battery_weight << "\nconverged," << (r.converged ? 1 : 0)
+          << "loss," << opt.loss << "\nseed," << opt.seed << "\nenergy_weight,"
+          << opt.params.energy_weight << "\nconverged," << (r.converged ? 1 : 0)
           << "\nconvergence_time," << r.time << "\nbroadcasts," << r.broadcasts
           << "\nbytes," << r.bytes << "\nduplicates," << r.duplicates
           << "\nunassigned," << r.unassigned << "\n";
@@ -356,9 +355,9 @@ int cmdWeights(const Options & opt)
   csv << "weight,agent_id,type,num_tasks,battery,battery_after,safety_reserve,mean_arrival,"
     "max_arrival,overdue\n";
   std::cout << "  權重   最低剩餘電量   平均到達時間   逾期任務   已分配任務\n";
-  for (double weight : {0.0, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0}) {
+  for (double weight : {0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0}) {
     ScoringParams params = opt.params;
-    params.battery_weight = weight;
+    params.energy_weight = weight;
     std::vector<CbbaAgent> agents = makeAgents(scenario, params);
     NetworkConfig net;   // 不丟包：只看分配結果
     std::mt19937 rng(opt.seed);
@@ -537,7 +536,7 @@ int cmdInsert(const Options & opt)
   for (double weight : opt.weights) {
     MissionConfig config;
     config.params = opt.params;
-    config.params.battery_weight = weight;
+    config.params.energy_weight = weight;
     config.loss = opt.loss;
     config.critical_battery = opt.reserve;
     int totals[5] = {0, 0, 0, 0, 0};

@@ -68,6 +68,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `orphan_warn_sec` | 30 s | 孤兒任務：任務還開著，但這麼久沒有人得標、也沒有正式指派，就印警告、發 `task_orphaned` 一次（0 = 不檢查）。全隊能做的都被永久排除、不在 AUTO 或失聯時 CBBA 沒有任何訊號；只通知、不處理（2026-10-17） |
 | `orphan_no_capable_sec` | 3 s | 孤兒任務 NO_CAPABLE：全隊（自己＋聽得到的載具，閘道不算）沒有一台的平台、能力符合，持續這麼久就報（不用等 `orphan_warn_sec`；3 s 避免剛啟動、鄰居的 AGENT_STATE 還沒到時誤報）。0 = 不檢查（2026-11-14，介面 v2.0） |
 | `registry_dir` | 空（或環境變數 `CBBA_REGISTRY_DIR`） | 2-1b 註冊表的目錄（`<repo>/registry`，2026-11-14）：從 `fleet.yaml` 讀自己的平台與能力（取代 `capabilities`）、閘道的機號（取代 `gateways`）；`tools.yaml` 的位元位置要和程式一致，註冊表有錯就拒絕啟動。空 = 照參數 |
+| `endurance_s` | 無人機 900 s、狗 0 | 續航換算的能量模型（M1，2026-11-15）：> 0 時每秒耗電 = 100 / endurance_s、每公尺 = 每秒 / `cruise_speed`（多旋翼依時間耗電）；`energy_per_meter`、`hover_energy_per_sec` 有明確給時以它們為準。`cbba_uav.sh` 傳 `SIM_BAT_DRAIN` |
 | `gateways` | [200] | 閘道的機號：多跳時判斷閘道在不在線（某個聽得到的鄰居聽得到它）；直接聽得到的閘道不用列也認得（2026-11-14） |
 | `gateway_timeout` | 3 s | 這麼久沒聽到閘道（AGENT_STATE、多跳、確認）= 斷線：新的偵測只暫存，恢復後送出 |
 | `detection_buffer` | 64 | 還沒確認的偵測上限；滿了丟最舊的 |
@@ -81,7 +82,7 @@ ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 --params-file <cbba_v60.y
 | `takeover_by_priority` | [10, 15, 30, 30] s | 失聯接手：已接受任務的持有者失聯後多久重新競標，依優先級 P0～P3（全隊要一樣；舊的 `takeover_fire`＝P0、`takeover_patrol`＝P1～P3 仍可用） |
 | `recon_altitude` | 5.0 m | AIR_RECON 的巡檢高度 |
 | `cruise_speed`、`energy_per_meter`、`hover_energy_per_sec`、`safety_reserve` | UAV：5、0.5、0.2、20；UGV：1、0.1、0.05、20 | 能量模型（狗的是佔位值，見 `cbba_core/doc/ugv_tuning.md`） |
-| `battery_weight`、`cost_ref`、`max_bundle` | 1.0、50、5 | 出價公式，**全隊要一樣**（見 `cbba_core/doc/parameters.md`） |
+| `energy_weight`、`half_life_by_priority`、`max_bundle` | 50、[60, 120, 300, 600]、依平台（UAV 2、狗 5） | 出價公式（時間折扣報酬 TDR，2026-11-15，`cbba_core/doc/formula/tdr_design.md`），**全隊要一樣** |
 | `mesh_ip` | 環境變數 `MESH_IP` | 機間 UDP 走哪張網卡；空 = 系統預設 |
 | `udp_group`、`udp_port` | 239.255.42.99、14600 | 全隊要一樣 |
 | `cancel_authorities` | [] | 除了建立者，可以取消任務的機號（全隊要一樣） |

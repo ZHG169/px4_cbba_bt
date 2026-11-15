@@ -52,6 +52,17 @@ double batteryCost(double battery, double predicted_energy, double safety_reserv
   return predicted_energy / usable;
 }
 
+EnduranceEnergy energyFromEndurance(double endurance_s, double cruise_speed)
+{
+  if (!(endurance_s > 0.0) || !(cruise_speed > 0.0)) {
+    throw std::invalid_argument("endurance_s and cruise_speed must be positive");
+  }
+  EnduranceEnergy e;
+  e.hover_energy_per_sec = 100.0 / endurance_s;
+  e.energy_per_meter = e.hover_energy_per_sec / cruise_speed;
+  return e;
+}
+
 PathEnergy pathEnergy(const AgentState & agent, const std::vector<Task> & tasks)
 {
   nonNegative("energy_per_meter", agent.energy_per_meter);
