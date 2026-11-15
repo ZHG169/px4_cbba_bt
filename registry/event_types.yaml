@@ -1,90 +1,123 @@
-# 事件種類（2-1b 註冊表 REG-1，schema 1.0，2026-11-14 初版；EVT-1）
+# 事件類型（2-1b 註冊表 REG-1，schema 1.0；2026-11-15 照 2-1b 原文第七節改寫；EVT-1）
 #
-# 偵測（swarm_interfaces/Detection：detector、label、score…，機器人經 cbba_node 送到閘道）→ 閘道的事件流程照這份判斷
-# 「算不算一個事件」→ 成立就用 template 展開成任務（範本在 event_rules.yaml，PLN-1，之後加）。
-# 2-1b 的事件種類會再增加：目前是我們先自訂的五種，只有 fire 的偵測器現在就有（apriltag_fire_detector）。
+# 偵測器外掛輸出統一的 Detection（swarm_interfaces/Detection；機器人經 cbba_node 送閘道）→ 閘道的事件流程照這份做
+# 時序累積、跨攝影機關聯、VLM 驗證 → 事件狀態機（Incident）→ 依 default_rule 用範本展開（site-config 的 event_rules.yaml，PLN-1）。
 #
-# 欄位
-#   name           事件種類的名稱；用過之後不改（事件、任務、紀錄都用名稱）
-#   priority       任務的優先級 P0～P3（0 最高），展開的任務照這個（CBBA 的搶占、失聯接手看它）
-#   object_class   事件的主體（objects.yaml 的 class）
-#   detectors      哪些偵測器、哪些類別（Detection 的 detector、label）會觸發，min_score 以下的偵測不算；
-#                  status：available（已經有）／planned（還沒做）
-#   trigger        累積門檻：window 秒內、merge_radius 公尺內累積 min_count 筆（可以來自不同機器人）才成立
-#   vlm            成立前要不要再請 VLM 確認（enabled），prompt 是給 VLM 的問題
-#   dispatch_cost  派遣代價（相對值，1 = 一般）：越高表示誤報的代價越大（例如要出動多台），事件流程要更確定才派；
-#                  這版只帶著，事件流程（EVT-1、PLN）再定用法
-#   template       預設的任務範本（event_rules.yaml 的名稱）
-#   expires        事件成立後多久沒處理完就失效（s）；展開的任務帶同樣的 expires
+# 欄位（原文）
+#   category       template（範本事件）／open（開放事件：VLM 判讀、提案，requires_approval）
+#   detectors      會觸發的偵測器（下面 detectors 的名稱）；open 事件可以沒有
+#   trigger        觸發條件：zone_attr（偵測位置所在區域要有的屬性，zones.geojson 的 properties；any = 不限）、
+#                  time_rule（always／off_hours／on_hours）
+#   accumulate     時序累積（同一個關聯群組）：每一筆偵測 E ← λ·E + score，E ≥ theta_on 而且持續 min_duration_s 才成立；
+#                  E < theta_off 解除（遲滯）
+#   associate      跨攝影機／機器人關聯：dt_s 秒內、r_m 公尺內（或同一個 track_id）算同一件事
+#   vlm            VLM 驗證：prompt_id、samples（取幾張）、timeout_s；沒寫 = 不用 VLM
+#   cost           漏報（miss）與誤報（false）的相對代價，決定派遣門檻：事件機率 ≥ false / (miss + false) 才派
+#   locate         事件位置怎麼來：projection（攝影機投影）／asset（設備清單）／zone（區域）
+#   default_rule   預設範本（event_rules.yaml 的名稱）；open 事件沒有
+#   priority       P0～P3（P0 最高）；展開的任務照這個（CBBA 的搶占、失聯接手看它）
+#   requires_approval  展開的任務要值班核准才派（open 事件一定要）
+# 欄位（我們加的）
+#   object_class   事件主體（objects.yaml 的類別）；steps 的 object 用「類別:實例」
+#   expires_s      事件成立後多久沒處理完就失效（s）；展開的任務帶同樣的 expires
 #   status         open（啟用）／closed（先不處理）
 #
-# 新增事件種類（我們或伯宇都可以）：在 event_types 加一筆；偵測器還沒有就標 planned。名稱用小寫加底線，用過之後不改；
-# 其他欄位（門檻、優先級、範本）之後可以調。加完跑 swarm_cbba 的 test_registry 檢查（優先級、物件種類、門檻的範圍）。
+# detectors（我們加的）：偵測器外掛的清單。labels 是它發的 Detection.label（≤ 64 B），source_kinds 是 2-1b 的
+# source.kind（fixed_camera、robot_camera、vms_analytics、scada、sensor），min_score 以下的偵測不算，
+# status：available（已經有）／planned（還沒做）。
+#
+# 統一的 Event 輸出（事件狀態機）欄位：event_id、event_type、category、sources、location（pose＋不確定半徑＋zone）、
+# confidence、evidence、vlm_result、vendor_raw、schema_version（格式見 registry/api.md）。
 schema_version: "1.0"
 
+detectors:
+  apriltag_fire:     {labels: [fire], source_kinds: [robot_camera], min_score: 0.85, status: available}   # 模擬：AprilTag 101 當火
+  fire_smoke_yolo:   {labels: [fire, smoke], source_kinds: [fixed_camera, robot_camera], min_score: 0.6, status: planned}
+  person_yolo_v1:    {labels: [person], source_kinds: [fixed_camera, robot_camera], min_score: 0.5, status: planned}
+  vms_line_crossing: {labels: [line_crossing], source_kinds: [vms_analytics], min_score: 0.5, status: planned}
+  thermal_hotspot:   {labels: [hot_spot], source_kinds: [robot_camera, fixed_camera], min_score: 0.7, status: planned}
+  left_object_yolo:  {labels: [bag], source_kinds: [fixed_camera, robot_camera], min_score: 0.5, status: planned}
+
 event_types:
-  - name: fire
-    description: 火警
-    priority: 0
-    object_class: fire
-    detectors:
-      - {detector: apriltag_fire, labels: [fire], min_score: 0.85, status: available}   # 模擬：AprilTag 101 當火
-      - {detector: fire_smoke_yolo, labels: [fire], min_score: 0.6, status: planned}
-    trigger: {min_count: 3, window: 2.0, merge_radius: 2.0}
-    vlm: {enabled: false, prompt: ""}
-    dispatch_cost: 1.0
-    template: fire_response
-    expires: 900
-    status: open
-
-  - name: smoke
-    description: 煙霧
-    priority: 0
-    object_class: smoke
-    detectors:
-      - {detector: fire_smoke_yolo, labels: [smoke], min_score: 0.6, status: planned}
-    trigger: {min_count: 5, window: 3.0, merge_radius: 3.0}
-    vlm: {enabled: true, prompt: "畫面中是否有煙霧？回答 yes 或 no，並說明位置。"}
-    dispatch_cost: 1.0
-    template: smoke_check
-    expires: 900
-    status: open
-
-  - name: intrusion
-    description: 入侵（禁區內有人）
-    priority: 0
+  # ---- 原文的範例 ----
+  perimeter_intrusion:
+    category: template
+    detectors: [person_yolo_v1, vms_line_crossing]
+    trigger: {zone_attr: restricted, time_rule: off_hours}
+    accumulate: {lambda: 0.8, theta_on: 3.0, theta_off: 1.0, min_duration_s: 1.5}
+    associate: {dt_s: 5, r_m: 3}
+    vlm: {prompt_id: intrusion_v2, samples: 2, timeout_s: 5}
+    cost: {miss: 10, false: 1}          # 決定派遣門檻
+    locate: projection                  # projection / asset / zone
+    default_rule: perimeter_intrusion   # 對應 event_rules.yaml
+    priority: P0
     object_class: person
-    detectors:
-      - {detector: person_yolo, labels: [person], min_score: 0.5, status: planned}
-    trigger: {min_count: 5, window: 2.0, merge_radius: 3.0}
-    vlm: {enabled: true, prompt: "畫面中的人是否在禁區內、是否是巡檢人員？"}
-    dispatch_cost: 2.0          # 入侵範本會派狗＋無人機
-    template: intrusion_response
-    expires: 600
+    expires_s: 600
     status: open
 
-  - name: thermal_anomaly
-    description: 熱異常（設備過熱）
-    priority: 1
-    object_class: hot_spot
-    detectors:
-      - {detector: thermal_hotspot, labels: [hot_spot], min_score: 0.7, status: planned}
-    trigger: {min_count: 3, window: 5.0, merge_radius: 2.0}
-    vlm: {enabled: false, prompt: ""}
-    dispatch_cost: 1.0
-    template: thermal_check
-    expires: 1800
+  unknown:
+    category: open
+    vlm: {prompt_id: open_event_planner_v1, timeout_s: 8}
+    requires_approval: true
+    priority: P2
+    expires_s: 900
     status: open
 
-  - name: left_object
-    description: 遺留物
-    priority: 2
-    object_class: left_object
-    detectors:
-      - {detector: left_object_yolo, labels: [bag, box, left_object], min_score: 0.5, status: planned}
-    trigger: {min_count: 10, window: 30.0, merge_radius: 1.0}    # 要停留一段時間才算遺留
-    vlm: {enabled: true, prompt: "這個物品是不是被遺留在現場？"}
-    dispatch_cost: 0.5
-    template: left_object_check
-    expires: 3600
+  # ---- 我們加的（模擬與場域會用到） ----
+  fire:
+    category: template
+    detectors: [apriltag_fire, fire_smoke_yolo]
+    trigger: {zone_attr: any, time_rule: always}
+    accumulate: {lambda: 0.8, theta_on: 2.0, theta_off: 0.5, min_duration_s: 1.0}   # apriltag 0.85 連續 3 筆約 2.0
+    associate: {dt_s: 5, r_m: 2}
+    cost: {miss: 20, false: 1}
+    locate: projection
+    default_rule: fire_response
+    priority: P0
+    object_class: fire
+    expires_s: 900
+    status: open
+
+  smoke:
+    category: template
+    detectors: [fire_smoke_yolo]
+    trigger: {zone_attr: any, time_rule: always}
+    accumulate: {lambda: 0.8, theta_on: 3.0, theta_off: 1.0, min_duration_s: 3.0}
+    associate: {dt_s: 5, r_m: 3}
+    vlm: {prompt_id: smoke_check_v1, samples: 2, timeout_s: 5}
+    cost: {miss: 10, false: 1}
+    locate: zone
+    default_rule: smoke_check
+    priority: P0
+    object_class: smoke_region
+    expires_s: 900
+    status: open
+
+  thermal_anomaly:
+    category: template
+    detectors: [thermal_hotspot]
+    trigger: {zone_attr: high_voltage, time_rule: always}
+    accumulate: {lambda: 0.9, theta_on: 3.0, theta_off: 1.0, min_duration_s: 5.0}
+    associate: {dt_s: 10, r_m: 2}
+    cost: {miss: 5, false: 1}
+    locate: asset                       # 熱點對應到設備清單裡的設備
+    default_rule: thermal_check
+    priority: P1
+    object_class: machine
+    expires_s: 1800
+    status: open
+
+  left_object:
+    category: template
+    detectors: [left_object_yolo]
+    trigger: {zone_attr: any, time_rule: always}
+    accumulate: {lambda: 0.95, theta_on: 5.0, theta_off: 2.0, min_duration_s: 30.0}   # 要停留一段時間才算遺留
+    associate: {dt_s: 10, r_m: 1}
+    vlm: {prompt_id: left_object_v1, samples: 2, timeout_s: 5}
+    cost: {miss: 3, false: 1}
+    locate: projection
+    default_rule: left_object_check
+    priority: P2
+    object_class: bag
+    expires_s: 3600
     status: open

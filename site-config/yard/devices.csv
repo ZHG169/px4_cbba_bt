@@ -1,0 +1,26 @@
+# 設備清單（2-1b 第五節的 asset，site-config/yard，2026-11-15）：yard 場景（docker/gz/worlds/yard_env.sdf.inc，伯宇的變電所）
+# id：「類別:實例」（steps 的 object 填這個，類別要在 registry/objects.yaml）；座標 map ENU（m），floor 樓層
+# zone：所在區域（zones.geojson）；safety_*：這台設備的最小安全距離（objects.yaml 的 safety_distance_m 是 per_instance 時用）
+# obs_quadruped_*：狗的觀察姿態（站的位置與朝向，度，0 = +x、90 = +y）；obs_uav_*：無人機的觀察點（下視，正上方）
+# 空白 = 不適用（例如閥組在鋼構棚下，無人機的下視相機看不到）
+id,class,x,y,z,floor,zone,safety_quadruped_m,safety_uav_m,obs_quadruped_x,obs_quadruped_y,obs_quadruped_yaw_deg,obs_uav_x,obs_uav_y,obs_uav_z,name
+machine:TA1,machine,-30.0,15.0,1.5,1F,Z_HV_A,1.5,3.0,-30.0,7.5,90,-30.0,15.0,8.0,變壓器 TA1
+machine:TA2,machine,-20.0,15.0,1.5,1F,Z_HV_A,1.5,3.0,-20.0,7.5,90,-20.0,15.0,8.0,變壓器 TA2
+machine:TA3,machine,-10.0,15.0,1.5,1F,Z_HV_A,1.5,3.0,-10.0,7.5,90,-10.0,15.0,8.0,變壓器 TA3
+machine:TA4,machine,0.0,15.0,1.5,1F,Z_HV_A,1.5,3.0,0.0,7.5,90,0.0,15.0,8.0,變壓器 TA4
+machine:TA5,machine,10.0,15.0,1.5,1F,Z_HV_A,1.5,3.0,10.0,7.5,90,10.0,15.0,8.0,變壓器 TA5
+machine:TB1,machine,-30.0,0.0,1.5,1F,Z_HV_B,1.5,3.0,-30.0,7.5,-90,-30.0,0.0,8.0,變壓器 TB1
+machine:TB2,machine,-20.0,0.0,1.5,1F,Z_HV_B,1.5,3.0,-20.0,7.5,-90,-20.0,0.0,8.0,變壓器 TB2
+machine:TB3,machine,-10.0,0.0,1.5,1F,Z_HV_B,1.5,3.0,-10.0,7.5,-90,-10.0,0.0,8.0,變壓器 TB3
+machine:TB4,machine,0.0,0.0,1.5,1F,Z_HV_B,1.5,3.0,0.0,7.5,-90,0.0,0.0,8.0,變壓器 TB4
+machine:TB5,machine,10.0,0.0,1.5,1F,Z_HV_B,1.5,3.0,10.0,7.5,-90,10.0,0.0,8.0,變壓器 TB5
+machine:TC1,machine,-30.0,-15.0,1.5,1F,Z_HV_C,1.5,3.0,-30.0,-7.5,-90,-30.0,-15.0,8.0,變壓器 TC1
+machine:TC2,machine,-20.0,-15.0,1.5,1F,Z_HV_C,1.5,3.0,-20.0,-7.5,-90,-20.0,-15.0,8.0,變壓器 TC2
+machine:TC3,machine,-10.0,-15.0,1.5,1F,Z_HV_C,1.5,3.0,-10.0,-7.5,-90,-10.0,-15.0,8.0,變壓器 TC3
+machine:TC4,machine,0.0,-15.0,1.5,1F,Z_HV_C,1.5,3.0,0.0,-7.5,-90,0.0,-15.0,8.0,變壓器 TC4
+machine:TC5,machine,10.0,-15.0,1.5,1F,Z_HV_C,1.5,3.0,10.0,-7.5,-90,10.0,-15.0,8.0,變壓器 TC5
+machine:TC6,machine,30.0,-15.0,1.5,1F,Z_HV_TC6,1.5,3.0,30.0,-10.0,-90,30.0,-15.0,8.0,變壓器 TC6（場景的模型名稱 TC6_fire）
+machine:pipe_rack,machine,0.0,-28.0,2.0,1F,Z_YARD,1.0,3.0,0.0,-22.0,-90,0.0,-28.0,8.0,管架
+machine:valve_skid,machine,25.0,10.0,0.6,1F,Z_YARD,1.0,,25.0,4.0,90,,,,閥組（鋼構棚下）
+machine:tank_1,machine,40.0,25.0,3.0,1F,Z_TANKS,2.0,3.0,33.0,25.0,0,40.0,25.0,10.0,儲槽 1
+machine:tank_2,machine,40.0,33.0,3.0,1F,Z_TANKS,2.0,3.0,33.0,33.0,0,40.0,33.0,10.0,儲槽 2

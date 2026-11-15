@@ -1,0 +1,13 @@
+# 觀察點（2-1b 第五節的 poi，site-config/yard，2026-11-15）：狗與 UAV 可各有不同觀察點
+# zone：哪個區域的觀察點；role：範本用的名稱（front、rear、overwatch → event_rules 的 {incident.observe_front} 等）
+# platform：哪種平台用（platforms.yaml）；yaw_deg：狗的朝向（UAV 空白）
+id,zone,role,platform,x,y,z,yaw_deg,floor
+OBS_HV_A_FRONT,Z_HV_A,front,quadruped,-10.0,7.5,0.0,90,1F
+OBS_HV_A_REAR,Z_HV_A,rear,quadruped,-10.0,21.0,0.0,-90,1F
+OBS_HV_A_AIR,Z_HV_A,overwatch,uav,-10.0,15.0,8.0,,1F
+OBS_HV_B_FRONT,Z_HV_B,front,quadruped,-10.0,7.5,0.0,-90,1F
+OBS_HV_B_REAR,Z_HV_B,rear,quadruped,-10.0,-7.5,0.0,90,1F
+OBS_HV_B_AIR,Z_HV_B,overwatch,uav,-10.0,0.0,8.0,,1F
+OBS_HV_C_FRONT,Z_HV_C,front,quadruped,-10.0,-7.5,0.0,-90,1F
+OBS_HV_C_REAR,Z_HV_C,rear,quadruped,-10.0,-21.0,0.0,90,1F
+OBS_HV_C_AIR,Z_HV_C,overwatch,uav,-10.0,-15.0,8.0,,1F

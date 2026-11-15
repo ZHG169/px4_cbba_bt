@@ -23,13 +23,14 @@ install(TARGETS cbba_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
-  # 註冊表的載入與檢查：讀 repo 的 registry/（和 cbba_core/capabilities.hpp 比對）
+  # 註冊表的載入與檢查：讀 repo 的 registry/（和 cbba_core/capabilities.hpp 比對）、site-config/yard（場域設定）
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_registry test/test_registry.cpp src/registry.cpp)
   target_include_directories(test_registry PRIVATE include)
   target_link_libraries(test_registry cbba_core::cbba_core_core yaml-cpp::yaml-cpp)
   target_compile_definitions(test_registry PRIVATE
-    REGISTRY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../registry")
+    REGISTRY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../registry"
+    SITE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../site-config/yard")
 endif()
 
 ament_package()

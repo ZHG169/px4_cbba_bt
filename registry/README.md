@@ -1,87 +1,113 @@
-# 註冊表（2-1b REG-1，schema 1.0，2026-11-14）
+# 註冊表（2-1b REG-1，schema 1.0；2026-11-16 照 2-1b 原文改寫）
 
 2-1b 的原則：**一份模組註冊表是唯一來源**，規劃器、檢查器、VLM 詞彙、CBBA 的可行性、BT 分派都讀它；
-新增動作或機器人只改註冊表與 adapter。2-1b 的六份都有了（schema 1.0）；任務範本 `event_rules.yaml`（PLN-1）之後加。
+新增動作或機器人只改註冊表與 adapter。原文第一節的六份都有（schema 1.0）；位置標準（第五節）在 `site-config/<site>/`。
+對外格式（`/registry`、`/validate`、`/test_run`、TaskSpec、ExecuteStep、Event）：[`api.md`](api.md)；
+TaskSpec 的 JSON Schema：[`schema/task_spec.schema.json`](schema/task_spec.schema.json)。
 
-| 檔案 | 內容 | 誰讀 |
+| 檔案 | 內容（原文第一節） | 誰讀 |
 |---|---|---|
-| `tools.yaml` | 能力標籤：name、**bit**（CBBA 封包裡能力遮罩的位元位置）、description、deprecated | cbba_node（檢查和程式一致）、規劃器、檢查器 |
-| `platforms.yaml` | 平台：name、**code**（封包裡的平台代碼）、成本模型（速度、耗電、存量、續航、max_bundle、must_return） | cbba_node（M0 只檢查；M1 拿來出價） |
-| `fleet.yaml` | 機隊：每台的 id（機號）、name、platform、namespace、capabilities；gateways（閘道的機號） | cbba_node（自己的平台與能力、閘道的機號） |
-| `actions.yaml` | 動作（steps 的 action）：2-1b 第二節的 8 個可規劃動作，每個的平台、需要的能力、location／object、參數、前置條件、失敗碼 | 規劃器、檢查器（展開、檢查 steps）、BT（葉節點收的參數）；cbba_node 只檢查格式 |
-| `objects.yaml` | 對象：種類（人、車、變壓器、儲槽、火、煙…，可不可以 track／inspect）與場地上的設備（yard 的 TA1～TC6、儲槽、管架…，id 與位置） | 規劃器、VLM 詞彙、steps 的 object；cbba_node 只檢查格式 |
-| `event_types.yaml` | 事件種類：偵測器與類別、累積門檻、VLM 確認、派遣代價、預設範本、優先級（先自訂 5 種：fire、smoke、intrusion、thermal_anomaly、left_object） | 閘道的事件流程（EVT-1）；cbba_node 只檢查格式 |
+| `tools.yaml` | 工具／酬載對應的能力標籤：name、**bit**（CBBA 封包裡能力遮罩的位元位置）、description、deprecated | cbba_node（和程式一致）、規劃器、檢查器 |
+| `platforms.yaml` | 平台類型 quadruped／uav 的運動與能耗模型：**code**（封包裡的平台代碼）、速度、耗電、存量、續航、max_bundle、must_return | cbba_node（出價） |
+| `fleet.yaml` | 實體機隊：每台的機號、平台、`ns`、能力、`limits`（UAV：max_altitude_m、max_flight_s、landing_pads；狗：docks）；gateways | cbba_node（自己的平台與能力、閘道的機號）、檢查器 |
+| `actions.yaml` | 動作：參數、前置條件、效果、平台實作、風險、自主狀態（原文第二節） | 規劃器、檢查器、BT／adapter；cbba_node 只檢查 |
+| `objects.yaml` | 物件類別：偵測方式（locate）、允許的動作、安全距離（原文第三節） | 規劃器、VLM 詞彙、檢查器；cbba_node 只檢查 |
+| `event_types.yaml` | 偵測器與事件類型：觸發、累積、關聯、VLM、代價、預設範本（原文第七節） | 閘道的事件流程（EVT-1）；cbba_node 只檢查 |
+| `site-config/<site>/` | 位置：`zones.geojson`（區域與屬性）、`devices.csv`（設備實例＋觀察姿態）、`pois.csv`（觀察點）、`docks.csv`（充電樁、起降點） | 規劃器（代換 location）、檢查器（區域層）；`test_registry` 檢查和註冊表一致 |
 
 ## 規則
 
-- 每份檔案開頭 `schema_version: "1.0"`；版本不對、缺欄位、型別不對時 cbba_node 拒絕啟動。
+- 每份 YAML 開頭 `schema_version: "1.0"`；版本不對、缺欄位、型別不對時 cbba_node 拒絕啟動。
 - **bit、code 只增不改**：已經用過的不改、不重用；不要的標籤標 `deprecated: true` 留著。bit 0～63、code 1～255（0 保留給
-  「任務不限平台」和「閘道」）。
-- `tools.yaml` 要包含程式（`ros2_ws/src/cbba_core/include/cbba_core/capabilities.hpp`）認得的全部標籤、bit 一樣；
-  註冊表可以比程式新（多出程式不認得的標籤，cbba_node 印警告、宣告了也用不到）。新增標籤時兩邊一起加。
-- 機號 1～254，載具和閘道之間也不能重複。能力要在 `tools.yaml`、不能是 deprecated；平台要在 `platforms.yaml`。
+  「任務不限平台」和「閘道」）。`tools.yaml` 要包含 `cbba_core/capabilities.hpp` 認得的全部標籤、bit 一樣；註冊表可以比程式新
+  （多出的標籤 cbba_node 印警告）。
+- 機號 1～254，載具和閘道之間也不能重複。
+- 名稱（動作、物件類別、事件類型、偵測器、設備 id）用過之後不改：任務、偵測、紀錄都用名稱。
 - 能力故障（E_HW）在執行期由 cbba_node 扣掉，不改這份。
 
-## actions.yaml（2026-11-14 初版，**參數暫定**）
+## actions.yaml
 
-| 動作 | 做什麼 | 需要的能力 | location | object | 參數（預設） |
+格式照原文的註冊表範例：`actions:` 底下「動作名稱 → 內容」，欄位 `class`、`version`、`params`、`objects`、`requires.any_of`、
+`preconditions`、`effects`、`timeout_s`、`cancelable`、`risk`、`implementations`（每個平台的 `backend`、`interface` 或
+`sequence`、`extra_preconditions`、`autonomy`）。我們加的欄位：`status`（open／closed）、`location`、`object`
+（required／optional／none）、`failure_codes`；原文的範例沒寫這幾個也能載入（有預設）。前置條件與效果的詞彙在 `conditions`。
+
+| 動作 | 分級 | 參數（原文） | 需要的能力 | 狗 | 無人機 |
 |---|---|---|---|---|---|
-| `go_to` | 走（飛）到一個點 | — | 必填 | — | `tolerance` 0.5 m、`timeout` 0（自動） |
-| `patrol` | 照一串點巡邏 | — | 選填（正方形的中心） | — | `pattern` waypoints／square、`waypoints`、`size` 10 m、`loops` 1 |
-| `inspect` | 到點後看、拍照 | rgb_camera | 必填（要看的點） | 選填（設備） | `snapshots` 1、`timeout` 30 s |
-| `track` | 跟著目標 | rgb_camera | 選填（目標最後位置） | **必填**（目標） | `distance` 2 m、`duration` 30 s |
-| `speak` | 喊話 | speaker | — | — | `text`（必填）、`repeat` 1 |
-| `wait` | 原地等 | — | — | — | `duration`（必填） |
-| `return_to_dock` | 回充電點（無人機是起降點） | — | 選填（沒給用自己的） | — | — |
-| `alert_operator` | 通知值班的人 | — | — | 選填 | `message`（必填）、`level` warning |
+| `go_to` | 可規劃 | location、standoff_m、altitude_m（UAV） | mobility | Nav2 NavigateToPose（模擬驗證過） | takeoff → set_altitude → fly_to（自動補） |
+| `patrol` | 可規劃 | waypoints 或 area、loops | mobility | Nav2 航點序列 | `{ns}/patrol`（要改成可傳航點） |
+| `inspect` | 可規劃 | object、mode（rgb／thermal／zoom）、duration_s、standoff_m | 依 mode：rgb_camera／thermal_camera／rgb_camera＋zoom | 雲台 `/ptz_inspect`（模擬驗證過） | hover → capture |
+| `track` | 可規劃 | object（person:trk_88）或 bbox、distance_m、duration_s | rgb_camera | follow_person | `{ns}/track` |
+| `speak` | 可規劃 | template（語音範本 ID）、volume | speaker | 機載喇叭 | 不支援 |
+| `wait` | 可規劃 | duration_s | — | 原地等待 | hover |
+| `return_to_dock` | 可規劃 | dock（可省略） | mobility | 回充電樁 | fly_to → land |
+| `alert_operator` | 可規劃 | severity、message、attachments | — | 經閘道送控制中心 | 同左 |
+| `report_state`、`emergency_stop`、`emergency_land` | 系統 | — | — | 狀態 topic、急停 | `{ns}/state`、`{ns}/land` |
+| `takeoff`、`set_altitude`、`fly_to`、`hover`、`capture`、`land` | 平台內部 | — | — | — | UAV 的 sequence 用；實機 `/MAV1/api/*` |
+| `open_door`、`close_door`、`pick_up`、`drop_off`、`use_tool` | 可規劃（未開放） | — | manipulator（、gripper） | 未開發 | 不支援 |
 
-- 全部都是 `plannable`、狗和無人機都能做、可以取消；每個動作都可能回 `common_failure_codes`（E_PRECONDITION、E_SAFETY_STOP、
-  E_LOW_BATTERY、E_COMM、E_HW），另外各自的（go_to：E_UNREACHABLE、E_TIMEOUT；track：E_TARGET_LOST…）。
-- 參數名稱、預設值是初版：`inspect` 照狗 BT 已經在用的（`snapshots`、`timeout`），`patrol` 的 10 m、`track` 的 2 m／30 s
-  照無人機實機 API，其他是提案。**動作的 Action 介面（REG-2）由伯宇定，對過之後才凍結**。
-- `inspect` 的前置條件 `at_location`：載具要已經在 location 附近（通常前一步是 `go_to`），檢查器（PLN-2）用。
-- 還沒放的：系統動作（emergency_stop、emergency_land）、平台內部動作（UAV 的 takeoff、set_altitude，adapter 自動補）、
-  report_state、未開放的（open_door、close_door、pick_up、use_tool）。
+- `autonomy`：not_started／in_development／sim_verified／field_verified（M5 的「自主狀態標記」）；檢查器的風險層：
+  risk high 或 autonomy 未到 field_verified → `requires_approval`。
+- **和 11/14 初版的差異**（BT 要跟著改的）：inspect 的參數 `snapshots`、`timeout` → `mode`、`duration_s`、`standoff_m`
+  （狗的 `task_manager_spec.patch` 照抄 params，目前還讀 snapshots，沒寫時拍 1 張；`duration_s` 要和伯宇對怎麼用）；
+  speak 的 `text`、`repeat` → `template`、`volume`；alert_operator 的 `level` → `severity`，加 `attachments`；
+  track 的 `distance`、`duration` → `distance_m`、`duration_s`；go_to 的 `tolerance`、`timeout` → `standoff_m`、`altitude_m`
+  （逾時改用動作的 `timeout_s`）；patrol 的 `pattern`、`size` → `waypoints` 或 `area`。
 
-各平台的實作：
+## objects.yaml
 
-| 動作 | 狗（伯宇的 task_manager） | 無人機（uav_adapter，M1） |
+只放**類別**（原文第三節的 8 類：person、bag、machine、gauge、door、smoke_region、puddle、extinguisher，加我們模擬用的 fire）。
+**實例**放在場域設定的 `devices.csv`（`machine:TA1`），或來自追蹤（`person:trk_88`）；steps 的 object 寫「類別:實例」。
+每類：`locate`、`allowed_actions`（和動作的 `objects` 要互相一致，載入器檢查）、`safety_distance_m`（{quadruped, uav}，
+null = 原文的「—」，`per_instance` = 依設備）、`rules`（no_overfly、no_contact、no_enter、avoid_ground、
+approach_needs_approval、high_voltage_zone）、`findings`、`note`。
+
+## event_types.yaml
+
+格式照原文第七節：`event_types:` 底下「名稱 → 內容」，欄位 `category`（template／open）、`detectors`、`trigger`（zone_attr、
+time_rule）、`accumulate`（lambda、theta_on、theta_off、min_duration_s）、`associate`（dt_s、r_m）、`vlm`（prompt_id、samples、
+timeout_s）、`cost`（miss、false）、`locate`、`default_rule`、`priority`（P0～P3）、`requires_approval`。
+我們加的：最上面的 `detectors:` 表（每個偵測器的 labels、source_kinds、min_score、status），事件的 `object_class`、`expires_s`、`status`。
+
+| 事件 | 來源 | 優先級 | 偵測器 | 範本 |
+|---|---|---|---|---|
+| `perimeter_intrusion` | 原文 | P0 | person_yolo_v1、vms_line_crossing（planned） | perimeter_intrusion |
+| `unknown` | 原文（開放事件） | P2 | —（VLM 判讀，requires_approval） | — |
+| `fire` | 我們 | P0 | **apriltag_fire（已有）**、fire_smoke_yolo | fire_response |
+| `smoke` | 我們 | P0 | fire_smoke_yolo | smoke_check |
+| `thermal_anomaly` | 我們 | P1 | thermal_hotspot | thermal_check |
+| `left_object` | 我們 | P2 | left_object_yolo | left_object_check |
+
+累積的意思（原文只給參數，這裡定義）：同一個關聯群組每來一筆偵測 E ← λ·E + score，E ≥ theta_on 而且持續 min_duration_s
+才成立，E < theta_off 解除；派遣門檻：事件機率 ≥ false / (miss + false)。範本本身在 `site-config/<site>/event_rules.yaml`（PLN-1，M2）。
+
+## site-config（位置標準，原文第五節）
+
+| 類型 | 檔案 | 例子（yard） |
 |---|---|---|
-| `go_to` | ✅ steps 的第一步 = 站的位置（外部點） | 待做（SITL：`NavigateTo`） |
-| `inspect` | ✅ 雲台（`/ptz_inspect`） | 待做（SITL：`AirRecon`） |
-| `patrol`、`track`、`speak`、`wait`、`return_to_dock`、`alert_operator` | 待做：Switch 加 case、`kValidActions` 加名字（spec patch 會照傳參數） | 待做 |
+| 區域 zone | `zones.geojson`（map 座標的多邊形；properties：restricted、high_voltage、no_entry〔哪些平台不能進，uav = 禁飛〕、floor、cruise_altitude_m、ceiling_m） | Z_YARD、Z_HV_A～C、Z_HV_TC6、Z_TANKS、Z_CONTROL、Z_PADS |
+| 觀察點 poi | `pois.csv`（zone、role〔front／rear／overwatch〕、platform、座標、朝向） | OBS_HV_A_FRONT… |
+| 設備點位 asset | `devices.csv`（「類別:實例」、座標、zone、安全距離、狗與 UAV 的觀察姿態） | machine:TA1～TC6、tank_1… |
+| 充電／起降 dock／pad | `docks.csv` | PAD_1～3、DOCK_1～3 |
+| 座標 pose | `{frame: map, floor, x, y, z}` | — |
 
-## objects.yaml、event_types.yaml（2026-11-14 初版）
-
-- `objects.yaml`：12 種對象；設備照 yard 場景（`docker/gz/worlds/yard_env.sdf.inc`）的 21 個，steps 的 `object` 填設備 id（例如
-  `{"action": "inspect", "object": "TB3"}`）。換場地時加另一個 `site` 的設備。
-- `event_types.yaml`：2-1b 的事件種類之後會再增加，**目前是我們先自訂的 5 種**：
-
-| 事件 | 優先級 | 主體 | 偵測器（類別） | 累積門檻 | VLM | 範本 |
-|---|---|---|---|---|---|---|
-| `fire` | P0 | fire | `apriltag_fire`（fire，≥ 0.85，**已有**）、`fire_smoke_yolo`（規劃中） | 2 s、2 m 內 3 筆 | 不用 | `fire_response` |
-| `smoke` | P0 | smoke | `fire_smoke_yolo`（smoke） | 3 s、3 m 內 5 筆 | 要 | `smoke_check` |
-| `intrusion` | P0 | person | `person_yolo`（person） | 2 s、3 m 內 5 筆 | 要 | `intrusion_response` |
-| `thermal_anomaly` | P1 | hot_spot | `thermal_hotspot`（hot_spot） | 5 s、2 m 內 3 筆 | 不用 | `thermal_check` |
-| `left_object` | P2 | left_object | `left_object_yolo`（bag、box、left_object） | 30 s、1 m 內 10 筆 | 要 | `left_object_check` |
-
-  門檻、範本名稱都是初版；範本本身（要派哪些角色、steps）在 `event_rules.yaml`，之後做範本展開（PLN-1）時加。
+狗與無人機共用同一個 map 座標系與樓層編號；無人機的高度由動作參數或區域屬性決定，不由 VLM 決定。
+檢查（`checkSite`）：狗的觀察姿態、觀察點、充電樁不在狗的禁入區；UAV 的觀察點不在禁飛區、不高於天花板；
+fleet.yaml 的 landing_pads、docks 都在 docks.csv。
 
 ## 怎麼新增（我們或伯宇都可以）
 
-每份都是「一筆一個條目」，新增就是在清單後面加一筆，**不用改程式**：
-
 | 要加的 | 改哪裡 | 注意 |
 |---|---|---|
-| 事件種類 | `event_types.yaml` 加一筆 | 名稱用小寫加底線、用過之後不改；偵測器還沒做就標 `status: planned`；`detector`、`label` 要和偵測器發的 `Detection` 一樣（≤ 64 B） |
-| 對象種類、場地的設備 | `objects.yaml` 的 `classes`／`instances` 加一筆 | 設備 id 不重複；事件的 `object_class` 要在這裡 |
-| 動作 | `actions.yaml` 加一筆 | 名稱照 2-1b；BT 那邊同時加 Switch 的 case 和 `kValidActions` |
-| 能力 | `tools.yaml` 加一筆（新的 bit）＋ `cbba_core/capabilities.hpp` 一起加 | bit 只增不改；只加 YAML 不改程式時 CBBA 用不到（會警告） |
-| 平台 | `platforms.yaml` 加一筆（新的 code） | code 只增不改；CBBA 出價要另外對應（目前只認 uav、quadruped） |
+| 事件類型 | `event_types.yaml` 的 `event_types` 加一筆 | 偵測器還沒有就在 `detectors` 加一筆、標 `status: planned`；label 要和偵測器發的 `Detection` 一樣（≤ 64 B） |
+| 物件類別 | `objects.yaml` 加一筆 | 同時在用到的動作的 `objects` 加上（兩邊要一致） |
+| 設備 | `site-config/<site>/devices.csv` 加一行 | id 寫「類別:實例」；machine 要填安全距離 |
+| 動作 | `actions.yaml` 加一筆 | 名稱照 2-1b；BT 那邊同時加 Switch 的 case |
+| 能力 | `tools.yaml` 加一筆（新的 bit）＋ `cbba_core/capabilities.hpp` 一起加 | bit 只增不改 |
+| 平台 | `platforms.yaml` 加一筆（新的 code） | CBBA 出價要另外對應（目前只認 uav、quadruped） |
 | 載具 | `fleet.yaml` 加一筆 | 機號 1～254 不重複；三處機號要一致（cbba_node、BT、這裡） |
 
-加完跑檢查（隔離編譯後）：`/out/build/swarm_cbba/test_registry`；或直接用 `registry_dir` 開 cbba_node，有錯會印出哪一份、哪一筆，並拒絕啟動。
-多人同時改用 git：各自加在清單後面，衝突通常只是相鄰行，照兩邊都留的方式合併。
+加完跑檢查（隔離編譯後）：`/out/build/swarm_cbba/test_registry`；或直接用 `registry_dir` 開 cbba_node，有錯會印出哪一份、哪一筆。
 
 ## cbba_node 怎麼用
 
@@ -91,15 +117,12 @@ ros2 run swarm_cbba cbba_node --ros-args ... -p registry_dir:=$HOME/CBBA_BT/regi
 ```
 
 - 載具：從 `fleet.yaml` 找自己的機號，平台要和 `agent_type` 一致（uav = UAV、quadruped = UGV），能力取代 `capabilities` 參數；
-  不在清單裡的機號照參數（印警告）。
-- 閘道（`participate: never`）：自己的機號應該在 `gateways`；全隊的 `gateways` 參數（判斷閘道在不在線）改用 `fleet.yaml` 的。
-- 沒給 `registry_dir`：照舊用參數（`capabilities`、`gateways`），行為和之前一樣。
-
-檢查：`swarm_cbba` 的單元測試 `test_registry` 讀這個目錄，和 `capabilities.hpp` 比對。
+  平台的成本參數從 `platforms.yaml`。不在清單裡的機號照參數（印警告）。
+- 閘道：全隊的 `gateways` 參數改用 `fleet.yaml` 的。
+- 沒給 `registry_dir`：照舊用參數，行為和之前一樣。cbba_node 不讀 site-config。
 
 ## 目前的內容
 
-模擬的機隊（docker：uav1～3、dog1～3、gcs）。能力照節點原本的預設（UAV：mobility_air、rgb_camera；狗：mobility_ground、
-rgb_camera），所以給不給 `registry_dir` 出價都一樣；實機（V60 的雲台變焦、熱像等）的能力待和伯宇確認。
-`platforms.yaml` 的成本參數和現在 `swarm_cbba/config/cbba_uav.yaml`、`cbba_v60.yaml`（及程式預設）一樣，M1 改成從這裡讀之後，
-那兩份的對應參數就拿掉。
+模擬的機隊（docker：uav1～3、dog1～3、gcs）與 yard 場景。能力照節點原本的預設（UAV：mobility_air、rgb_camera；狗：mobility_ground、
+rgb_camera），所以給不給 `registry_dir` 出價都一樣。實機（V60 的雲台變焦、熱像、喇叭；室內無人機的 indoor_flight、高度 3 m、
+起降板）待確認（2-1b 第十節）。

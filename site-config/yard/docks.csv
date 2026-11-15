@@ -1,0 +1,10 @@
+# 充電樁（dock）與起降點（pad）（2-1b 第五節，site-config/yard，2026-11-15）
+# UAV 只能在指定起降點降落；fleet.yaml 的 limits.landing_pads、limits.docks 指到這裡
+# pad：模擬的出生點（UAV_SPAWN_ORIGIN (−40, −30)、間隔 5 m）；dock：狗的出生點（docker/itest/config.json 的 dog_start）
+id,kind,platform,x,y,z,floor
+PAD_1,pad,uav,-40.0,-30.0,0.0,1F
+PAD_2,pad,uav,-40.0,-25.0,0.0,1F
+PAD_3,pad,uav,-40.0,-20.0,0.0,1F
+DOCK_1,dock,quadruped,-35.0,7.5,0.0,1F
+DOCK_2,dock,quadruped,-35.0,-7.5,0.0,1F
+DOCK_3,dock,quadruped,-15.0,25.0,0.0,1F

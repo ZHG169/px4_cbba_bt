@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task_spec.schema.json",
+  "title": "TaskSpec（2-1b 第六節，schema 1.0，2026-11-16 草案）",
+  "description": "規劃器（範本展開、VLM 提案）的輸出、/validate 的輸入；說明見 registry/api.md 第 4 節。動作名稱、物件類別、參數的合法值由註冊表決定（/validate 的 vocabulary、params 層），這裡只管形狀",
+  "type": "object",
+  "required": ["schema_version", "priority", "roles"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "group_id": {"type": "string"},
+    "incident": {
+      "type": "object",
+      "properties": {
+        "event_id": {"type": "string"},
+        "event_type": {"type": "string"},
+        "revision": {"type": "integer", "minimum": 1},
+        "location": {"$ref": "#/$defs/location"},
+        "track_id": {"type": "string"}
+      }
+    },
+    "rule": {"type": "string"},
+    "priority": {"enum": ["P0", "P1", "P2", "P3"]},
+    "expires_s": {"type": "number", "minimum": 0},
+    "requires_approval": {"type": "boolean"},
+    "roles": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/role"}},
+    "coupling": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "precedence": {
+          "description": "[[先, 後], ...]；原文的一維 [A, B] 也收",
+          "oneOf": [
+            {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
+            {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}
+          ]
+        },
+        "sync_window_s": {"type": "number", "minimum": 0}
+      }
+    },
+    "fallback_template": {"type": "string"}
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "required": ["role", "platform", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "platform": {"type": "string", "description": "any 或 platforms.yaml 的 name"},
+        "required_capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "optional": {"type": "boolean", "default": false},
+        "skip_satisfies": {"type": "boolean", "default": false},
+        "steps": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/step"}}
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["action"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {"type": "string", "minLength": 1},
+        "object": {"type": "string"},
+        "location": {"oneOf": [{"$ref": "#/$defs/location"}, {"type": "string", "description": "範本的 {incident.zone} 這類代換"}]},
+        "params": {"type": "object"}
+      }
+    },
+    "location": {
+      "oneOf": [
+        {"type": "object", "required": ["zone"], "properties": {"zone": {"type": "string"}}, "additionalProperties": false},
+        {"type": "object", "required": ["poi"], "properties": {"poi": {"type": "string"}}, "additionalProperties": false},
+        {"type": "object", "required": ["asset"], "properties": {"asset": {"type": "string"}}, "additionalProperties": false},
+        {"type": "object", "required": ["dock"], "properties": {"dock": {"type": "string"}}, "additionalProperties": false},
+        {"type": "object", "required": ["x", "y"],
+         "properties": {"frame": {"const": "map"}, "floor": {"type": "string"}, "x": {"type": "number"},
+                        "y": {"type": "number"}, "z": {"type": "number"}, "radius_m": {"type": "number", "minimum": 0},
+                        "zone": {"type": "string"}},
+         "additionalProperties": false}
+      ]
+    }
+  }
+}

@@ -1,19 +1,30 @@
-# 機隊（2-1b 註冊表 REG-1，schema 1.0，2026-11-14）
+# 機隊（2-1b 註冊表 REG-1，schema 1.0；2026-11-15 照 2-1b 原文第四節加 ns、limits）
 #
-# 每台載具的機號、平台（platforms.yaml 的 name）、namespace、宣告的能力（tools.yaml 的 name）。
+# 每台載具的機號、平台（platforms.yaml 的 name）、ns、宣告的能力（tools.yaml 的 name）、限制（limits）。
 # cbba_node 給 registry_dir 時從這裡讀自己機號的平台與能力（取代 capabilities 參數；平台要和 agent_type 一致，
 # 不一致就拒絕啟動）；不在清單裡的機號照舊用參數。能力故障（E_HW）在執行期扣掉，不改這份。
+#   id        CBBA 機號（1～254；原文的 id 是名稱，我們的名稱放 name）
+#   ns        ROS namespace；實機無人機是 Node-RED 的介面前綴（例如 /MAV1/api，多台 /MAV2/api…，adapter 不寫死）
+#   limits    原文：UAV 的 max_altitude_m、max_flight_s、landing_pads（site-config 的 docks.csv）；
+#             我們加：狗的 docks（充電樁）。檢查器的「參數」「續航」層用
 # gateways：閘道（非競標的 CBBA 協定節點，不是載具，不列入能力統計），cbba_node 用來判斷閘道在不在線。
 #
-# 目前是模擬的機隊（docker：uav1～3、dog1～3）；能力照節點原本的預設（UAV：mobility_air、rgb_camera；
-# 狗：mobility_ground、rgb_camera），實機的能力（V60 的雲台變焦、熱像等）待和伯宇確認後再加。
+# 目前是模擬的機隊（docker：uav1～3、dog1～3，yard 場景）；能力照節點原本的預設（UAV：mobility_air、rgb_camera；
+# 狗：mobility_ground、rgb_camera）。實機（V60 的雲台變焦、熱像、喇叭；室內無人機的 indoor_flight、高度 3 m）待和伯宇確認後再加
+#（2-1b 第十節的待確認問題）。
 schema_version: "1.0"
 robots:
-  - {id: 1, name: uav1, platform: uav, namespace: /uav1, capabilities: [mobility_air, rgb_camera]}
-  - {id: 2, name: uav2, platform: uav, namespace: /uav2, capabilities: [mobility_air, rgb_camera]}
-  - {id: 3, name: uav3, platform: uav, namespace: /uav3, capabilities: [mobility_air, rgb_camera]}
-  - {id: 50, name: dog1, platform: quadruped, namespace: /v60, capabilities: [mobility_ground, rgb_camera]}
-  - {id: 51, name: dog2, platform: quadruped, namespace: /v60_1, capabilities: [mobility_ground, rgb_camera]}
-  - {id: 52, name: dog3, platform: quadruped, namespace: /v60_2, capabilities: [mobility_ground, rgb_camera]}
+  - {id: 1, name: uav1, platform: uav, ns: /uav1, capabilities: [mobility_air, rgb_camera],
+     limits: {max_altitude_m: 10.0, max_flight_s: 900, landing_pads: [PAD_1]}}
+  - {id: 2, name: uav2, platform: uav, ns: /uav2, capabilities: [mobility_air, rgb_camera],
+     limits: {max_altitude_m: 10.0, max_flight_s: 900, landing_pads: [PAD_2]}}
+  - {id: 3, name: uav3, platform: uav, ns: /uav3, capabilities: [mobility_air, rgb_camera],
+     limits: {max_altitude_m: 10.0, max_flight_s: 900, landing_pads: [PAD_3]}}
+  - {id: 50, name: dog1, platform: quadruped, ns: /v60, capabilities: [mobility_ground, rgb_camera],
+     limits: {docks: [DOCK_1]}}
+  - {id: 51, name: dog2, platform: quadruped, ns: /v60_1, capabilities: [mobility_ground, rgb_camera],
+     limits: {docks: [DOCK_2]}}
+  - {id: 52, name: dog3, platform: quadruped, ns: /v60_2, capabilities: [mobility_ground, rgb_camera],
+     limits: {docks: [DOCK_3]}}
 gateways:
-  - {id: 200, name: gcs, namespace: /gcs}
+  - {id: 200, name: gcs, ns: /gcs}
