@@ -307,7 +307,8 @@ struct CommStats
   // 改版（revision，2026-11-13）
   int revisions{0};             // 套用的改版（含自己建立的）
   int reauctions{0};            // 其中改了平台、能力、優先級，重新競標的
-  int retargets{0};             // 其中只動了位置、位移 < retarget_threshold，不重新評估的（任務欄位補齊 04）
+  int retargets{0};
+  int zone_warnings{0};         // 區域註冊表的版本不同、不認得的 zone_policy_id（任務欄位補齊 05，只告警）             // 其中只動了位置、位移 < retarget_threshold，不重新評估的（任務欄位補齊 04）
   int rejected_revisions{0};    // 不是建立者送的改版（不套用、不轉送）
   int revision_pulls{0};        // 看到鄰居的紀錄是較新的 revision，向它要任務定義的次數
   // 過期（2026-11-13）
@@ -549,6 +550,20 @@ public:
   std::uint16_t incidentRevision(TaskId group_id) const;
   const IncidentState * incident(TaskId group_id) const;
   std::vector<IncidentResult> takeIncidentResults();   // 機器人：自己提案的結果（取走）
+
+  // 區域註冊表的告警（任務欄位補齊 05，協定版本 5）：收到的任務定義帶的區域註冊表版本和本機的不同、
+  // 或 zone_policy_id 本機不認得。只告警、照常出價（不認得的政策只套用區域的 no_entry）；每個（任務, revision）一次
+  struct ZoneWarning
+  {
+    TaskId task{0};
+    std::uint16_t revision{0};
+    std::uint16_t task_version{0};    // 建立者的區域註冊表版本
+    std::uint16_t local_version{0};   // 本機的（0 = 沒有區域註冊表）
+    std::uint16_t policy{0};
+    bool version_mismatch{false};
+    bool unknown_policy{false};
+  };
+  std::vector<ZoneWarning> takeZoneWarnings();
   // 閘道：這次接受的（group → 新的 state；取走，給節點發 incident_updates）
   std::vector<std::pair<TaskId, IncidentState>> takeAcceptedIncidents();
 
@@ -611,6 +626,9 @@ private:
   // 任務
   wire::TaskAnnounceBody announceBody(TaskId id) const;
   static wire::TaskAnnounceBody bodyOf(const Task & t);   // 任務定義的欄位（relay 不填）
+  void noteZones(const Task & task);
+  std::set<std::pair<TaskId, std::uint16_t>> zone_noted_;   // 已經檢查過區域版本的（task, revision）
+  std::vector<ZoneWarning> zone_warnings_;
   bool smallMove(const Task & old, const Task & task) const;
   bool assign(const Task & task, double now, const std::string & spec = std::string());
   void sendSpecParts(TaskId id, std::uint16_t revision, const std::string & spec, double now);

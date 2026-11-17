@@ -631,3 +631,55 @@ TEST(Registry, SemanticIds)
   events.write("event_types.yaml", text);
   EXPECT_TRUE(hasError(checkRegistry(loadRegistry(events.dir())), "id 3 同時給了 fire 和 smoke"));
 }
+
+TEST(Registry, SiteZonesForCbba)
+{
+  // 任務欄位補齊 05（2026-11-18）：repo 的 zones.geojson 有版本、樓層編號、政策；轉成 CBBA 的區域註冊表（平台代碼、
+  // 政策指到區域的索引）；fleet.yaml 的樓層。政策指到不存在的區域、不認得的平台是錯誤
+  const Registry reg = loadRegistry(REGISTRY_DIR);
+  const Site site = loadSite(SITE_DIR);
+  EXPECT_TRUE(checkSite(site, reg).empty()) << firstOf(checkSite(site, reg));
+  EXPECT_EQ(site.version, 1);
+  ASSERT_EQ(site.policies.size(), 2u);
+  EXPECT_EQ(reg.robot(50)->floor, 1);
+  EXPECT_EQ(reg.robot(1)->floor, 1);
+
+  const cbba_core::ZoneRegistry zones = toZoneRegistry(site, &reg);
+  EXPECT_EQ(zones.version, 1);
+  ASSERT_EQ(zones.zones.size(), site.zones.size());
+  const auto index = [&site](const std::string & id) {
+      for (std::size_t i = 0; i < site.zones.size(); ++i) {
+        if (site.zones[i].id == id) {
+          return i;
+        }
+      }
+      return site.zones.size();
+    };
+  const cbba_core::ZoneArea & hv = zones.zones[index("Z_HV_A")];
+  EXPECT_EQ(hv.floor, 1);
+  EXPECT_EQ(hv.no_entry, 1u << 2);   // quadruped 的代碼 2
+  EXPECT_TRUE(zones.zones[index("Z_CONTROL")].indoor);
+  const cbba_core::ZonePolicy * p1 = zones.policy(1);
+  ASSERT_NE(p1, nullptr);
+  ASSERT_EQ(p1->forbid.size(), 1u);
+  EXPECT_EQ(p1->forbid[0].zone, index("Z_TANKS"));
+  EXPECT_EQ(p1->forbid[0].platforms, 1u << 1);   // uav
+  EXPECT_EQ(zones.policy(9), nullptr);
+
+  TempRegistry tmp;
+  std::string text = readFile(fs::path(SITE_DIR) / "zones.geojson");
+  const std::string from = "\"zone\": \"Z_TANKS\"";
+  const auto at = text.find(from);
+  ASSERT_NE(at, std::string::npos);
+  text.replace(at, from.size(), "\"zone\": \"Z_NOWHERE\"");
+  const std::string pl = "\"platforms\": [\n      \"uav\"\n     ]";
+  const auto at2 = text.find(pl);
+  ASSERT_NE(at2, std::string::npos) << "zones.geojson 的格式和測試預期的不同";
+  text.replace(at2, pl.size(), "\"platforms\": [\"boat\"]");
+  tmp.write("site/zones.geojson", text);
+  const Site bad = loadSite(tmp.site());
+  const auto errors = checkSite(bad, reg);
+  EXPECT_TRUE(hasError(errors, "政策 1 的區域 Z_NOWHERE 不存在")) << firstOf(errors);
+  EXPECT_TRUE(hasError(errors, "政策 1 的平台 boat")) << firstOf(errors);
+  EXPECT_THROW(toZoneRegistry(bad, &reg), std::runtime_error);
+}

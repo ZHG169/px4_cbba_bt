@@ -69,9 +69,13 @@ Capabilities effectiveRequiredCaps(const Task & task);
 Capabilities availableCaps(const AgentState & agent);
 Capabilities defaultCaps(AgentType type);
 
-enum class Fitness { OK, PLATFORM, CAPABILITY };
+// 2026-11-18 加區域的四種（zones.hpp 的 ZoneVerdict）
+enum class Fitness { OK, PLATFORM, CAPABILITY, WRONG_FLOOR, ALTITUDE_LIMIT, ZONE_FORBIDDEN, INDOOR };
+const char * toString(Fitness f);   // 出價表的原因：platform、capability、wrong_floor、altitude_limit、zone_forbidden、indoor
 
-// 只看平台與能力（其他條件：OPEN、電量、排除、鎖定…在 CbbaAgent／scoring）
-Fitness fitness(const AgentState & agent, const Task & task);
+struct ZoneRegistry;
+// 平台、能力，再來樓層、高度、區域（zones 是 nullptr 時只看樓層與載具的高度上限）。
+// 其他條件（OPEN、電量、排除、鎖定…）在 CbbaAgent／scoring
+Fitness fitness(const AgentState & agent, const Task & task, const ZoneRegistry * zones = nullptr);
 
 }  // namespace cbba_core

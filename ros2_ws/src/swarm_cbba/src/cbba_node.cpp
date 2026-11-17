@@ -29,7 +29,7 @@
 //               detections   (swarm_interfaces/Detection)    閘道才發：收到的新偵測（含閘道本機 detection 話題的），每筆一次
 // 介面 v2.0（2026-11-14，2-1b M0 合約第四節）：Task 加 priority、platform、required_capabilities、group／role、floor、
 // deadline_hard、release／expires（舊型任務填對應後的值）；TaskResult 加 failure_code（8 個 E_* → reason，
-// cbba_core/failure_codes.hpp）、failed_capability（E_HW：這台拿掉這個能力，到重開為止）、findings_uri（只記 log）
+// cbba_core/failure_codes.hpp）、failed_capability（E_HW：這台拿掉這個能力，到 capability_restored 或重開為止）、findings_uri（只記 log）
 //   CBBA → 測試、地面站
 //               cbba_path    (std_msgs/UInt64MultiArray)     這台目前的路徑（bundle，依執行順序的 task_id），變動時發一次（2026-11-11 起 64 位元）
 //                                                            （2026-10-27，我們加的）：current_task 只有路徑第一個，弱網測試要比對
@@ -86,6 +86,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int16.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <swarm_interfaces/msg/detection.hpp>
@@ -419,11 +420,46 @@ public:
           me->platform.c_str(), capabilitiesToString(availableCaps(s)).c_str());
         applyPlatform(*platform, s);
         platform_bundle = platform->max_bundle;
+        s.floor = me->floor;   // 任務欄位補齊 05（2026-11-18）：所在樓層、高度上限
+        s.max_altitude = me->limits.max_altitude_m.value_or(0.0);
+      }
+    }
+    // 樓層、高度上限（zones.hpp 的 WRONG_FLOOR、ALTITUDE_LIMIT）：註冊表的 fleet.yaml，明確給參數時用參數；0 = 不知道／沒有
+    {
+      const int floor = declare_parameter<int>("floor", s.floor);
+      if (floor < 0 || floor > 255) {
+        throw std::invalid_argument("floor must be 0~255 (0 = unknown)");
+      }
+      s.floor = static_cast<std::uint8_t>(floor);
+      s.max_altitude = declare_parameter<double>("max_altitude_m", s.max_altitude);
+    }
+
+    // 區域註冊表（任務欄位補齊 05，2026-11-18）：site-config/<site>/zones.geojson，全隊讀同一份。空 = 不檢查區域
+    const std::string site_dir = declare_parameter<std::string>("site_dir", envOr("CBBA_SITE_DIR", ""));
+    std::shared_ptr<const ZoneRegistry> zones;
+    if (!site_dir.empty()) {
+      const swarm_cbba::Site site = swarm_cbba::loadSite(site_dir);   // 讀不到、格式不對：丟例外，拒絕啟動
+      if (registry) {
+        const auto errors = swarm_cbba::checkSite(site, *registry);
+        for (const auto & e : errors) {
+          RCLCPP_ERROR(get_logger(), "場域設定：%s", e.c_str());
+        }
+        if (!errors.empty()) {
+          throw std::runtime_error("site " + site_dir + " has " + std::to_string(errors.size()) + " error(s)");
+        }
+      }
+      zones = std::make_shared<const ZoneRegistry>(swarm_cbba::toZoneRegistry(site, registry ? &*registry : nullptr));
+      RCLCPP_INFO(get_logger(), "區域註冊表 %s：版本 %u、%zu 個區域、%zu 個政策；樓層 %u、高度上限 %.1f m",
+        site_dir.c_str(), static_cast<unsigned>(zones->version), zones->zones.size(), zones->policies.size(),
+        static_cast<unsigned>(s.floor), s.max_altitude);
+      if (zones->version == 0) {
+        RCLCPP_WARN(get_logger(), "zones.geojson 沒有 version：任務帶的區域註冊表版本比不出差異");
       }
     }
 
     // ---------- 出價、協定、UDP ----------
     ScoringParams scoring;
+    scoring.zones = zones;
     // 出價：時間折扣報酬（TDR，M1，2026-11-15；cbba_core/doc/formula/tdr_design.md）。全隊要一樣
     //   energy_weight：用掉全部可用電量相當於少多少分；half_life_by_priority：任務沒帶 half_life 時 P0～P3 的預設（秒，0 = 不打折）
     scoring.energy_weight = declare_parameter<double>("energy_weight", scoring.energy_weight);
@@ -556,6 +592,10 @@ public:
     orphan_pub_ = create_publisher<TaskOrphanedMsg>(topic("task_orphaned"), rclcpp::QoS(20).reliable());
     // 排第一卻等 TaskSpec 超過 spec_wait（協定版本 4，2026-11-12）：每 spec_wait 發一次，給閘道重送、改版或取消
     spec_missing_pub_ = create_publisher<TaskMsg>(topic("task_spec_missing"), rclcpp::QoS(20).reliable());
+    // 任務欄位補齊第二批（2026-11-18）：區域註冊表的告警（版本不同、不認得的政策）、能力恢復
+    zone_warning_pub_ = create_publisher<std_msgs::msg::String>(topic("zone_warning"), rclcpp::QoS(20).reliable());
+    capability_sub_ = create_subscription<std_msgs::msg::String>(topic("capability_restored"), rclcpp::QoS(10).reliable(),
+        [this](std_msgs::msg::String::ConstSharedPtr msg) {onCapabilityRestored(*msg);});
     // 路徑（2026-10-27）：只要最新的一份，晚訂閱的也拿得到
     // 同機號衝突（協定版本 4，2026-11-11）：衝突的機號，每次新的衝突發一次（給閘道、地面站）
     conflict_pub_ = create_publisher<std_msgs::msg::UInt16>(topic("agent_conflict"), rclcpp::QoS(10).reliable());
@@ -578,6 +618,8 @@ public:
       gc.group_recovery_timeout = declare_parameter<double>("group_recovery_timeout_s", gc.group_recovery_timeout);
       // 對照表存檔（任務欄位補齊 01，2026-11-17）：(incident_id, role) → task_id，閘道重開後沿用；空字串 = 不存
       gc.restore_confirm = declare_parameter<double>("restore_confirm_s", gc.restore_confirm);
+      // 單獨 P0 任務沒人得標的看門狗（任務欄位補齊 07）：0 = 不用
+      gc.p0_unassigned_timeout = declare_parameter<double>("p0_unassigned_timeout_s", gc.p0_unassigned_timeout);
       gateway_ = std::make_unique<Gateway>(*comm_, gc);
       gateway_state_file_ = declare_parameter<std::string>("gateway_state_file",
           state_dir + "/gateway_" + std::to_string(agent_id) + ".state");
@@ -879,7 +921,7 @@ private:
 
   // 失敗碼的附帶處理（合約第三節的表「另外」那一欄）：E_HW 拿掉故障的能力（下一個 tick 經 setState 生效、AGENT_STATE
   // 廣播的可用能力跟著少，閘道的機隊可行性、O1 看得到）；E_PRECONDITION 發 task_orphaned 給值班。
-  // 拿掉的能力到 cbba_node 重開才恢復（能力恢復的話題 capability_status 是 M1）
+  // 拿掉的能力等 capability_restored（能力名稱）放回來，或 cbba_node 重開（2026-11-18）
   void applyFailureCode(const TaskResultMsg & msg, const FailureCodeInfo & code)
   {
     const std::string name = taskName(msg.task_id);
@@ -890,7 +932,7 @@ private:
           msg.failure_code.c_str(), msg.failed_capability.c_str());
       } else if ((state_.failed_caps & capBit(*cap)) == 0) {
         state_.failed_caps |= capBit(*cap);
-        RCLCPP_WARN(get_logger(), "能力 %s 故障（任務 %s 回報 %s）：之後不對需要它的任務出價，到重開為止；"
+        RCLCPP_WARN(get_logger(), "能力 %s 故障（任務 %s 回報 %s）：之後不對需要它的任務出價，到 capability_restored 或重開為止；"
           "可用能力 %s", capabilityName(*cap), name.c_str(), msg.failure_code.c_str(),
           capabilitiesToString(availableCaps(state_)).c_str());
       }
@@ -1035,6 +1077,8 @@ private:
     publishOutputs(now);
     publishAssignments(now);
     dropOptionals(now);
+    handleWatchdog(now);
+    handleZoneWarnings();
     saveGatewayState();
     handleIncidents(now);
     handleGroupFailures(now);
@@ -1570,6 +1614,7 @@ private:
       in.expires_sec = req.expires_sec;
       in.spec = req.spec;
       e.distinct_agent_set = req.distinct_agent_set;
+      e.zone_policy_id = req.zone_policy_id;
       in.fallback_template = req.fallback_template;
       in.incident_revision = req.incident_revision;
       // 識別、語意、空間（任務欄位補齊第一批）：名稱 → 編號，寫進 spec 最上層
@@ -1755,6 +1800,78 @@ private:
       RCLCPP_WARN(get_logger(), "任務 %s 的 TaskSpec schema_version %s 這版不認得（認得 %u.x）：BT 可能不能執行",
         taskName(id).c_str(), version.c_str(), static_cast<unsigned>(kRoleSpecSchemaMajor));
     }
+  }
+
+  // 單獨 P0 任務沒人得標（閘道，任務欄位補齊 07）：task_orphaned P0_UNASSIGNED；有 fallback_template 時發 FallbackRequest
+  void handleWatchdog(double now)
+  {
+    if (!gateway_) {
+      return;
+    }
+    for (const UnassignedP0 & w : gateway_->stepWatchdog(now)) {
+      const auto it = comm_->agent().tasks().find(w.task);
+      if (it == comm_->agent().tasks().end()) {
+        continue;
+      }
+      const std::uint32_t version = ++p0_fallback_version_[w.task];
+      const std::string detail = "P0 任務 " + std::to_string(static_cast<int>(w.waited)) + " s 沒有得標者也沒有正式指派" +
+        (w.fallback_template.empty() ? std::string("（沒有 fallback_template，只告警）") :
+        "；FallbackRequest " + w.fallback_template + " #" + std::to_string(version));
+      RCLCPP_WARN(get_logger(), "看門狗：%s（%s）%s", taskName(w.task).c_str(), w.incident_id.c_str(), detail.c_str());
+      publishOrphan(it->second, TaskOrphanedMsg::P0_UNASSIGNED, w.waited, detail);
+      if (!w.fallback_template.empty()) {
+        FallbackRequestMsg m;
+        m.task_id = w.task;
+        m.incident_id = w.incident_id;
+        m.failure_version = version;
+        m.fallback_template = w.fallback_template;
+        m.reason = FallbackRequestMsg::P0_UNASSIGNED;
+        m.reason_text = "單獨 P0 任務沒人得標";
+        m.position_valid = true;
+        m.position.x = it->second.position.x;
+        m.position.y = it->second.position.y;
+        m.position.z = it->second.position.z;
+        m.stamp = toRosTime(now);
+        fallback_pub_->publish(m);
+      }
+    }
+  }
+
+  // 區域註冊表的告警（任務欄位補齊 05）：log＋zone_warning 話題（std_msgs/String），照常出價
+  void handleZoneWarnings()
+  {
+    for (const CbbaComm::ZoneWarning & w : comm_->takeZoneWarnings()) {
+      std::string text = "任務 " + taskName(w.task) + " rev " + std::to_string(w.revision) + "：";
+      if (w.version_mismatch) {
+        text += "區域註冊表版本 " + std::to_string(w.task_version) + "（建立者）≠ 本機 " +
+          (w.local_version == 0 ? std::string("沒有（site_dir 沒給）") : std::to_string(w.local_version));
+      }
+      if (w.unknown_policy) {
+        text += std::string(w.version_mismatch ? "；" : "") + "zone_policy_id " + std::to_string(w.policy) +
+          " 本機不認得（只套用區域的 no_entry）";
+      }
+      RCLCPP_WARN(get_logger(), "區域：%s。照常出價（第一階段只告警）", text.c_str());
+      std_msgs::msg::String m;
+      m.data = text;
+      zone_warning_pub_->publish(m);
+    }
+  }
+
+  // 能力恢復（任務欄位補齊 08，2026-11-18）：E_HW 拿掉的能力，BT／維修確認好了發 capability_restored（能力名稱）放回來
+  void onCapabilityRestored(const std_msgs::msg::String & msg)
+  {
+    const auto cap = capabilityFromName(msg.data);
+    if (!cap) {
+      RCLCPP_WARN(get_logger(), "capability_restored：不認得的能力「%s」", msg.data.c_str());
+      return;
+    }
+    if ((state_.failed_caps & capBit(*cap)) == 0) {
+      RCLCPP_INFO(get_logger(), "capability_restored：%s 本來就沒有標成故障", capabilityName(*cap));
+      return;
+    }
+    state_.failed_caps &= ~capBit(*cap);
+    RCLCPP_INFO(get_logger(), "能力 %s 恢復：之後可以對需要它的任務出價；可用能力 %s", capabilityName(*cap),
+      capabilitiesToString(availableCaps(state_)).c_str());
   }
 
   // optional 角色的自動關閉（閘道，4e）：O1～O3 成立就送 TASK_CLOSE reason 4，log 原因、發 task_orphaned 一次給值班看
@@ -2142,6 +2259,9 @@ private:
   std::string gateway_state_file_;                 // 對照表存檔（任務欄位補齊 01）
   std::string gateway_state_saved_;                // 上次寫進檔案的內容（變了才寫）
   std::set<TaskId> schema_warned_;                 // 機器人：TaskSpec 的主版本不認得、已經警告過的任務
+  std::map<TaskId, std::uint32_t> p0_fallback_version_;   // 單獨 P0 任務的 FallbackRequest 第幾次（冪等鍵）
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr zone_warning_pub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr capability_sub_;
   rclcpp::Service<InjectTaskSrv>::SharedPtr inject_srv_;
   rclcpp::Publisher<AssignmentsMsg>::SharedPtr assignments_pub_;
   double assignments_period_{0.5};

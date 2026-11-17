@@ -24,7 +24,7 @@ float32 release_sec                # 多久之後才能開始；0 = 立即
 float32 expires_sec                # 多久之後失效；0 = 不失效
 uint16 half_life_s                 # 價值衰減（目前只帶不用）
 uint8 can_preempt                  # 可以搶占的優先級遮罩（位元 p = Pp）；0 = 預設（比自己低的級）
-uint8 preempt_margin_pct           # 同級搶占要好多少；0 = 同級不搶
+uint8 preempt_margin_pct           # 同級搶占（can_preempt 要包含自己那一級）時，出價要 > 被搶任務的分數 ×（1 + 這個 / 100）
 float32 commit_radius              # 執行者離目標這麼近之後不可搶占（m）；0 = 不用
 uint8 min_battery_reserve          # 做完還要剩的電量（%）；0 = 用載具的設定
 uint8 role_index                   # 第幾個角色（0 起）
@@ -63,6 +63,10 @@ geometry_msgs/Point target         # 事件位置（map ENU）
 string track_id
 float32 uncertainty_m              # 目標位置的不確定半徑
 float32 standoff_m                 # 觀察點（position）至少離目標多遠；0 = 不檢查
+# 任務欄位補齊第二批（2026-11-18，協定版本 5）：區域註冊表（site-config 的 zones.geojson）的 policies；0 = 只套用各區域的
+# no_entry。閘道沒有區域註冊表、或沒有這個政策 → 拒絕。指定了 platform 時，觀察點在那個平台不能進的區域也拒絕
+uint16 zone_policy_id
+# fallback_template 單獨任務也可以給（2026-11-18）：P0 沒人得標 p0_unassigned_timeout_s（10 s）時閘道發 FallbackRequest
 ---
 bool accepted                      # 建立了、改版了，或同一個鍵重送（duplicate）
 bool duplicate

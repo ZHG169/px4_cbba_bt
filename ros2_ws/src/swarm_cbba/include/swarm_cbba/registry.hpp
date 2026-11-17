@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "cbba_core/types.hpp"
+#include "cbba_core/zones.hpp"
 
 namespace swarm_cbba
 {
@@ -63,6 +64,7 @@ struct RobotEntry
   std::string ns;                     // namespace（實機無人機是 Node-RED 的介面前綴 /MAV1/api）
   std::vector<std::string> capabilities;
   RobotLimits limits;
+  std::uint8_t floor{0};              // 所在樓層（zones.geojson 的 floor_id）；0 = 沒寫（2026-11-18）
 };
 
 struct GatewayEntry
@@ -265,6 +267,8 @@ struct Zone
   std::vector<std::string> no_entry;     // 哪些平台不能進（uav = 禁飛）
   std::optional<double> cruise_altitude_m;
   std::optional<double> ceiling_m;
+  std::uint8_t floor_id{0};    // 樓層編號（任務、fleet.yaml 的 floor 用它）；0 = 不分（2026-11-18）
+  bool indoor{false};          // 室內：UAV 要 indoor_flight 才能接（2026-11-18）
   std::vector<std::array<double, 2>> polygon;   // map ENU，頭尾同一點
 
   bool contains(double x, double y) const;
@@ -304,9 +308,25 @@ struct Dock
   std::string floor;
 };
 
+// zones.geojson 的 policies（任務欄位補齊 05）：任務的 zone_policy_id 指的政策
+struct ZonePolicyEntry
+{
+  std::uint16_t id{0};
+  std::string name;
+  std::string description;
+  struct Forbid
+  {
+    std::string zone;
+    std::vector<std::string> platforms;
+  };
+  std::vector<Forbid> forbid;
+};
+
 struct Site
 {
   std::string dir;
+  std::uint16_t version{0};            // zones.geojson 的 version（內容改了就 + 1）；0 = 沒寫
+  std::vector<ZonePolicyEntry> policies;
   std::vector<Zone> zones;
   std::vector<Device> devices;
   std::vector<Poi> pois;
@@ -325,5 +345,9 @@ Site loadSite(const std::string & dir);
 // 狗的觀察姿態、狗的觀察點、充電樁不能在狗的禁入區（no_entry 有 quadruped）；UAV 的觀察點不能在禁飛區、
 // 不能高於區域的天花板；fleet.yaml 的 landing_pads、docks 要在 docks.csv（kind 與平台要對）
 std::vector<std::string> checkSite(const Site & site, const Registry & registry);
+
+// 給 CBBA 的區域註冊表（cbba_core/zones.hpp）：平台名稱 → 代碼用 registry 的 platforms.yaml（nullptr 時用內建的 uav 1、
+// quadruped 2）。不認得的平台、政策指到不存在的區域：丟 std::runtime_error
+cbba_core::ZoneRegistry toZoneRegistry(const Site & site, const Registry * registry);
 
 }  // namespace swarm_cbba

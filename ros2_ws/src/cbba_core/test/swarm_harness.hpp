@@ -32,11 +32,14 @@ public:
   explicit Swarm(double loss = 0.0, unsigned seed = 1, CommConfig config = CommConfig{})
   : loss_(loss), rng_(seed), config_(config) {}
 
+  // 之後加入的節點用這組出價參數（任務欄位補齊第二批：區域註冊表 params.zones；可以中途換，讓不同節點版本不同）
+  void setParams(const ScoringParams & params) {params_ = params;}
+
   CbbaComm & add(AgentId id, Vec3 pos, double battery = 100.0, AgentType type = AgentType::UAV)
   {
     AgentState s = makeState(id, pos, battery);
     s.type = type;
-    nodes_.push_back(std::make_unique<CbbaComm>(s, ScoringParams{}, config_));
+    nodes_.push_back(std::make_unique<CbbaComm>(s, params_, config_));
     online_.push_back(true);
     return *nodes_.back();
   }
@@ -46,7 +49,7 @@ public:
   {
     CommConfig config = config_;
     config.gateway = true;
-    nodes_.push_back(std::make_unique<CbbaComm>(makeState(id, pos, 100.0), ScoringParams{}, config));
+    nodes_.push_back(std::make_unique<CbbaComm>(makeState(id, pos, 100.0), params_, config));
     online_.push_back(true);
     return *nodes_.back();
   }
@@ -56,7 +59,7 @@ public:
   {
     const std::size_t i = indexOf(id);
     const AgentState s = nodes_[i]->agent().state();
-    nodes_[i] = std::make_unique<CbbaComm>(s, ScoringParams{}, config_);
+    nodes_[i] = std::make_unique<CbbaComm>(s, params_, config_);
     return *nodes_[i];
   }
 
@@ -68,7 +71,7 @@ public:
     CommConfig config = config_;
     config.gateway = true;
     config.epoch = epoch;
-    nodes_[i] = std::make_unique<CbbaComm>(s, ScoringParams{}, config);
+    nodes_[i] = std::make_unique<CbbaComm>(s, params_, config);
     return *nodes_[i];
   }
 
@@ -208,6 +211,7 @@ private:
   double loss_;
   std::mt19937 rng_;
   CommConfig config_;
+  ScoringParams params_;
   double now_{1.7e9};   // 系統時鐘的量級
   std::vector<std::unique_ptr<CbbaComm>> nodes_;
   std::vector<bool> online_;

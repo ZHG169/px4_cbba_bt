@@ -1,4 +1,7 @@
-// 機間通訊封包的表頭（不依賴 ROS）：協定版本 4（2026-11-11；版本 3 是 2026-10-28、版本 2 是 2026-10-09）
+// 機間通訊封包的表頭（不依賴 ROS）：協定版本 5（2026-11-18；版本 4 是 2026-11-11、3 是 2026-10-28、2 是 2026-10-09）
+//
+// 版本 5（任務欄位補齊第二批，docs/planner_task_definition_plan.md）：只改 TASK_ANNOUNCE，加 zone_policy_id、zone_registry_version
+// （124 → 128 B），其他封包和版本 4 相同。版本 4、5 互相拒收，全隊（含狗的 cbba_node）要一起重新編譯。
 //
 // 版本 4（2-1b M0 合約，doc/cbba_m0_contract.md）：task_id 改 64 位元（建立者 16 ｜ 世代 16 ｜ 流水號 32；上半 32 位元是 0 的
 // 是舊型 ID，數值同版本 3，世代 0）；CBBA_STATE 每筆紀錄 27 B（加 revision）、摘要每筆 24 B，鍵是（建立者, 世代）；
@@ -72,7 +75,7 @@ enum class PacketType : std::uint8_t
 };
 
 constexpr std::uint16_t kMagic = 0x4342;
-constexpr std::uint8_t kVersion = 4;
+constexpr std::uint8_t kVersion = 5;
 constexpr std::size_t kHeaderSize = 20;
 constexpr std::size_t kRelaySize = 14;
 constexpr std::uint16_t kMaxAgentId = 0xFFFE;   // 0xFFFF 保留

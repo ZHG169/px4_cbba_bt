@@ -186,10 +186,8 @@ CbbaAgent::BidInfo CbbaAgent::bidFor(TaskId id, double now) const
   if (distinctConflict(it->second)) {
     return {0.0, "distinct"};
   }
-  switch (fitness(state_, it->second)) {
-    case Fitness::PLATFORM: return {0.0, "platform"};
-    case Fitness::CAPABILITY: return {0.0, "capability"};
-    case Fitness::OK: break;
+  if (const Fitness f = fitness(state_, it->second, params_.zones.get()); f != Fitness::OK) {
+    return {0.0, toString(f)};
   }
   const InsertionLimits limits = limitsFor(it->second, path_, now);
   const Insertion ins = bestInsertion(state_, pathTasks(path_), it->second, now, params_, limits);
@@ -596,6 +594,15 @@ InsertionLimits CbbaAgent::limitsFor(
   limits.head_remaining = active_head ? exec_.active_remaining : -1.0;
   limits.exempt = exec_.active_pinned && !exec_.pinned.empty() ? exec_.pinned.front() : 0;   // 執行中的不檢查硬期限
   limits.min_position = canPreempt(task) ? 0 : pinned_in_path;
+  // 同級搶占（遮罩允許）：要好到超過 preempt_margin_pct 才排到已接受的任務前面（任務欄位補齊 07）
+  const bool self_pinned = std::find(exec_.pinned.begin(), exec_.pinned.end(), task.id) != exec_.pinned.end();
+  if (limits.min_position == 0 && pinned_in_path > 0 && !self_pinned) {
+    const auto head = tasks_.find(exec_.pinned.front());
+    if (head != tasks_.end() && priorityLevel(head->second) == priorityLevel(task)) {
+      limits.ahead_positions = pinned_in_path;
+      limits.ahead_min_gain = score(head->first) * (1.0 + task.ext.preempt_margin_pct / 100.0);
+    }
+  }
   // 真的會搶占（路徑第一個是執行中、可中斷、優先級較低的任務）：評分時不算延後它的損失
   limits.preempt_drops_head = active_head && exec_.preemptible && !exec_.pinned.empty() &&
     tasks_.count(exec_.pinned.front()) > 0 && mayPreempt(task, tasks_.at(exec_.pinned.front()));

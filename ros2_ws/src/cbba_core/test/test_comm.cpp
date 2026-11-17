@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <set>
 #include <vector>
 
@@ -1098,7 +1099,14 @@ TEST(Sync, LateJoinerCatchesUpUnderLoss)
   for (std::uint16_t k = 1; k <= 20; ++k) {
     swarm.node(1).cancelTask(makeTaskId(1, k), swarm.now());
   }
-  swarm.run(3.0);
+  // 前提：線上的兩台先一致。掉包是固定種子、每則封包抽一次：封包數一變（2026-11-18 TASK_ANNOUNCE 124 → 128 B，
+  // SYNC_BATCH 每批裝得少一點）抽到的掉包就整個不同，固定等 3 s 會剛好不夠。改成等到一致（最多 10 s）並印出花多久
+  double waited = 0.0;
+  while (waited < 10.0 && swarm.node(2).roundKey() != swarm.node(1).roundKey()) {
+    swarm.run(0.5);
+    waited += 0.5;
+  }
+  std::printf("node 1、2 一致：取消後 %.1f s\n", waited);
   ASSERT_EQ(swarm.node(2).roundKey(), swarm.node(1).roundKey());
 
   swarm.setOnline(3, true);

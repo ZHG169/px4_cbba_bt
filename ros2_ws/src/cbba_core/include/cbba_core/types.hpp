@@ -66,6 +66,10 @@ struct TaskExt
   std::uint16_t optional_unassigned_s{0};   // optional 關閉 O2 的等待；0 = 預設
   std::uint32_t spec_length{0};       // 這個 revision 的 TaskSpec（壓縮後）大小；0 = 沒有 TaskSpec
   std::uint32_t spec_crc{0};
+  // 區域（任務欄位補齊 05，協定版本 5，2026-11-18）：zones.geojson 裡事先定義的政策（0 = 只套用區域的 no_entry）、
+  // 建立者的區域註冊表版本（0 = 沒有；和本機的不同時只告警）
+  std::uint16_t zone_policy_id{0};
+  std::uint16_t zone_registry_version{0};
 };
 
 // 任務（時間一律用秒，節點層負責和 ROS 的 Time 互轉）
@@ -115,8 +119,9 @@ inline int taskPriority(const Task & task)
 }
 
 // by 可不可以搶占執行中的 victim（2026-11-13，合約第三節「搶占」）：新型任務看自己的 can_preempt 遮罩（位元 p = 可以搶 Pp），
-// 0 = 預設「比自己低的級」；舊型任務照原本（優先級較高才能搶）。同級要遮罩明確包含自己那一級才行
-//（合約的 preempt_margin「同級要好多少」還沒用：遮罩有開就允許）
+// 0 = 預設「比自己低的級」；舊型任務照原本（優先級較高才能搶）。同級要遮罩明確包含自己那一級才行，
+// 而且出價要 > 被搶任務目前的分數 ×（1 + preempt_margin_pct / 100）（任務欄位補齊 07，2026-11-18：
+// CbbaAgent::limitsFor 的 ahead_min_gain；跨級不看分數）
 inline bool mayPreempt(const Task & by, const Task & victim)
 {
   const unsigned own = priorityLevel(by);
@@ -199,6 +204,10 @@ struct AgentState
   // 2-1b（2026-11-11）：宣告的能力（fleet.yaml）；0 = 沒設定，依 type 用預設（capabilities.hpp 的 defaultCaps）
   Capabilities capabilities{0};
   Capabilities failed_caps{0};      // 回報故障（E_HW）的能力：不能用
+  // 任務欄位補齊第二批（2026-11-18，zones.hpp）：所在樓層（fleet.yaml；0 = 不知道，不擋樓層）、可以飛到的高度上限
+  //（fleet.yaml 的 limits.max_altitude_m；0 = 沒有）
+  std::uint8_t floor{0};
+  double max_altitude{0.0};
 };
 
 }  // namespace cbba_core

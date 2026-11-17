@@ -6,8 +6,9 @@
 //   created_ms 4 | release_ms 4 | deadline_ms 4 | expires_ms 4 | duration_sec 2 | half_life_s 2 |
 //   can_preempt 1 | preempt_margin_pct 1 | commit_radius_dm 2 | min_battery_reserve 1 |
 //   group_id 8 | role_index 1 | role_count 1 | precedence 1 | distinct_agent_set 1 | sync_window_s 2 |
-//   optional_no_capable_s 2 | optional_unassigned_s 2 | spec_length 4 | spec_crc 4
-//   共 20 + 14 + 90 = 124 B（固定大小，逐欄序列化；2026-11-16 CB-4 第三批加 distinct_agent_set，原本 123 B）
+//   optional_no_capable_s 2 | optional_unassigned_s 2 | spec_length 4 | spec_crc 4 |
+//   zone_policy_id 2 | zone_registry_version 2
+//   共 20 + 14 + 94 = 128 B（固定大小，逐欄序列化；協定版本 5〔2026-11-18〕加最後兩欄，版本 4 是 124 B）
 //
 //   task_id       64 位元：建立者 16 ｜ 世代 16 ｜ 流水號 32；上半 32 位元是 0 的是舊型 ID（建立者 × 65536 + 流水號）
 //   revision      同一個 task_id 的內容版本（建立者改內容時 + 1）
@@ -25,6 +26,8 @@
 //   group_id      任務組（格式同 task_id，0 = 單獨任務）；role_index／role_count（≤ 8）；precedence 要等的角色（位元 = role_index）；
 //                 distinct_agent_set 要由不同載具執行的角色（位元 = role_index）；sync_window_s 同時到位的時間窗；optional_no_capable_s、optional_unassigned_s optional 關閉 O1、O2 的等待（0 = 預設）
 //   spec_length、spec_crc  這個 revision 的 TaskSpec（TASK_SPEC 封包，壓縮後）大小與 CRC-32；0 = 沒有 TaskSpec
+//   zone_policy_id  區域註冊表（site-config 的 zones.geojson）裡事先定義的政策；0 = 只套用各區域的 no_entry
+//   zone_registry_version  建立者（閘道）的區域註冊表版本；0 = 建立者沒有區域註冊表。和本機的不同時只告警、照常出價
 //
 // 建立時送一次；補發（鄰居不認得）、保底重播時重送，內容原封不動、origin 沿用建立時的，
 // 已收過的飛機會當成重複丟掉。時刻用絕對時刻，轉送或補發時期限不會往後推。
@@ -42,7 +45,7 @@
 namespace cbba_core::wire
 {
 
-constexpr std::size_t kTaskAnnounceSize = kHeaderSize + kRelaySize + 90;
+constexpr std::size_t kTaskAnnounceSize = kHeaderSize + kRelaySize + 94;
 constexpr std::uint8_t kMaxRoles = 8;   // precedence 是 8 位元的遮罩
 
 struct TaskAnnounceBody
@@ -83,6 +86,8 @@ struct TaskAnnounceBody
   std::uint16_t optional_unassigned_s{0};
   std::uint32_t spec_length{0};
   std::uint32_t spec_crc{0};
+  std::uint16_t zone_policy_id{0};
+  std::uint16_t zone_registry_version{0};
 };
 
 // 編碼成完整封包；header.type 會設成 TASK_ANNOUNCE。欄位不合法時丟出 std::invalid_argument：

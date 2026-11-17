@@ -2,7 +2,8 @@
 # 角色組的必要角色永久不可恢復、閘道取消了角色（all_or_nothing 整組；否則失效的角色＋依賴它的）而且組有 fallback_template 時發。
 # 冪等：(group_id, failure_version) 相同的是同一個請求（task manager 收到重複的要忽略）；task manager 展開 fallback_template、
 # 用新的 incident_id／角色注入新的角色組（閘道不自己展開）
-uint64 group_id
+uint64 group_id                   # 角色組；單獨任務（P0_UNASSIGNED）是 0
+uint64 task_id                    # 單獨任務（2026-11-18）；角色組是 0
 string incident_id
 uint32 failure_version            # group_failure_version：這個組第幾次失效
 string fallback_template          # 規劃器注入時帶的（InjectTask.fallback_template）
@@ -11,6 +12,7 @@ string fallback_template          # 規劃器注入時帶的（InjectTask.fallba
 uint8 CANCELLED = 1               # 必要角色被取消
 uint8 EXPIRED = 2                 # 必要角色（任務／事件）過期
 uint8 RECOVERY_TIMEOUT = 4        # 暫時不完整等不到恢復（3 保留，未使用）
+uint8 P0_UNASSIGNED = 5           # 單獨 P0 任務 p0_unassigned_timeout_s（10 s）沒有得標者也沒有正式指派（2026-11-18；冪等鍵 (task_id, failure_version)）
 uint8 reason
 string reason_text
 

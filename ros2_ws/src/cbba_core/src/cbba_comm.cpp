@@ -1429,7 +1429,8 @@ std::vector<AgentId> CbbaComm::aliveNeighbors(double now) const
 std::vector<AgentId> CbbaComm::capableAgents(const Task & task, double now) const
 {
   std::vector<AgentId> out;
-  if (!config_.gateway && fitness(agent_.state(), task) == Fitness::OK) {
+  const ZoneRegistry * zones = agent_.params().zones.get();
+  if (!config_.gateway && fitness(agent_.state(), task, zones) == Fitness::OK) {
     out.push_back(id());
   }
   for (const auto & [agent, n] : neighbors_) {
@@ -1441,7 +1442,7 @@ std::vector<AgentId> CbbaComm::capableAgents(const Task & task, double now) cons
     s.type = n.vehicle_type;
     s.capabilities = ~Capabilities{0};
     s.failed_caps = ~n.capabilities;
-    if (fitness(s, task) == Fitness::OK) {
+    if (fitness(s, task, zones) == Fitness::OK) {   // 鄰居的樓層、高度上限不知道：只看平台的區域限制
       out.push_back(agent);
     }
   }
@@ -1665,6 +1666,8 @@ wire::TaskAnnounceBody CbbaComm::bodyOf(const Task & t)
   b.optional_unassigned_s = e.optional_unassigned_s;
   b.spec_length = e.spec_length;
   b.spec_crc = e.spec_crc;
+  b.zone_policy_id = e.zone_policy_id;
+  b.zone_registry_version = e.zone_registry_version;
   return b;
 }
 
@@ -1801,6 +1804,9 @@ void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
   e.optional_unassigned_s = b.optional_unassigned_s;
   e.spec_length = b.spec_length;
   e.spec_crc = b.spec_crc;
+  e.zone_policy_id = b.zone_policy_id;
+  e.zone_registry_version = b.zone_registry_version;
+  noteZones(t);
   const auto known = agent_.tasks().find(t.id);
   if (known != agent_.tasks().end() && t.revision != known->second.revision) {
     if (t.revision < known->second.revision) {
@@ -1877,6 +1883,32 @@ bool CbbaComm::smallMove(const Task & old, const Task & task) const
   a.relay.origin_id = b.relay.origin_id = id();
   const wire::Header h{};
   return wire::encodeTaskAnnounce(h, a) == wire::encodeTaskAnnounce(h, b);
+}
+
+// 區域註冊表的版本、政策（任務欄位補齊 05）：建立者的版本和本機的不同、或任務的 zone_policy_id 本機不認得 → 告警一次
+//（每個任務、每個 revision），照常出價（使用者 11/17：第一階段先告警）。不認得的政策只套用區域的 no_entry
+void CbbaComm::noteZones(const Task & task)
+{
+  if (!zone_noted_.insert({task.id, task.revision}).second) {
+    return;
+  }
+  const ZoneRegistry * zones = agent_.params().zones.get();
+  const std::uint16_t local = zones != nullptr ? zones->version : 0;
+  const bool mismatch = task.ext.zone_registry_version != 0 && task.ext.zone_registry_version != local;
+  const bool unknown_policy = task.ext.zone_policy_id != 0 &&
+    (zones == nullptr || zones->policy(task.ext.zone_policy_id) == nullptr);
+  if (mismatch || unknown_policy) {
+    ++stats_.zone_warnings;
+    zone_warnings_.push_back(ZoneWarning{task.id, task.revision, task.ext.zone_registry_version, local,
+        task.ext.zone_policy_id, mismatch, unknown_policy});
+  }
+}
+
+std::vector<CbbaComm::ZoneWarning> CbbaComm::takeZoneWarnings()
+{
+  std::vector<ZoneWarning> out;
+  out.swap(zone_warnings_);
+  return out;
 }
 
 void CbbaComm::pullRevisions(double now)

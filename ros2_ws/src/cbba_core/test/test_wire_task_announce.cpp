@@ -68,6 +68,8 @@ TaskAnnounceBody fullSample()
   b.optional_unassigned_s = 15;
   b.spec_length = 0x00000400;
   b.spec_crc = 0xCAFEBABE;
+  b.zone_policy_id = 0x0102;
+  b.zone_registry_version = 7;
   return b;
 }
 }  // namespace
@@ -75,9 +77,9 @@ TaskAnnounceBody fullSample()
 TEST(WireTaskAnnounce, SizeAndLayout)
 {
   const auto bytes = encodeTaskAnnounce(makeHeader(), fullSample());
-  ASSERT_EQ(bytes.size(), 124u);
-  EXPECT_EQ(kTaskAnnounceSize, 124u);
-  EXPECT_EQ(encodeTaskAnnounce(makeHeader(), sample()).size(), 124u);   // 固定大小
+  ASSERT_EQ(bytes.size(), 128u);   // 協定版本 5（2026-11-18）：版本 4 是 124 B
+  EXPECT_EQ(kTaskAnnounceSize, 128u);
+  EXPECT_EQ(encodeTaskAnnounce(makeHeader(), sample()).size(), 128u);   // 固定大小
   const std::vector<std::uint8_t> body(bytes.begin() + kHeaderSize + kRelaySize, bytes.end());
   const std::vector<std::uint8_t> expected = {
     0x00, 0xC8, 0x00, 0x03, 0x00, 0x00, 0x00, 0x11,  // task_id（建立者 200、世代 3、流水號 0x11）
@@ -111,6 +113,8 @@ TEST(WireTaskAnnounce, SizeAndLayout)
     0x00, 0x0F,              // optional_unassigned_s
     0x00, 0x00, 0x04, 0x00,  // spec_length
     0xCA, 0xFE, 0xBA, 0xBE,  // spec_crc
+    0x01, 0x02,              // zone_policy_id
+    0x00, 0x07,              // zone_registry_version
   };
   EXPECT_EQ(body, expected);
 }
@@ -163,6 +167,8 @@ TEST(WireTaskAnnounce, RoundTripAllFields)
   EXPECT_EQ(d->optional_unassigned_s, 15);
   EXPECT_EQ(d->spec_length, 0x400u);
   EXPECT_EQ(d->spec_crc, 0xCAFEBABEu);
+  EXPECT_EQ(d->zone_policy_id, 0x0102);
+  EXPECT_EQ(d->zone_registry_version, 7);
 }
 
 TEST(WireTaskAnnounce, RelayedContentUnchanged)

@@ -1,6 +1,57 @@
 {
  "type": "FeatureCollection",
- "_說明": "2-1b 第五節的區域（site-config/yard，2026-11-15）。座標是 map ENU（公尺，不是經緯度）、x = 東、y = 北；多邊形頭尾同一點。properties：id、name、floor（樓層）、restricted（人員禁入：入侵判定，event_types 的 trigger.zone_attr）、high_voltage（高壓）、no_entry（哪些平台不能進：quadruped = 狗不進、uav = 禁飛）、cruise_altitude_m（UAV 預設巡航高度）、ceiling_m（天花板高度，室內用）。範圍照 docker/itest/config.json 的 keep_out（障礙物外加 1.5 m）",
+ "_說明": "2-1b 第五節的區域（site-config/yard，2026-11-15）。座標是 map ENU（公尺，不是經緯度）、x = 東、y = 北；多邊形頭尾同一點。properties：id、name、floor（樓層）、restricted（人員禁入：入侵判定，event_types 的 trigger.zone_attr）、high_voltage（高壓）、no_entry（哪些平台不能進：quadruped = 狗不進、uav = 禁飛）、cruise_altitude_m（UAV 預設巡航高度）、ceiling_m（天花板高度，室內用）。範圍照 docker/itest/config.json 的 keep_out（障礙物外加 1.5 m）。2026-11-18（任務欄位補齊 05）：version（內容改了就 + 1，任務帶著它，各節點不同時告警）、floor_id（樓層編號，任務與載具的 floor 用它；0 = 不分）、indoor（室內：UAV 要 indoor_flight）、policies（zone_policy_id 指的政策：forbid 哪些區域對哪些平台；0 = 只套用 no_entry）",
+ "version": 1,
+ "policies": [
+  {
+   "id": 1,
+   "name": "uav_no_tanks",
+   "description": "無人機不進儲槽區（易燃，不在上方懸停）",
+   "forbid": [
+    {
+     "zone": "Z_TANKS",
+     "platforms": [
+      "uav"
+     ]
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "name": "keep_out_hv",
+   "description": "所有平台都不在高壓區內觀察（煙霧、火警時：只在安全距離外）",
+   "forbid": [
+    {
+     "zone": "Z_HV_A",
+     "platforms": [
+      "uav",
+      "quadruped"
+     ]
+    },
+    {
+     "zone": "Z_HV_B",
+     "platforms": [
+      "uav",
+      "quadruped"
+     ]
+    },
+    {
+     "zone": "Z_HV_C",
+     "platforms": [
+      "uav",
+      "quadruped"
+     ]
+    },
+    {
+     "zone": "Z_HV_TC6",
+     "platforms": [
+      "uav",
+      "quadruped"
+     ]
+    }
+   ]
+  }
+ ],
  "features": [
   {
    "type": "Feature",
@@ -8,6 +59,7 @@
     "id": "Z_YARD",
     "name": "變電所場區（圍牆內）",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": false,
     "high_voltage": false,
     "no_entry": [],
@@ -47,6 +99,7 @@
     "id": "Z_HV_A",
     "name": "變壓器 A 排",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": true,
     "high_voltage": true,
     "no_entry": [
@@ -87,6 +140,7 @@
     "id": "Z_HV_B",
     "name": "變壓器 B 排",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": true,
     "high_voltage": true,
     "no_entry": [
@@ -127,6 +181,7 @@
     "id": "Z_HV_C",
     "name": "變壓器 C 排",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": true,
     "high_voltage": true,
     "no_entry": [
@@ -167,6 +222,7 @@
     "id": "Z_HV_TC6",
     "name": "變壓器 TC6",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": true,
     "high_voltage": true,
     "no_entry": [
@@ -207,6 +263,7 @@
     "id": "Z_TANKS",
     "name": "儲槽區",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": true,
     "high_voltage": false,
     "no_entry": [
@@ -247,11 +304,13 @@
     "id": "Z_CONTROL",
     "name": "控制室",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": false,
     "high_voltage": false,
     "no_entry": [
      "quadruped"
-    ]
+    ],
+    "indoor": true
    },
    "geometry": {
     "type": "Polygon",
@@ -287,6 +346,7 @@
     "id": "Z_PADS",
     "name": "無人機起降區",
     "floor": "1F",
+    "floor_id": 1,
     "restricted": false,
     "high_voltage": false,
     "no_entry": [

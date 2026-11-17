@@ -10,6 +10,7 @@ uint8 OPTIONAL_GROUP_DONE = 7   # optional 角色略過 O3：同組必要角色�
 uint8 GROUP_INCOMPLETE = 8      # all-or-nothing 的組等了 group_commit_timeout（30 s）還沒湊齊（CB-4 第二批，2026-11-16）：
                                 # 排第一的那台發一次、繼續等（不建立正式指派）；取消或 fallback 由閘道決定（第三批）
 uint8 GROUP_BROKEN = 9          # 角色組的必要角色永久不可恢復（閘道，CB-4 第三批）：detail 寫原因、取消了哪些角色、有沒有 FallbackRequest
+uint8 P0_UNASSIGNED = 10          # 單獨 P0 任務 p0_unassigned_timeout_s（10 s）沒有得標者也沒有正式指派（閘道，2026-11-18）：有 fallback_template 時另外發 FallbackRequest
 
 Task task
 uint8 reason

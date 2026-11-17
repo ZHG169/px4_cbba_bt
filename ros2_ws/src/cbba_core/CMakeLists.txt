@@ -31,6 +31,7 @@ add_library(${PROJECT_NAME}_core
   src/assignment_manager.cpp
   src/gateway.cpp
   src/task_meta.cpp
+  src/zones.cpp
   src/udp_link.cpp
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
@@ -71,6 +72,7 @@ set(CBBA_CORE_TESTS
   test_assignment
   test_gateway
   test_task_meta
+  test_zones
   test_detection
   test_mission_sim
   test_tdr_experiment

@@ -24,9 +24,11 @@
 #include <array>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "cbba_core/types.hpp"
+#include "cbba_core/zones.hpp"
 
 namespace cbba_core
 {
@@ -42,6 +44,8 @@ struct ScoringParams
   std::size_t max_bundle{5};     // 一次最多接幾個任務
   double rebid_threshold{0.1};   // 重新評估時，分數變動超過此比例才更新
   int max_failures{0};           // 同一個任務 TRANSIENT 失敗到這個次數就永久不出價；0 = 不啟用
+  // 區域註冊表（任務欄位補齊 05，2026-11-18）：全隊讀同一份 zones.geojson；nullptr = 不檢查區域（只看樓層、高度上限）
+  std::shared_ptr<const ZoneRegistry> zones;
 };
 
 struct LegEval
@@ -97,6 +101,10 @@ struct InsertionLimits
   // 評分時把它從路徑拿掉（不算「延後它」的損失），否則巡檢中的 V60 對身邊火警的出價永遠比不上閒著、但遠很多的（2026-10-12）
   bool preempt_drops_head{false};
   TaskId exempt{0};              // 執行中的任務：不檢查硬期限（見 evaluatePath）
+  // 同級搶占的遲滯（任務欄位補齊 07，2026-11-18）：插在前 ahead_positions 個位置（排在同級、已接受的任務前面）時，
+  // 出價要 > ahead_min_gain（＝ 被搶任務目前的分數 ×（1 + preempt_margin_pct / 100））
+  std::size_t ahead_positions{0};
+  double ahead_min_gain{0.0};
   // 這個位置可不可以（插入後的路徑評估、位置、插入後的路徑）；沒設定時都可以
   std::function<bool(const PathEval &, std::size_t, const std::vector<Task> &)> allow;
 };

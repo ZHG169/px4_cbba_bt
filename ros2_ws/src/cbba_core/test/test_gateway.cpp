@@ -937,3 +937,154 @@ TEST(Retarget, SmallMoveWithOtherChangeReevaluates)
   EXPECT_EQ(swarm.node(50).stats().retargets, 0);
   EXPECT_EQ(swarm.node(50).stats().revisions, 1);
 }
+
+// ===========================================================================
+// 任務欄位補齊第二批（2026-11-18）：05 區域（閘道的檢查、版本）、07 單獨 P0 的看門狗
+// ===========================================================================
+namespace
+{
+// Z_HV（0～10、0～10）：狗不能進；政策 1：UAV 不進 Z_HV
+std::shared_ptr<const ZoneRegistry> zoneRegistry(std::uint16_t version)
+{
+  auto r = std::make_shared<ZoneRegistry>();
+  r->version = version;
+  ZoneArea hv;
+  hv.id = "Z_HV";
+  hv.no_entry = 1u << 2;
+  hv.polygon = {{0, 0}, {10, 0}, {10, 10}, {0, 10}, {0, 0}};
+  r->zones = {hv};
+  ZonePolicy p;
+  p.id = 1;
+  p.forbid = {ZonePolicy::Rule{0, static_cast<std::uint8_t>(1u << 1)}};
+  r->policies = {p};
+  return r;
+}
+
+// 閘道、無人機、狗 50 都有區域註冊表（版本 version）；狗 51 的版本是 dog51_version（0 = 沒有）
+Swarm makeZonedSwarm(std::uint16_t version, std::uint16_t dog51_version)
+{
+  CommConfig cc;
+  cc.epoch = 3;
+  Swarm swarm(0.0, 1, cc);
+  ScoringParams params;
+  params.zones = zoneRegistry(version);
+  swarm.setParams(params);
+  swarm.addGateway(kGateway);
+  swarm.add(1, {0, 0, 5});
+  swarm.add(50, {20, 0, 0}, 100.0, AgentType::UGV);
+  ScoringParams other;
+  other.zones = dog51_version != 0 ? zoneRegistry(dog51_version) : nullptr;
+  swarm.setParams(other);
+  swarm.add(51, {40, 0, 0}, 100.0, AgentType::UGV);
+  swarm.run(2.0);
+  return swarm;
+}
+}  // namespace
+
+TEST(ZoneGateway, InjectChecksPolicyAndPlatformZone)
+{
+  // 閘道：不認得的 zone_policy_id 拒絕；指定了平台、觀察點在那個平台不能進的區域 → 拒絕（規劃器換觀察點）；
+  // 平台不限的照收（UAV 可以接）；任務帶閘道的區域註冊表版本
+  Swarm swarm = makeZonedSwarm(3, 3);
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest unknown = groundRequest("z1");
+  unknown.task.ext.zone_policy_id = 9;
+  EXPECT_EQ(gw.inject(unknown, swarm.now()).status, InjectStatus::REJECTED);
+
+  InjectRequest in_hv = groundRequest("z2");
+  in_hv.task.position = {5.0, 5.0, 0.0};
+  const InjectResult r2 = gw.inject(in_hv, swarm.now());
+  EXPECT_EQ(r2.status, InjectStatus::REJECTED);
+  EXPECT_NE(r2.reason.find("Z_HV"), std::string::npos) << r2.reason;
+
+  InjectRequest any = groundRequest("z3");
+  any.task.platform = 0;
+  any.task.required_caps = capBit(Capability::RGB_CAMERA);
+  any.task.position = {5.0, 5.0, 0.0};
+  const InjectResult r3 = gw.inject(any, swarm.now());
+  ASSERT_EQ(r3.status, InjectStatus::CREATED) << r3.reason;
+  swarm.run(2.0);
+  EXPECT_EQ(swarm.node(50).agent().tasks().at(r3.task_id).ext.zone_registry_version, 3);
+  EXPECT_EQ(swarm.node(50).agent().winner(r3.task_id), 1);   // 狗不能進 Z_HV：無人機接
+  EXPECT_STREQ(swarm.node(50).agent().bidFor(r3.task_id, swarm.now()).why, "zone_forbidden");
+
+  InjectRequest policy = any;   // 政策 1：UAV 也不能進 → 沒有人能做
+  policy.incident_id = "z4";
+  policy.task.ext.zone_policy_id = 1;
+  const InjectResult r4 = gw.inject(policy, swarm.now());
+  ASSERT_EQ(r4.status, InjectStatus::CREATED) << r4.reason;
+  swarm.run(2.0);
+  EXPECT_EQ(swarm.node(1).agent().winner(r4.task_id), kNoAgent);
+  EXPECT_TRUE(swarm.node(kGateway).capableAgents(swarm.node(kGateway).agent().tasks().at(r4.task_id),
+    swarm.now()).empty());
+}
+
+TEST(ZoneGateway, VersionMismatchOnlyWarns)
+{
+  // 05 決定 3：狗 51 的區域註冊表版本不同（4 vs 3）、或沒有區域註冊表 → 告警一次（每個 revision），照常出價
+  Swarm swarm = makeZonedSwarm(3, 4);
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest req = groundRequest("zv");
+  req.task.position = {38.0, 0.0, 0.0};   // 狗 51 最近
+  const InjectResult r = gw.inject(req, swarm.now());
+  ASSERT_EQ(r.status, InjectStatus::CREATED) << r.reason;
+  swarm.run(2.0);
+  const auto warnings = swarm.node(51).takeZoneWarnings();
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_EQ(warnings[0].task, r.task_id);
+  EXPECT_TRUE(warnings[0].version_mismatch);
+  EXPECT_EQ(warnings[0].task_version, 3);
+  EXPECT_EQ(warnings[0].local_version, 4);
+  EXPECT_TRUE(swarm.node(50).takeZoneWarnings().empty());
+  EXPECT_EQ(swarm.node(51).agent().winner(r.task_id), 51);   // 照常出價、得標
+  swarm.run(5.0);
+  EXPECT_TRUE(swarm.node(51).takeZoneWarnings().empty());    // 同一個 revision 只報一次
+}
+
+TEST(Watchdog, SingleP0WithoutWinnerAfterTenSeconds)
+{
+  // 07 驗收 4：單獨 P0 任務 10 s 沒有得標者也沒有正式指派 → 看門狗一次（帶 fallback_template）；
+  // P1 不看；只報一次
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest p0 = groundRequest("nobody-can");
+  p0.task.priority = 0;
+  p0.task.required_caps = capBit(Capability::MOBILITY_GROUND) | capBit(Capability::THERMAL_CAMERA);   // 沒有人有熱像
+  p0.fallback_template = "single_dog_verify";
+  InjectRequest p1 = p0;
+  p1.incident_id = "nobody-can-p1";
+  p1.task.priority = 1;
+  const InjectResult r0 = gw.inject(p0, swarm.now());
+  ASSERT_EQ(r0.status, InjectStatus::CREATED) << r0.reason;
+  ASSERT_EQ(gw.inject(p1, swarm.now()).status, InjectStatus::CREATED);
+
+  std::vector<UnassignedP0> events;
+  for (int k = 0; k < 60; ++k) {   // 12 s
+    swarm.run(0.2);
+    for (const auto & e : gw.stepWatchdog(swarm.now())) {
+      events.push_back(e);
+    }
+  }
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events[0].task, r0.task_id);
+  EXPECT_EQ(events[0].fallback_template, "single_dog_verify");
+  EXPECT_EQ(events[0].incident_id, "nobody-can");
+  EXPECT_GE(events[0].waited, 10.0);
+  EXPECT_LT(events[0].waited, 11.0);
+}
+
+TEST(Watchdog, AssignedP0IsNotReported)
+{
+  // 有人得標的 P0 不報
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest p0 = groundRequest("dog-can");
+  p0.task.priority = 0;
+  ASSERT_EQ(gw.inject(p0, swarm.now()).status, InjectStatus::CREATED);
+  int events = 0;
+  for (int k = 0; k < 60; ++k) {
+    swarm.run(0.2);
+    events += static_cast<int>(gw.stepWatchdog(swarm.now()).size());
+  }
+  EXPECT_EQ(events, 0);
+}

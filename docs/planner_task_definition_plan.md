@@ -105,6 +105,20 @@ uncertainty_m、standoff_m、steps、success／abort 條件、timeout、report_p
   只有 meta 的 spec（狗的 BT 看到沒有 steps 會回 BAD_SPEC），meta 只留在閘道。
 - 協定封包沒改（還是版本 4、124 B）；`swarm_interfaces` 2.4.0（InjectTask、TaskAssignment 加欄位，要全隊重編、狗的 BT `dog_bt.sh build`）。
 
+### 第二批的實作（2026-11-18，05、08、07；協定版本 5；程式寫好，**測試由使用者跑**）
+
+| 列 | 做法 | 程式 | 測試 |
+|---|---|---|---|
+| 05 區域 | **協定版本 5**：TASK_ANNOUNCE 加 `zone_policy_id`、`zone_registry_version`（124 → 128 B；版本 4、5 互相拒收）。`zones.geojson` 加 `version`、`policies`（id、forbid：區域 × 平台）、每區 `floor_id`、`indoor`。核心 `cbba_core/zones.*`（`ZoneRegistry`、`checkZones`）：只看觀察點（task.position）——樓層不同（WRONG_FLOOR）、超過載具的 `max_altitude` 或區域的天花板（ALTITUDE_LIMIT）、區域 no_entry 或政策禁止（ZONE_FORBIDDEN）；`fitness()` 多四種原因，出價表寫 `wrong_floor`／`altitude_limit`／`zone_forbidden`／`indoor`。cbba_node 參數 `site_dir`（或 `CBBA_SITE_DIR`），全隊讀同一份；載具樓層、高度上限從 `fleet.yaml`（`floor`、`limits.max_altitude_m`；參數 `floor`、`max_altitude_m` 可覆蓋）。閘道：任務帶自己的區域註冊表版本；不認得的 `zone_policy_id` 拒絕；指定平台時觀察點在該平台不能進的區域拒絕。版本不同、不認得的政策：`zone_warning` 話題＋log，**照常出價**（使用者 11/17 決定 3） | `zones.*`、`capabilities.*`、`scoring`、`wire_task_announce`、`gateway`、`registry.*`（`toZoneRegistry`）、`cbba_node` | `test_zones`、`test_wire_task_announce`、`test_gateway` ZoneGateway 2 項、`test_registry` SiteZonesForCbba、`zone_iface.sh` Z1～Z4 |
+| 08 能力 | 室內區域（`indoor`）在 CBBA 的可行性：UAV 沒有 `indoor_flight`（或故障）不出價（不靠規劃器推導，平台不限的任務也對）；高度上限同 05。E_HW 拿掉的能力：新話題 `capability_restored`（std_msgs/String，能力名稱）放回來 | `zones.cpp`、`cbba_node` | `test_zones` Failed…Restore、`zone_iface.sh` Z5 |
+| 07 搶占 | `preempt_margin_pct` 生效：同級（遮罩允許）要出價 > 被搶任務目前的分數 ×（1 + margin/100）才排到它前面（`InsertionLimits::ahead_min_gain`）；跨級不看分數。閘道的**單獨 P0 看門狗**（`p0_unassigned_timeout_s` 10 s，和角色組的計時分開）：沒有得標者也沒有正式指派 → `task_orphaned` P0_UNASSIGNED（10）；有 `fallback_template`（單獨任務現在也能給）時發 `FallbackRequest` P0_UNASSIGNED（5，新欄位 `task_id`） | `cbba_agent.cpp`、`scoring.cpp`、`gateway`、`cbba_node`、swarm_interfaces 2.5.0 | `test_zones` PreemptMargin 2 項、`test_gateway` Watchdog 2 項、`zone_iface.sh` Z6 |
+
+和原本規劃不同的地方：
+- 「室內區域自動要求 indoor_flight」放在 CBBA 的可行性（看觀察點所在區域），不是規劃器加到 required_capabilities：平台不限的任務
+  若被加上 indoor_flight，狗也會被排除。
+- 「升級」只做告警（task_orphaned＋log）＋FallbackRequest，沒有自動提高優先級。
+- 鄰居的樓層、高度上限不在 AGENT_STATE 裡：閘道的「有沒有能做的載具」（capableAgents）只看平台的區域限制。
+
 > 下面第 0～6 節是 11/17 稍早的分析（使用者提供 PDF 之前），以上一節為準：路徑繞行估算（F6、N3）不做（路徑交給 Nav2）；
 > 檢查器與核准放在閘道；第 4 節的實作順序由上表取代。
 

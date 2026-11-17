@@ -71,6 +71,8 @@ std::vector<std::uint8_t> encodeTaskAnnounce(Header header, const TaskAnnounceBo
   w.u16(b.optional_unassigned_s);
   w.u32(b.spec_length);
   w.u32(b.spec_crc);
+  w.u16(b.zone_policy_id);
+  w.u16(b.zone_registry_version);
   finishPacket(out);
   return out;
 }
@@ -124,6 +126,8 @@ std::optional<TaskAnnounceBody> decodeTaskAnnounce(const std::uint8_t * data, st
   b.optional_unassigned_s = r.u16();
   b.spec_length = r.u32();
   b.spec_crc = r.u32();
+  b.zone_policy_id = r.u16();
+  b.zone_registry_version = r.u16();
   if (!r.ok() || r.remaining() != 0 || !validBody(b)) {
     return std::nullopt;
   }

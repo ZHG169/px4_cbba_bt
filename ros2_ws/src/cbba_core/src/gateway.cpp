@@ -8,7 +8,9 @@
 #include <set>
 #include <sstream>
 
+#include "cbba_core/capabilities.hpp"
 #include "cbba_core/wire_task_spec.hpp"
+#include "cbba_core/zones.hpp"
 
 namespace cbba_core
 {
@@ -94,8 +96,25 @@ std::string Gateway::check(const InjectRequest & req) const
   if (e.role_count > 0 && e.role_count < 8 && (e.distinct_agent_set >> e.role_count) != 0) {
     return "distinct_agent_set 只能指同組的角色";
   }
-  if (e.role_count == 0 && (e.distinct_agent_set != 0 || !req.fallback_template.empty())) {
-    return "單獨任務不能設 distinct_agent_set、fallback_template";
+  if (e.role_count == 0 && e.distinct_agent_set != 0) {
+    return "單獨任務不能設 distinct_agent_set";
+  }
+  // 區域（任務欄位補齊 05）：政策要是閘道的區域註冊表裡有的；指定了平台時，觀察點不能在那個平台不能進的區域
+  //（只有閘道知道的事先擋下：機器人那邊各自再檢查一次，所以這裡不擋樓層、高度上限這些看載具的）
+  const ZoneRegistry * zones = comm_.agent().params().zones.get();
+  if (e.zone_policy_id != 0 && (zones == nullptr || zones->policy(e.zone_policy_id) == nullptr)) {
+    return "zone_policy_id " + std::to_string(e.zone_policy_id) + " 不在閘道的區域註冊表（site_dir）";
+  }
+  if (zones != nullptr && t.platform != kPlatformAny) {
+    AgentState probe;   // 只看平台的區域限制：樓層、高度上限不知道（0）
+    probe.type = static_cast<AgentType>(t.platform);
+    probe.capabilities = ~Capabilities{0};
+    std::string zone;
+    const ZoneVerdict v = checkZones(zones, probe, t.platform, t, &zone);
+    if (v == ZoneVerdict::ZONE_FORBIDDEN || v == ZoneVerdict::ALTITUDE_LIMIT) {
+      return std::string("觀察點（position）在 ") + zone + "：" + platformName(t.platform) + " " +
+             (v == ZoneVerdict::ZONE_FORBIDDEN ? "不能進" : "超過天花板") + "（" + toString(v) + "；規劃器要換觀察點）";
+    }
   }
   if (e.skip_satisfies && !e.optional) {
     return "skip_satisfies 只用在 optional 角色";
@@ -197,6 +216,7 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
   }
 
   Task t = build(req, now, now);
+  t.ext.zone_registry_version = zonesVersion();
   t.id = *id;
   t.ext.group_id = group_id;
   if (!comm_.addLocalTask(t, now, req.spec)) {
@@ -216,6 +236,7 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
   entry.release_sec = req.release_sec;
   entry.expires_sec = req.expires_sec;
   entry.meta = keptMeta(req);
+  entry.fallback_template = group_id == 0 ? req.fallback_template : std::string();
   injected_[key] = entry;
   by_task_[t.id] = key;
   r.status = InjectStatus::CREATED;
@@ -537,6 +558,7 @@ InjectResult Gateway::revise(const InjectRequest & req, Injected & known, double
     }
   }
   Task t = build(req, old.created, now);
+  t.ext.zone_registry_version = zonesVersion();
   t.id = known.task_id;
   t.ext.group_id = old.ext.group_id;
   // 相對時間和上一版一樣：規劃器沒改期限，沿用原本的絕對時刻（不然每次改版期限都往後推，也認不出只動位置的改版）
@@ -559,6 +581,9 @@ InjectResult Gateway::revise(const InjectRequest & req, Injected & known, double
   known.release_sec = req.release_sec;
   known.expires_sec = req.expires_sec;
   known.meta = keptMeta(req);
+  if (old.ext.group_id == 0) {
+    known.fallback_template = req.fallback_template;
+  }
   r.status = InjectStatus::REVISED;
   r.revision = req.revision;
   return r;
@@ -570,7 +595,7 @@ InjectResult Gateway::revise(const InjectRequest & req, Injected & known, double
 // 格式（文字，一行一筆，欄位以空白分隔；字串用 %XX 編碼，空字串寫成 -）：
 //   cbba_gateway_state 1
 //   i <incident> <role> <task_id> <revision> <deadline_sec> <release_sec> <expires_sec> <source> <event_type>
-//     <event_type_id> <task_type> <task_type_id> <role_id>
+//     <event_type_id> <task_type> <task_type_id> <role_id> [<fallback_template>]（最後一欄 2026-11-18 加，單獨任務的）
 //   g <incident> <group_id> <failure_version> <terminated 0/1> <fallback_template> <failed_roles：逗號分隔或 ->
 //   c <task_id>                                   連鎖撤銷取消過的
 namespace
@@ -640,7 +665,7 @@ std::string Gateway::saveState() const
     out << "i " << enc(key.first) << " " << enc(key.second) << " " << e.task_id << " " << e.revision << " " <<
       num(e.deadline_sec) << " " << num(e.release_sec) << " " << num(e.expires_sec) << " " <<
       static_cast<unsigned>(m.source) << " " << enc(m.event_type) << " " << m.event_type_id << " " <<
-      enc(m.task_type) << " " << m.task_type_id << " " << m.role_id << "\n";
+      enc(m.task_type) << " " << m.task_type_id << " " << m.role_id << " " << enc(e.fallback_template) << "\n";
   }
   for (const auto & [incident, group_id] : groups_) {
     const auto data = group_data_.find(group_id);
@@ -720,6 +745,14 @@ bool Gateway::loadState(const std::string & text, double now, std::string * erro
       e.meta.task_type = *tt;
       e.meta.task_type_id = static_cast<std::uint16_t>(task_type_id);
       e.meta.role_id = static_cast<std::uint16_t>(role_id);
+      std::string fallback;
+      if (ls >> fallback) {   // 11/17 的檔案沒有這一欄
+        const auto fb = dec(fallback);
+        if (!fb) {
+          return fail(where + "（i）fallback_template 編碼不對");
+        }
+        e.fallback_template = *fb;
+      }
       e.restored = true;
       const auto key = std::make_pair(*inc, *rl);
       by_task[e.task_id] = key;
@@ -824,6 +857,57 @@ std::vector<std::pair<std::string, std::string>> Gateway::takePurged()
 {
   std::vector<std::pair<std::string, std::string>> out;
   out.swap(purged_);
+  return out;
+}
+
+std::uint16_t Gateway::zonesVersion() const
+{
+  const ZoneRegistry * zones = comm_.agent().params().zones.get();
+  return zones != nullptr ? zones->version : 0;
+}
+
+// ===========================================================================
+// 單獨 P0 任務的看門狗（任務欄位補齊 07，2026-11-18）
+// ===========================================================================
+std::vector<UnassignedP0> Gateway::stepWatchdog(double now)
+{
+  std::vector<UnassignedP0> out;
+  if (config_.p0_unassigned_timeout <= 0.0) {
+    return out;
+  }
+  std::set<TaskId> watched;
+  const auto & agent = comm_.agent();
+  for (const auto & [id, task] : agent.tasks()) {
+    if (task.status != TaskStatus::OPEN || task.ext.group_id != 0 || priorityLevel(task) != 0 ||
+      taskCreator(id) != comm_.id())
+    {
+      continue;
+    }
+    if (task.ext.release > now) {
+      continue;   // 還不能開始：沒人接是正常的
+    }
+    if (agent.winner(id) != kNoAgent || comm_.assignment(id).assignee != kNoAgent) {
+      p0_reported_.erase(id);   // 有人了：下次再沒人時重新計時、可以再報
+      continue;
+    }
+    watched.insert(id);
+    const double since = p0_unassigned_since_.emplace(id, now).first->second;
+    if (now - since < config_.p0_unassigned_timeout || p0_reported_.count(id) > 0) {
+      continue;
+    }
+    p0_reported_.insert(id);
+    UnassignedP0 ev;
+    ev.task = id;
+    ev.waited = now - since;
+    if (const Injected * known = findTask(id)) {
+      ev.incident_id = known->meta.incident_id;
+      ev.fallback_template = known->fallback_template;
+    }
+    out.push_back(ev);
+  }
+  for (auto it = p0_unassigned_since_.begin(); it != p0_unassigned_since_.end(); ) {
+    it = watched.count(it->first) > 0 ? std::next(it) : p0_unassigned_since_.erase(it);
+  }
   return out;
 }
 

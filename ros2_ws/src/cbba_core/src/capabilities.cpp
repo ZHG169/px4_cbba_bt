@@ -3,6 +3,8 @@
 #include <array>
 #include <utility>
 
+#include "cbba_core/zones.hpp"
+
 namespace cbba_core
 {
 
@@ -136,7 +138,21 @@ Capabilities availableCaps(const AgentState & agent)
   return declared & ~agent.failed_caps;
 }
 
-Fitness fitness(const AgentState & agent, const Task & task)
+const char * toString(Fitness f)
+{
+  switch (f) {
+    case Fitness::OK: return "ok";
+    case Fitness::PLATFORM: return "platform";
+    case Fitness::CAPABILITY: return "capability";
+    case Fitness::WRONG_FLOOR: return "wrong_floor";
+    case Fitness::ALTITUDE_LIMIT: return "altitude_limit";
+    case Fitness::ZONE_FORBIDDEN: return "zone_forbidden";
+    case Fitness::INDOOR: return "indoor";
+  }
+  return "?";
+}
+
+Fitness fitness(const AgentState & agent, const Task & task, const ZoneRegistry * zones)
 {
   const std::uint8_t platform = effectivePlatform(task);
   if (platform != kPlatformAny && platform != platformOf(agent.type)) {
@@ -145,6 +161,13 @@ Fitness fitness(const AgentState & agent, const Task & task)
   const Capabilities need = effectiveRequiredCaps(task);
   if ((need & ~availableCaps(agent)) != 0) {
     return Fitness::CAPABILITY;
+  }
+  switch (checkZones(zones, agent, platformOf(agent.type), task)) {
+    case ZoneVerdict::OK: return Fitness::OK;
+    case ZoneVerdict::WRONG_FLOOR: return Fitness::WRONG_FLOOR;
+    case ZoneVerdict::ALTITUDE_LIMIT: return Fitness::ALTITUDE_LIMIT;
+    case ZoneVerdict::ZONE_FORBIDDEN: return Fitness::ZONE_FORBIDDEN;
+    case ZoneVerdict::INDOOR: return Fitness::INDOOR;
   }
   return Fitness::OK;
 }

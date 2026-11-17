@@ -37,7 +37,7 @@ TEST(WireHeader, LayoutIsBigEndian)
   const auto out = packet(makeHeader(PacketType::CBBA_STATE), 3);
   const std::vector<std::uint8_t> expected = {
     0x43, 0x42,                                      // magic "CB"
-    0x04,                                            // version
+    0x05,                                            // version（協定版本 5）
     0x02,                                            // type = CBBA_STATE
     0x01, 0x02,                                      // sender_id
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,  // session_id

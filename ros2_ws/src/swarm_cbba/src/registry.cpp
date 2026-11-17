@@ -527,6 +527,11 @@ Registry loadRegistry(const std::string & dir)
       r.platform = need<std::string>(robots[i], "platform", w);
       r.ns = optionalField<std::string>(robots[i], "ns", "", w);
       r.capabilities = optionalField<Strings>(robots[i], "capabilities", {}, w);
+      const int floor = optionalField<int>(robots[i], "floor", 0, w);
+      if (floor < 0 || floor > 255) {
+        fail(w, "floor 要是 0～255（0 = 不知道）");
+      }
+      r.floor = static_cast<std::uint8_t>(floor);
       if (const YAML::Node l = robots[i]["limits"]) {
         const Where lw = w.sub("limits");
         r.limits.max_altitude_m = optionalNumber(l, "max_altitude_m", lw);
@@ -1212,6 +1217,38 @@ Site loadSite(const std::string & dir)
     if (!root["type"] || root["type"].as<std::string>() != "FeatureCollection" || !root["features"].IsSequence()) {
       failSite(file, "要是 FeatureCollection（features 清單）");
     }
+    const Where top{file, ""};
+    const int version = optionalField<int>(root, "version", 0, top);
+    if (version < 0 || version > 0xFFFF) {
+      fail(top, "version 要是 0～65535");
+    }
+    site.version = static_cast<std::uint16_t>(version);
+    if (const YAML::Node policies = root["policies"]) {
+      if (!policies.IsSequence()) {
+        fail(top, "policies 要是清單");
+      }
+      for (std::size_t i = 0; i < policies.size(); ++i) {
+        const Where w = itemOf(file, "policies", i);
+        ZonePolicyEntry p;
+        const int id = need<int>(policies[i], "id", w);
+        if (id < 1 || id > 0xFFFF) {
+          fail(w, "id 要是 1～65535（0 保留給「只套用 no_entry」）");
+        }
+        p.id = static_cast<std::uint16_t>(id);
+        p.name = optionalField<std::string>(policies[i], "name", "", w);
+        p.description = optionalField<std::string>(policies[i], "description", "", w);
+        const YAML::Node forbid = policies[i]["forbid"];
+        if (!forbid || !forbid.IsSequence()) {
+          fail(w, "要有 forbid 清單");
+        }
+        for (std::size_t k = 0; k < forbid.size(); ++k) {
+          const Where fw = w.sub("forbid[" + std::to_string(k) + "]");
+          p.forbid.push_back(ZonePolicyEntry::Forbid{need<std::string>(forbid[k], "zone", fw),
+              need<Strings>(forbid[k], "platforms", fw)});
+        }
+        site.policies.push_back(p);
+      }
+    }
     const YAML::Node features = root["features"];
     for (std::size_t i = 0; i < features.size(); ++i) {
       const Where w = itemOf(file, "features", i);
@@ -1229,6 +1266,12 @@ Site loadSite(const std::string & dir)
       z.no_entry = optionalField<Strings>(props, "no_entry", {}, w);
       z.cruise_altitude_m = optionalNumber(props, "cruise_altitude_m", w);
       z.ceiling_m = optionalNumber(props, "ceiling_m", w);
+      const int floor_id = optionalField<int>(props, "floor_id", 0, w);
+      if (floor_id < 0 || floor_id > 255) {
+        fail(w, "floor_id 要是 0～255（0 = 不分）");
+      }
+      z.floor_id = static_cast<std::uint8_t>(floor_id);
+      z.indoor = optionalField<bool>(props, "indoor", false, w);
       if (need<std::string>(geom, "type", w) != "Polygon") {
         fail(w, "geometry 要是 Polygon");
       }
@@ -1335,6 +1378,9 @@ std::vector<std::string> checkSite(const Site & site, const Registry & reg)
     if (!ids.insert(z.id).second) {
       errors.push_back("zones.geojson：區域 " + z.id + " 重複");
     }
+    if (z.indoor && !z.no_entry.empty() && contains(z.no_entry, "uav")) {
+      errors.push_back("zones.geojson：" + z.id + " 是室內又禁飛：indoor 沒有意義（要嘛拿掉 uav 的 no_entry）");
+    }
     for (const std::string & p : z.no_entry) {
       if (!platformOk(p)) {
         errors.push_back("zones.geojson：" + z.id + " 的 no_entry 平台 " + p + " 不在 platforms.yaml");
@@ -1344,6 +1390,25 @@ std::vector<std::string> checkSite(const Site & site, const Registry & reg)
     const auto & last = z.polygon.back();
     if (first[0] != last[0] || first[1] != last[1]) {
       errors.push_back("zones.geojson：" + z.id + " 的多邊形頭尾要同一點");
+    }
+  }
+
+  // 政策（任務欄位補齊 05）：id 不重複、指到的區域與平台要存在
+  std::set<std::uint16_t> policy_ids;
+  for (const ZonePolicyEntry & p : site.policies) {
+    const std::string at = "zones.geojson：政策 " + std::to_string(p.id);
+    if (!policy_ids.insert(p.id).second) {
+      errors.push_back(at + " 重複");
+    }
+    for (const ZonePolicyEntry::Forbid & f : p.forbid) {
+      if (site.zone(f.zone) == nullptr) {
+        errors.push_back(at + " 的區域 " + f.zone + " 不存在");
+      }
+      for (const std::string & pl : f.platforms) {
+        if (!platformOk(pl)) {
+          errors.push_back(at + " 的平台 " + pl + " 不在 platforms.yaml");
+        }
+      }
     }
   }
 
@@ -1436,6 +1501,64 @@ std::vector<std::string> checkSite(const Site & site, const Registry & reg)
     checkRefs(r.limits.docks, "docks");
   }
   return errors;
+}
+
+cbba_core::ZoneRegistry toZoneRegistry(const Site & site, const Registry * registry)
+{
+  const auto code = [registry](const std::string & name) -> std::uint8_t {
+      if (registry != nullptr) {
+        if (const PlatformEntry * p = registry->platform(name)) {
+          return p->code;
+        }
+      } else if (name == "uav") {
+        return 1;
+      } else if (name == "quadruped") {
+        return 2;
+      }
+      throw std::runtime_error("zones.geojson：不認得的平台 " + name);
+    };
+  const auto mask = [&code](const std::vector<std::string> & names) {
+      std::uint8_t m = 0;
+      for (const std::string & n : names) {
+        const std::uint8_t c = code(n);
+        if (c >= 8) {
+          throw std::runtime_error("zones.geojson：平台 " + n + " 的代碼 " + std::to_string(c) + " 超過 7（遮罩只有 8 位元）");
+        }
+        m = static_cast<std::uint8_t>(m | (1u << c));
+      }
+      return m;
+    };
+  cbba_core::ZoneRegistry out;
+  out.version = site.version;
+  for (const Zone & z : site.zones) {
+    cbba_core::ZoneArea a;
+    a.id = z.id;
+    a.floor = z.floor_id;
+    a.no_entry = mask(z.no_entry);
+    a.ceiling = z.ceiling_m.value_or(0.0);
+    a.indoor = z.indoor;
+    a.polygon = z.polygon;
+    out.zones.push_back(a);
+  }
+  for (const ZonePolicyEntry & p : site.policies) {
+    cbba_core::ZonePolicy policy;
+    policy.id = p.id;
+    policy.name = p.name;
+    for (const ZonePolicyEntry::Forbid & f : p.forbid) {
+      std::size_t index = site.zones.size();
+      for (std::size_t i = 0; i < site.zones.size(); ++i) {
+        if (site.zones[i].id == f.zone) {
+          index = i;
+        }
+      }
+      if (index == site.zones.size()) {
+        throw std::runtime_error("zones.geojson：政策 " + std::to_string(p.id) + " 的區域 " + f.zone + " 不存在");
+      }
+      policy.forbid.push_back(cbba_core::ZonePolicy::Rule{index, mask(f.platforms)});
+    }
+    out.policies.push_back(policy);
+  }
+  return out;
 }
 
 }  // namespace swarm_cbba

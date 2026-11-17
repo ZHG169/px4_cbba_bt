@@ -120,10 +120,22 @@ struct GroupEvent
   Vec3 position{};
 };
 
+// 單獨 P0 任務沒人得標的看門狗（任務欄位補齊 07，2026-11-18）
+struct UnassignedP0
+{
+  TaskId task{0};
+  std::string incident_id;
+  std::string fallback_template;   // 空 = 不發 FallbackRequest，只告警
+  double waited{0.0};
+};
+
 struct GatewayConfig
 {
   double group_recovery_timeout{10.0};  // 暫時不完整等多久（使用者 11/16：group_recovery_timeout_s = 10）
   double restore_confirm{10.0};         // 重開後讀回的對照，等任務從鄰居補回來多久（任務欄位補齊 01）
+  // 單獨 P0 任務沒有得標者也沒有正式指派多久就告警／發 FallbackRequest（任務欄位補齊 07；和角色組的
+  // group_commit_timeout、group_recovery_timeout 分開）；0 = 不用
+  double p0_unassigned_timeout{10.0};
 };
 
 struct InjectResult
@@ -153,6 +165,7 @@ public:
     double release_sec{0.0};
     double expires_sec{0.0};
     TaskMeta meta;               // 存檔只存識別與語意（名稱、編號、來源）；空間在任務、TaskSpec 裡
+    std::string fallback_template;   // 單獨任務的（P0 看門狗用；角色組的在 GroupData）
     bool restored{false};        // 從存檔讀回、任務還沒從鄰居補回來
   };
   const std::map<std::pair<std::string, std::string>, Injected> & injected() const {return injected_;}
@@ -170,6 +183,9 @@ public:
   bool membershipReady(double now);
   // 連鎖撤銷：每個 tick 呼叫（內部每 0.2 s 檢查一次），回傳這次新的失效事件
   std::vector<GroupEvent> stepGroups(double now);
+  // 單獨 P0 任務的看門狗：自己建立、開著、沒有得標者也沒有正式指派，連續 p0_unassigned_timeout → 回傳一次；
+  // 之後有人得標再沒人才重新計時（每段一次）。閘道聽不到任何鄰居時也算（沒人能接本來就要告警）
+  std::vector<UnassignedP0> stepWatchdog(double now);
 
   struct GroupData
   {
@@ -197,6 +213,7 @@ private:
   InjectResult revise(const InjectRequest & req, Injected & known, double now);
   // 讀回的對照：任務補回來就確認；restore_confirm 之後還沒補回來的丟掉
   void confirmRestored(double now);
+  std::uint16_t zonesVersion() const;
 
   CbbaComm & comm_;
   GatewayConfig config_;
@@ -208,6 +225,8 @@ private:
   std::map<TaskId, std::pair<std::string, std::string>> by_task_;   // task_id → 對照的鍵
   double restored_at_{-1.0};   // 讀回存檔的時刻；< 0 = 沒有待確認的
   std::vector<std::pair<std::string, std::string>> purged_;
+  std::map<TaskId, double> p0_unassigned_since_;   // 看門狗計時
+  std::set<TaskId> p0_reported_;                   // 這一段已經報過的
 
   double connected_since_{-1.0};   // 這次連上（聽得到鄰居）的時刻；< 0 = 斷線
   double next_check_{0.0};

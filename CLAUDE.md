@@ -468,6 +468,14 @@ target_kind、target、track_id、uncertainty_m、standoff_m；`registry/task_ty
 swarm_interfaces 2.4.0。協定封包不變（版本 4）。測試：`test_task_meta`、`test_gateway`（Identity、Retarget）、`test_registry` SemanticIds、
 `test_spec_compose`、`swarm_cbba/test/meta_iface.sh`（M1～M7）。
 
+**第二批（11/18 commit，細節見 `planner_task_definition_plan.md`「第二批的實作」）**：**協定版本 5**（TASK_ANNOUNCE 128 B：
+`zone_policy_id`、`zone_registry_version`；全隊含狗的 cbba_node 一起重編）；`cbba_core/zones.*`（樓層、高度上限、天花板、no_entry、政策、
+室內）→ `fitness()` 的 WRONG_FLOOR／ALTITUDE_LIMIT／ZONE_FORBIDDEN／INDOOR；cbba_node 參數 `site_dir`、`floor`、`max_altitude_m`
+（預設從 fleet.yaml）；`zones.geojson` 加 version、policies、floor_id、indoor；`fleet.yaml` 加 floor；話題 `zone_warning`（版本不同只告警）、
+`capability_restored`；`preempt_margin_pct` 生效（同級搶占的遲滯）；閘道的單獨 P0 看門狗 `p0_unassigned_timeout_s` 10 s
+（task_orphaned P0_UNASSIGNED、FallbackRequest 加 `task_id`）；swarm_interfaces 2.5.0。測試：`test_zones`、`test_gateway`（ZoneGateway、
+Watchdog）、`test_registry` SiteZonesForCbba、`swarm_cbba/test/zone_iface.sh`（Z1～Z6）。
+
 ## 機間 UDP：現在有兩條（2026-10-13 整理）
 
 DDS 不走 mesh（`.env` 的 `DDS_OVER_MESH=0`）：ROS 話題（robot_state、current_task、PX4…）只在機內。機間只有這兩條 UDP：
@@ -590,7 +598,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 **使用者 11/16 的範圍**：完成 CB-4＋TDR → 用「指令注入＋假 BT／假 Planner」測試，先測到這裡；真的 BT、人機介面（Node-RED）之後再對接。
 
 1. ~~itest `group`~~（11/17：G0～G15＋G14D、G15R 共 18 項全過，`20261117_015231_group`；影片 `group.mp4`、`group_0.5x.mp4`）
-2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 **11/18 測過**（還沒 commit）；下一批是第二批 05 區域 → 08 能力 → 07 搶占（協定版本 5、TASK_ANNOUNCE 128 B）
+2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 測過、commit `1889b71`（11/18）；**第二批 05、08、07 11/18 commit**（協定版本 5、TASK_ANNOUNCE 128 B、swarm_interfaces 2.5.0；`zone_iface.sh`）；之後第三批 10 執行規格 → 12 人機與安全
 3. ~~**TDR 參數實驗**~~（`docs/tdr_experiment_plan.md`，11/16 照使用者的〈TDR 參數設定與測試計畫〉PDF 重新規劃）：階段 A、B 的程式寫好
    （`mission_sim` 的量測、`tdr_experiment`〔S1～S6〕、`cbba_sim tdr`、`scripts/tdr_report.py`、`test_scoring` +3、`test_tdr_experiment` 9 項），
    ✅ 11/16 階段 A～D 跑完：**`energy_weight` 50 → 25**（程式預設已改），`half_life_by_priority` 維持 60/120/300/600 s；

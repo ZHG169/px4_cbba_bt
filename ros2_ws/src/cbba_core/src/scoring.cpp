@@ -103,7 +103,7 @@ Insertion bestInsertion(
   const ScoringParams & params, const InsertionLimits & limits)
 {
   Insertion best;
-  if (fitness(agent, task) != Fitness::OK || task.status != TaskStatus::OPEN) {
+  if (fitness(agent, task, params.zones.get()) != Fitness::OK || task.status != TaskStatus::OPEN) {
     return best;
   }
 
@@ -132,6 +132,9 @@ Insertion bestInsertion(
       if (before.feasible && after.feasible) {
         gain = after.score - before.score;
       }
+    }
+    if (pos < limits.ahead_positions && !(gain > limits.ahead_min_gain)) {
+      continue;   // 同級搶占：沒有好到超過遲滯（preempt_margin_pct）就不插到前面
     }
     if (!best.feasible || gain > best.gain) {
       best.feasible = true;

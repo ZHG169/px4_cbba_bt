@@ -18,5 +18,5 @@ uint8 reason
 #   E_TIMEOUT、E_TARGET_LOST、E_COMM   → TRANSIENT
 #   E_LOW_BATTERY、E_SAFETY_STOP       → STOPPED
 string failure_code
-string failed_capability        # E_HW 時故障的能力標籤（例如 thermal_camera）：這台之後不再對需要它的任務出價，到 cbba_node 重開
+string failed_capability        # E_HW 時故障的能力標籤（例如 thermal_camera）：這台之後不再對需要它的任務出價，到 capability_restored（2026-11-18）或 cbba_node 重開
 string findings_uri             # 執行結果（照片等）的位置；M0 只記 log，之後轉給閘道
