@@ -6,6 +6,52 @@
 閉環情境（週計畫）：無人機飛巡檢點 → 下視相機看到 AprilTag 101（火警）→ 建立地面處置任務 → 懸停監控 →
 機器狗競標、前往處理 → 處理完 → 無人機完成、回起飛點。
 
+## 分支 `hetero-tasking`：異質機隊的任務分派
+
+這個分支是 **2-1b（標準化模組、任務規劃器與事件偵測）** 的 CBBA 端：從「每台看到事件自己建任務」改成
+**偵測 → 閘道 → 規劃器把事件拆成角色 → CBBA 決定哪一台填哪個角色 → 各台的 BT 執行**，讓無人機、機器狗（之後還有其他平台）
+依能力分工、同一個事件可以由多台協同處理。
+
+| | `main`（GitHub 停在 11/12 的 `2553ca8`） | `hetero-tasking`（11/14 起） |
+|---|---|---|
+| 誰建任務 | 載具自己（`new_task`，舊型 TaskType） | **閘道**（不出價的 cbba_node，機號 200）照規劃器的請求注入（`inject_task`）；舊型 `new_task` 保留 |
+| 可不可以出價 | 載具種類對應任務種類 | **能力過濾**：任務的平台 ∈ {不限, 我的平台} 而且需要的能力 ⊆ 我的能力（`registry/tools.yaml`） |
+| 一件事要幾台 | 一個任務一台 | **角色組（CB-4）**：同一個 incident 拆成多個角色（`group_id`），各角色分別拍賣；precedence、會合點、all-or-nothing、distinct、optional |
+| 出價公式 | 舊公式（空間 × 時間成本、電池加權） | **時間折扣報酬（TDR）**：Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量；w_E 25（參數實驗定案）、half_life P0～P3 60/120/300/600 s |
+| 失效處理 | 失聯接手、失敗交回 | ＋連鎖撤銷（取消失效角色與依賴它的角色）、FallbackRequest、失聯接手做法 A（接手時限到才開始算組的恢復期限） |
+| 協定 | 版本 4 的前半（64 位元 task_id、TaskSpec） | 版本 4 完整：再加 TASK_PROGRESS（12）、INCIDENT_UPDATE（13）、DETECTION（10、11）、TASK_ANNOUNCE 124 B |
+| 介面 | swarm_interfaces 2.0 以前 | **swarm_interfaces 2.3.0**：`teammates`、`task_progress`、`incident_update`、`detection`、`InjectTask`、`FallbackRequest`… |
+| 註冊表 | — | `registry/`（actions、objects、tools、platforms、fleet、event_types）＋`site-config/yard` |
+
+**和 main 的關係**：還沒合進 main（伯宇 `git pull` main 不會拿到）；約好全隊一起換時再合。協定與訊息和 main 不相容：
+用這個分支時，**全隊（含狗的 cbba_node、狗的 BT）都要用同一版重新編譯**（uav 容器編 6 個套件；狗的 BT `dog_bt.sh build`）。
+
+**用法**
+
+```bash
+git checkout hetero-tasking
+# uav 容器：重新編譯（切換分支後一定要）
+colcon build --symlink-install --packages-select swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector
+# host：團隊 CBBA 的整合測試（閘道＋3 架無人機＋3 隻狗、假身體，不用 PX4、BT），約 10～12 分鐘，產生 report.md、group.mp4
+python3 docker/itest/itest.py group --dogs 3 --kill-existing
+```
+
+**目前狀態（2026-11-17）**
+
+| 項目 | 狀態 |
+|---|---|
+| 2-1b M0：能力過濾、P0～P3、協定版本 4、TaskSpec、閘道、改版、過期、搶占與 commit_radius、optional 關閉、DETECTION、介面 v2、註冊表 | ✅ 單元、itest comm／loss／uav／demo（11/14） |
+| 出價改成 TDR；參數實驗（`cbba_sim tdr`，情境 S1～S6 × w_E × half_life × 掉包率）→ w_E 50 改 25 | ✅ `docs/tdr_experiment_plan.md` |
+| CB-4 團隊協同（三批）＋失聯接手做法 A | ✅ 單元＋節點腳本（`cb4*_iface.sh`） |
+| **itest group G0～G15**：precedence、incident、會合、distinct、all-or-nothing、Planner 改版／fallback、異質分工、失聯接手、接手逾時、連鎖撤銷、optional 略過、搶占、**偵測 → 寫死的假 Planner → 組隊**（狗偵測到人、UAV 偵測到火）、去重、補發 | ✅ 18／18 PASS（`20261117_015231_group`）；影片 `group.mp4` |
+| 真的規劃器（範本展開 PLN-1、九層檢查器 PLN-2）、真的偵測器外掛（EVT-1） | ⏳ 現在由 itest 的假 Planner、`detection` 話題代替 |
+| 無人機的 uav_adapter（`ExecuteStep.action`）、BT 讀 spec／teammates／task_progress | ⏳ 等和伯宇對 Action 介面 |
+| 狗的 BT 接 CB-4 話題、同 task_id 新 revision 更新目標 | ⏳ 要和伯宇對 |
+| 狗的速度、耗電實測（TDR 參數實驗階段 E）、Gazebo 2 狗＋1 UAV 驗證（階段 F、M3） | ⏳ |
+
+設計文件：`ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`（合約）、`cb4_design.md`（團隊協同）、`formula/tdr_design.md`（出價公式）、
+`parameters.md`（參數）；測試與報告：`docker/itest/README.md`（group 一節）、`docs/cbba_test_report_20261116.md`。
+
 ## 架構
 
 ```
@@ -72,6 +118,8 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 ## 目錄
 
 ```
+registry/                     2-1b 註冊表（actions、objects、tools、platforms、fleet、event_types）→ registry/README.md
+site-config/yard/             場域的位置標準（區域、設備、觀察點、起降點）
 docs/                         跨套件的文件 → docs/README.md：模擬測試的開啟方式（sim_launch_guide.md）、
                               插入任務點的使用方法（task_insertion_guide.md）、目前進度（progress.md）、
                               Nav2 導入規劃（nav2_integration_plan.md）、協定版本 2 的變更通知
@@ -79,8 +127,8 @@ docker/                       模擬環境（Dockerfile、啟動腳本、Fast DD
 ├── gz/                       Gazebo 場景（fire_site、patrol_site、demo_site、yard）、模型（AprilTag、火點方塊、藍色任務平台）、
 │                             視窗設定；demo_site、patrol_site、yard 由 gen_patrol_site.py 從 *_points.csv 產生
 │                             （yard＝伯宇的變電所 100 × 80 m，障礙物在 yard_env.sdf.inc）
-├── itest/                    自動整合測試（comm、uav、loss、demo）、情境檔（scenarios/）、手動插入（insert.py）
-│                             、出價表（bid_table.py）→ docker/itest/README.md
+├── itest/                    自動整合測試（comm、uav、loss、demo、group）、情境檔（scenarios/）、手動插入（insert.py）
+│                             、出價表（bid_table.py）、團隊 CBBA 影片（animate_group.py）→ docker/itest/README.md
 └── scripts/                  cbba_uav.sh、px4_sitl.sh、gz_bridge.sh、cbba_task.sh、patrol_scenario.sh、fake_dog.py、mesh_tc.sh…
 ros2_ws/src/
 ├── swarm_interfaces/         ROS 訊息（Task、RobotState、TaskResult…）→ swarm_interfaces/README.md
@@ -131,6 +179,7 @@ python3 docker/itest/itest.py demo --scenario cbba_overrun # CBBA 正常分配�
 python3 docker/itest/itest.py demo --world yard --scenario assign_random --seed 7
 python3 docker/itest/itest.py demo --scenario manual_fire --seed 7   # 人工指派＋火警＋插入（demo_site）
 python3 docker/itest/itest.py demo --dog bt                          # 狗換成伯宇的 BT（task_manager）＋假 Nav2（先在 uav1 跑 dog_bt.sh build）
+python3 docker/itest/itest.py group --dogs 3 --kill-existing         # 團隊 CBBA（hetero-tasking）：G0～G15、group.mp4
 ```
 
 demo 的輸出在 `docker/itest/out/<時間>_demo/`：報告、Gazebo 俯視錄影（`gazebo.mp4`；加標籤的 `gazebo_labeled.mp4`：載具、
@@ -180,9 +229,11 @@ ros2 run cbba_core cbba_sim run $SCN/fire_3uav.csv --loss 0 --out /tmp/fire_3uav
 ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points.csv --out /tmp/insert
 ```
 
-## 目前進度（2026-11-13）
+## 目前進度
 
-**2-1b M0（11/20）的 CBBA 部分**（合約 `ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`）：
+2-1b（`hetero-tasking`）的最新狀態見上面「分支 `hetero-tasking`」一節。以下是 11/13 的 M0 紀錄與之前的進度。
+
+**2-1b M0（11/20）的 CBBA 部分，11/13 的紀錄**（合約 `ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`）：
 
 | 項目 | 狀態 |
 |---|---|
@@ -193,7 +244,7 @@ ros2 run cbba_core cbba_sim insert ~/CBBA_BT/docker/gz/worlds/patrol_site_points
 | 閘道：非競標的協定節點（平台 0、能力 0）、`inject_task`（冪等、角色組 group_id）、`assignments` | ✅ 單元、手動（閘道＋狗） |
 | 改版（revision）：只改位置／時間／價值保留指派、改平台／能力／優先級重新競標、落後的節點補新版 | ✅ 手動；**狗 BT 收到同 task_id 新 revision 還是照舊版做（要和伯宇對）** |
 | 狗 BT 照 `current_task.spec` 建 tasks（`docker/dog/task_manager_spec.patch`） | ✅ 單元、端到端（閘道 → CBBA → 狗 BT） |
-| 過期、失聯接手依優先級、commit_radius、optional 角色關閉、DETECTION | ⏳ |
+| 過期、失聯接手依優先級、commit_radius、optional 角色關閉、DETECTION | ✅ 11/13～14（之後的進度見「分支 `hetero-tasking`」） |
 
 **之前（第 1～5 週）**：
 
