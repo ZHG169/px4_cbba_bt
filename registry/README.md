@@ -13,6 +13,7 @@ TaskSpec 的 JSON Schema：[`schema/task_spec.schema.json`](schema/task_spec.sch
 | `actions.yaml` | 動作：參數、前置條件、效果、平台實作、風險、自主狀態（原文第二節） | 規劃器、檢查器、BT／adapter；cbba_node 只檢查 |
 | `objects.yaml` | 物件類別：偵測方式（locate）、允許的動作、安全距離（原文第三節） | 規劃器、VLM 詞彙、檢查器；cbba_node 只檢查 |
 | `event_types.yaml` | 偵測器與事件類型：觸發、累積、關聯、VLM、代價、預設範本（原文第七節） | 閘道的事件流程（EVT-1）；cbba_node 只檢查 |
+| `task_types.yaml` | 任務語意的編號（任務欄位補齊 02，2026-11-17）：`task_types`、`roles` 的「名稱 → {id, description}」；事件類型的編號在 `event_types.yaml` 的 `id` | 閘道（注入時名稱 → 編號，寫進 TaskSpec、assignments）；cbba_node 檢查不重複 |
 | `site-config/<site>/` | 位置：`zones.geojson`（區域與屬性）、`devices.csv`（設備實例＋觀察姿態）、`pois.csv`（觀察點）、`docks.csv`（充電樁、起降點） | 規劃器（代換 location）、檢查器（區域層）；`test_registry` 檢查和註冊表一致 |
 
 ## 規則
@@ -23,6 +24,8 @@ TaskSpec 的 JSON Schema：[`schema/task_spec.schema.json`](schema/task_spec.sch
   （多出的標籤 cbba_node 印警告）。
 - 機號 1～254，載具和閘道之間也不能重複。
 - 名稱（動作、物件類別、事件類型、偵測器、設備 id）用過之後不改：任務、偵測、紀錄都用名稱。
+- 事件類型、task_type、role 的 **id 只增不改、不重用**（1～65535，0 = 不知道）。閘道給了 `registry_dir` 時，注入不認得的
+  event_type、task_type、role 會被拒絕；沒給時照收、編號 0。
 - 能力故障（E_HW）在執行期由 cbba_node 扣掉，不改這份。
 
 ## actions.yaml

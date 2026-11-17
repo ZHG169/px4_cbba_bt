@@ -11,6 +11,7 @@
 | [`sim_scenario_plan.md`](sim_scenario_plan.md) | 自己 | 巡檢＋隨機插入、電池權重測試：當初的分析、使用者的決定、實作與第一次結果 | 已實作 |
 | [`tdr_experiment_plan.md`](tdr_experiment_plan.md) | 自己 | TDR 參數實驗（w_E、預設 half_life）：情境 S1～S6、指標、入選順序、`cbba_sim tdr`、`tdr_report.py` | 11/16 跑完、w_E 定 25 |
 | [`cbba_test_report_20261116.md`](cbba_test_report_20261116.md) | 自己 | 11/16 報告：CB-4 itest、失聯接手做法 A、TDR 參數實驗結果（w_E 50 → 25）、各測試指令的項目與指標、重跑方式 | 報告 |
+| [`planner_task_definition_plan.md`](planner_task_definition_plan.md) | 自己 | 〈2-1〉第二節任務定義的關聯性：載具適合性（F1～F9）、航行限制（N1～N5）、前後順序與協同（P1～P8）的現況與補齊做法；初步規劃器（PL-1～5） | 規劃 |
 | [`protocol_v2_notice.md`](protocol_v2_notice.md) | 狗端（伯宇）、規格作者 | 機間通訊協定版本 2 的變更通知（不相容於規格書） | 有效，還沒送給規格作者 |
 | [`nav2_integration_plan.md`](nav2_integration_plan.md) | 自己、狗端（伯宇） | 模擬裡導入 Nav2：伯宇的 task_manager＋Nav2 取代假狗（dog 容器、Gazebo V60、座標、假雲台、itest） | 草案，還沒實作 |
 | [`task_insertion_guide.md`](task_insertion_guide.md) | 自己 | **插入任務點的使用方法**：itest demo 的 `--interactive`（terminal 手動、隨機插入）、`--scenario`（情境檔）、手動 SITL 的腳本 | 2026-10-14 |

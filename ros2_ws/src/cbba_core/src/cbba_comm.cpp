@@ -1621,10 +1621,15 @@ void CbbaComm::sendSpecParts(TaskId task_id, std::uint16_t revision, const std::
 // 已知任務的定義（origin 沿用建立時的）：建立、保底重播、補發共用
 wire::TaskAnnounceBody CbbaComm::announceBody(TaskId task_id) const
 {
-  const Task & t = agent_.tasks().at(task_id);
-  wire::TaskAnnounceBody b;
+  wire::TaskAnnounceBody b = bodyOf(agent_.tasks().at(task_id));
   b.relay = origins_.at(task_id);
-  b.task_id = task_id;
+  return b;
+}
+
+wire::TaskAnnounceBody CbbaComm::bodyOf(const Task & t)
+{
+  wire::TaskAnnounceBody b;
+  b.task_id = t.id;
   b.revision = t.revision;
   b.task_type = static_cast<std::uint8_t>(t.type);
   b.platform = t.platform;
@@ -1823,11 +1828,15 @@ void CbbaComm::applyRevision(const wire::RelayHeader & origin, const Task & task
   const Task & old = it->second;
   const bool reauction = old.type != task.type || effectivePlatform(old) != effectivePlatform(task) ||
     effectiveRequiredCaps(old) != effectiveRequiredCaps(task) || priorityLevel(old) != priorityLevel(task);
+  const bool retarget = !reauction && smallMove(old, task);
   origins_[task.id] = origin;   // 之後的保底重播、補發都用新版的 origin
   added_at_[task.id] = now;     // 摘要不同時直接推送（push_recent_sec）
   newer_revision_.erase(task.id);
   ++stats_.revisions;
-  markChanged(agent_.updateTask(task, reauction, now));
+  if (retarget) {
+    ++stats_.retargets;
+  }
+  markChanged(agent_.updateTask(task, reauction, now, !retarget));
   dirty_ = true;
   if (reauction) {
     ++stats_.reauctions;
@@ -1841,6 +1850,33 @@ void CbbaComm::applyRevision(const wire::RelayHeader & origin, const Task & task
   } else if (specs_.count(task.id) > 0) {
     completeSpec(task.id);   // 新版的段比任務定義先到
   }
+}
+
+// 只動了位置、位移 < retarget_threshold：比對封包裡的任務定義（各節點收到的就是這個，浮點數的捨入一致），
+// 位置、revision、TaskSpec 的大小與 CRC 以外都一樣才算（TaskSpec 裡的目標座標跟著動是正常的）
+bool CbbaComm::smallMove(const Task & old, const Task & task) const
+{
+  if (config_.retarget_threshold <= 0.0) {
+    return false;
+  }
+  const double dx = task.position.x - old.position.x;
+  const double dy = task.position.y - old.position.y;
+  const double dz = task.position.z - old.position.z;
+  if (std::sqrt(dx * dx + dy * dy + dz * dz) >= config_.retarget_threshold) {
+    return false;
+  }
+  wire::TaskAnnounceBody a = bodyOf(old);
+  wire::TaskAnnounceBody b = bodyOf(task);
+  b.x = a.x;
+  b.y = a.y;
+  b.z = a.z;
+  b.revision = a.revision;
+  b.spec_length = a.spec_length;
+  b.spec_crc = a.spec_crc;
+  // 只拿來比對：轉送區塊填同一個合法的 origin（機號 0 編碼時會被當成壞封包丟例外）
+  a.relay.origin_id = b.relay.origin_id = id();
+  const wire::Header h{};
+  return wire::encodeTaskAnnounce(h, a) == wire::encodeTaskAnnounce(h, b);
 }
 
 void CbbaComm::pullRevisions(double now)

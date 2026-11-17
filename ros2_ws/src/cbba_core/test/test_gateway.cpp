@@ -678,3 +678,262 @@ TEST(Release, DispatchedJustInTime)
   ASSERT_TRUE(t.dog->active());
   EXPECT_EQ(t.dog->active()->task, t.id);
 }
+
+// ===========================================================================
+// 任務欄位補齊第一批（2026-11-17）：01 識別與追溯、04 空間（docs/planner_task_definition_plan.md）
+// ===========================================================================
+TEST(Identity, SameEventSentFiveTimesMakesOneTask)
+{
+  // 01 驗收 1：同一個事件（incident、role、revision）重送五次，只產生一個 task_id、只送一次任務定義
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  const InjectRequest req = groundRequest("intrusion-5", "");
+  TaskId id = 0;
+  for (int k = 0; k < 5; ++k) {
+    const InjectResult r = gw.inject(req, swarm.now());
+    ASSERT_EQ(r.status, k == 0 ? InjectStatus::CREATED : InjectStatus::DUPLICATE) << k << " " << r.reason;
+    if (k == 0) {
+      id = r.task_id;
+    }
+    EXPECT_EQ(r.task_id, id);
+    swarm.run(0.2);
+  }
+  EXPECT_EQ(swarm.node(kGateway).taskCount(), 1u);
+  swarm.run(1.0);
+  EXPECT_EQ(swarm.node(50).taskCount(), 1u);
+}
+
+TEST(Identity, GatewayRestartKeepsTaskId)
+{
+  // 01 驗收 2、3：閘道存檔 → 重開（新世代 4、什麼都不知道）→ 讀回。任務還沒從鄰居補回來時同一個鍵拒絕（不建第二個）；
+  // 補回來之後重送 = 同一個 task_id（DUPLICATE），revision 2 改版同一個 task_id，revision 1 拒絕
+  Swarm swarm = makeSwarm();
+  InjectRequest req = groundRequest("intrusion-8", "front");
+  req.task.ext.role_count = 1;
+  req.meta.source = TaskSource::VMS;
+  req.meta.event_type = "perimeter_intrusion";
+  req.meta.event_type_id = 1;
+  TaskId id = 0;
+  TaskId group = 0;
+  std::string saved;
+  {
+    Gateway gw(swarm.node(kGateway));
+    const InjectResult r = gw.inject(req, swarm.now());
+    ASSERT_EQ(r.status, InjectStatus::CREATED) << r.reason;
+    id = r.task_id;
+    group = r.group_id;
+    saved = gw.saveState();
+    swarm.run(2.0);
+  }
+  EXPECT_EQ(taskEpoch(id), 3);
+
+  swarm.restartGateway(kGateway, 4);
+  Gateway gw(swarm.node(kGateway));
+  std::string error;
+  ASSERT_TRUE(gw.loadState(saved, swarm.now(), &error)) << error;
+  const auto * kept = gw.findTask(id);
+  ASSERT_NE(kept, nullptr);
+  EXPECT_EQ(kept->meta.source, TaskSource::VMS);
+  EXPECT_EQ(kept->meta.event_type, "perimeter_intrusion");
+
+  const InjectResult early = gw.inject(req, swarm.now());
+  EXPECT_EQ(early.status, InjectStatus::REJECTED);   // 還沒補回來：不能建新的
+  EXPECT_EQ(early.task_id, id);
+  EXPECT_EQ(swarm.node(kGateway).taskCount(), 0u);
+
+  swarm.run(3.0);   // 開機同步：鄰居把閘道建立過的任務補回來
+  ASSERT_EQ(swarm.node(kGateway).agent().tasks().count(id), 1u);
+  const InjectResult again = gw.inject(req, swarm.now());
+  EXPECT_EQ(again.status, InjectStatus::DUPLICATE) << again.reason;
+  EXPECT_EQ(again.task_id, id);
+  EXPECT_EQ(again.group_id, group);
+
+  req.revision = 2;
+  req.task.value = 150.0;
+  const InjectResult revised = gw.inject(req, swarm.now());
+  EXPECT_EQ(revised.status, InjectStatus::REVISED) << revised.reason;
+  EXPECT_EQ(revised.task_id, id);
+  req.revision = 1;
+  EXPECT_EQ(gw.inject(req, swarm.now()).status, InjectStatus::REJECTED);
+  swarm.run(1.0);
+  EXPECT_EQ(swarm.node(50).agent().tasks().at(id).revision, 2);
+  EXPECT_EQ(swarm.node(kGateway).taskCount(), 1u);
+}
+
+TEST(Identity, RestoredMappingForgottenByTeamIsPurged)
+{
+  // 整隊都重開（沒有人記得那個任務）：restore_confirm 內拒絕，之後丟掉那筆對照，再注入是新任務（新世代，task_id 不撞）
+  std::string saved;
+  TaskId old_id = 0;
+  {
+    Swarm swarm = makeSwarm();
+    Gateway gw(swarm.node(kGateway));
+    const InjectResult r = gw.inject(groundRequest("smoke-3"), swarm.now());
+    ASSERT_EQ(r.status, InjectStatus::CREATED);
+    old_id = r.task_id;
+    saved = gw.saveState();
+  }
+  CommConfig cc;
+  cc.epoch = 4;
+  Swarm swarm(0.0, 1, cc);
+  swarm.addGateway(kGateway);
+  swarm.add(50, {5, 0, 0}, 100.0, AgentType::UGV);
+  GatewayConfig gc;
+  gc.restore_confirm = 5.0;
+  Gateway gw(swarm.node(kGateway), gc);
+  ASSERT_TRUE(gw.loadState(saved, swarm.now()));
+  EXPECT_EQ(gw.inject(groundRequest("smoke-3"), swarm.now()).status, InjectStatus::REJECTED);
+  swarm.run(6.0);
+  gw.step(swarm.now());
+  const auto purged = gw.takePurged();
+  ASSERT_EQ(purged.size(), 1u);
+  EXPECT_EQ(purged.front().first, "smoke-3");
+  const InjectResult fresh = gw.inject(groundRequest("smoke-3"), swarm.now());
+  ASSERT_EQ(fresh.status, InjectStatus::CREATED) << fresh.reason;
+  EXPECT_NE(fresh.task_id, old_id);
+  EXPECT_EQ(taskEpoch(fresh.task_id), 4);
+}
+
+TEST(Identity, BadStateFileIsRejectedWithoutChanges)
+{
+  // 存檔格式不對：loadState 回 false、說明哪一行，原本的對照不動
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  ASSERT_EQ(gw.inject(groundRequest("ok-1"), swarm.now()).status, InjectStatus::CREATED);
+  std::string error;
+  EXPECT_FALSE(gw.loadState("something else 1\n", swarm.now(), &error));
+  EXPECT_FALSE(error.empty());
+  EXPECT_FALSE(gw.loadState("cbba_gateway_state 1\ni only-three fields\n", swarm.now(), &error));
+  EXPECT_NE(error.find("第 2 行"), std::string::npos) << error;
+  EXPECT_EQ(gw.injected().size(), 1u);
+  // 字串有空白、中文、% 也能存回來
+  InjectRequest odd = groundRequest("入侵 #7 100%", "front 1");
+  odd.task.ext.role_count = 1;
+  ASSERT_EQ(gw.inject(odd, swarm.now()).status, InjectStatus::CREATED);
+  Gateway other(swarm.node(kGateway));
+  ASSERT_TRUE(other.loadState(gw.saveState(), swarm.now(), &error)) << error;
+  EXPECT_EQ(other.injected().count({"入侵 #7 100%", "front 1"}), 1u);
+  EXPECT_EQ(other.saveState(), gw.saveState());
+}
+
+TEST(Identity, MetaFieldsAreChecked)
+{
+  // 04：觀察點離目標不到 standoff_m、moving 沒有 track_id、area 沒有半徑、沒有目標卻給安全距離 → 拒絕；合法的照收
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest near = groundRequest("m1");
+  near.meta.target_kind = TargetKind::POINT;
+  near.meta.target = {13.0, 0.0, 0.0};   // 觀察點 (12, 0)：只有 1 m
+  near.meta.standoff_m = 3.0;
+  const InjectResult r1 = gw.inject(near, swarm.now());
+  EXPECT_EQ(r1.status, InjectStatus::REJECTED);
+  EXPECT_NE(r1.reason.find("standoff_m"), std::string::npos) << r1.reason;
+
+  InjectRequest moving = groundRequest("m2");
+  moving.meta.target_kind = TargetKind::MOVING;
+  moving.meta.target = {20.0, 0.0, 0.0};
+  EXPECT_EQ(gw.inject(moving, swarm.now()).status, InjectStatus::REJECTED);
+  InjectRequest area = groundRequest("m3");
+  area.meta.target_kind = TargetKind::AREA;
+  area.meta.target = {20.0, 0.0, 0.0};
+  EXPECT_EQ(gw.inject(area, swarm.now()).status, InjectStatus::REJECTED);
+  InjectRequest none = groundRequest("m4");
+  none.meta.standoff_m = 2.0;
+  EXPECT_EQ(gw.inject(none, swarm.now()).status, InjectStatus::REJECTED);
+  InjectRequest bad_source = groundRequest("m5");
+  bad_source.meta.source = static_cast<TaskSource>(7);
+  EXPECT_EQ(gw.inject(bad_source, swarm.now()).status, InjectStatus::REJECTED);
+
+  // 事件在危險處、觀察點在 5 m 外（04 驗收 1）：照收，出價算到觀察點
+  InjectRequest ok = groundRequest("m6");
+  ok.meta.target_kind = TargetKind::MOVING;
+  ok.meta.target = {17.0, 0.0, 0.0};
+  ok.meta.track_id = "trk_88";
+  ok.meta.standoff_m = 5.0;
+  const InjectResult r6 = gw.inject(ok, swarm.now());
+  ASSERT_EQ(r6.status, InjectStatus::CREATED) << r6.reason;
+  swarm.run(2.0);
+  EXPECT_EQ(swarm.node(50).agent().winner(r6.task_id), 50);
+}
+
+TEST(Identity, DifferentObservePosesGiveDifferentBids)
+{
+  // 04 驗收 2：同一個目標、不同的觀察點 → 出價（TDR）不同：狗（x = 5）到目標前方的觀察點近、分數高。
+  // 各自在一個新的隊伍裡注入（不在同一個 bundle，出價不受另一個任務影響）
+  const auto bidAt = [](Vec3 observe) {
+      Swarm swarm = makeSwarm();
+      Gateway gw(swarm.node(kGateway));
+      InjectRequest r = groundRequest("same-target");
+      r.meta.target_kind = TargetKind::POINT;
+      r.meta.target = {30.0, 0.0, 0.0};
+      r.meta.standoff_m = 5.0;
+      r.task.position = observe;
+      const InjectResult res = gw.inject(r, swarm.now());
+      EXPECT_EQ(res.status, InjectStatus::CREATED) << res.reason;
+      swarm.run(2.0);
+      return swarm.node(50).agent().bidFor(res.task_id, swarm.now()).bid;
+    };
+  const double front = bidAt({25.0, 0.0, 0.0});
+  const double back = bidAt({35.0, 0.0, 0.0});
+  EXPECT_GT(front, 0.0);
+  EXPECT_GT(back, 0.0);
+  EXPECT_GT(front, back);
+}
+
+TEST(Retarget, SmallMoveKeepsWinnerLargeMoveReevaluates)
+{
+  // 04 驗收 3：兩隻狗（50 在 x = 5、51 在 x = 30），任務在 x = 12 → 50 得標。往 51 移 2 m（< 3 m）：換成新 revision、
+  // 不重新評估（retargets + 1），50 照舊；再移到 x = 28（大幅）：重新評估，51 得標。規劃器沒改期限：絕對時刻沿用
+  Swarm swarm = makeSwarm();
+  swarm.add(51, {30, 0, 0}, 100.0, AgentType::UGV);
+  swarm.run(2.0);
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest req = groundRequest("walker-1");
+  req.deadline_sec = 600.0;
+  const InjectResult r = gw.inject(req, swarm.now());
+  ASSERT_EQ(r.status, InjectStatus::CREATED) << r.reason;
+  swarm.run(2.0);
+  ASSERT_EQ(swarm.node(51).agent().winner(r.task_id), 50);
+  const double deadline = swarm.node(51).agent().tasks().at(r.task_id).deadline_sec;
+
+  swarm.run(1.0);
+  req.revision = 2;
+  req.task.position = {14.0, 0.0, 0.0};
+  ASSERT_EQ(gw.inject(req, swarm.now()).status, InjectStatus::REVISED);
+  swarm.run(2.0);
+  for (AgentId a : {AgentId{50}, AgentId{51}}) {
+    const Task & t = swarm.node(a).agent().tasks().at(r.task_id);
+    EXPECT_EQ(t.revision, 2) << a;
+    EXPECT_NEAR(t.position.x, 14.0, 1e-3) << a;
+    EXPECT_NEAR(t.deadline_sec, deadline, 0.01) << a;   // 沒有往後推
+    EXPECT_EQ(swarm.node(a).stats().retargets, 1) << a;
+    EXPECT_EQ(swarm.node(a).agent().winner(r.task_id), 50) << a;
+  }
+
+  req.revision = 3;
+  req.task.position = {28.0, 0.0, 0.0};
+  ASSERT_EQ(gw.inject(req, swarm.now()).status, InjectStatus::REVISED);
+  swarm.run(3.0);
+  for (AgentId a : {AgentId{50}, AgentId{51}}) {
+    EXPECT_EQ(swarm.node(a).stats().retargets, 1) << a;   // 大幅移動不算
+    EXPECT_EQ(swarm.node(a).agent().winner(r.task_id), 51) << a;
+  }
+}
+
+TEST(Retarget, SmallMoveWithOtherChangeReevaluates)
+{
+  // 位移小，但同時改了價值（或期限）：不是「只動位置」，照一般改版重新評估
+  Swarm swarm = makeSwarm();
+  Gateway gw(swarm.node(kGateway));
+  InjectRequest req = groundRequest("walker-2");
+  const InjectResult r = gw.inject(req, swarm.now());
+  ASSERT_EQ(r.status, InjectStatus::CREATED);
+  swarm.run(2.0);
+  req.revision = 2;
+  req.task.position = {13.0, 0.0, 0.0};
+  req.task.value = 120.0;
+  ASSERT_EQ(gw.inject(req, swarm.now()).status, InjectStatus::REVISED);
+  swarm.run(1.0);
+  EXPECT_EQ(swarm.node(50).stats().retargets, 0);
+  EXPECT_EQ(swarm.node(50).stats().revisions, 1);
+}

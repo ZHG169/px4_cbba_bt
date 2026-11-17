@@ -98,8 +98,10 @@ public:
   // 任務改版（協定版本 4 的 revision，2026-11-13，合約第三節）：進行中的任務換成新的內容（task.revision 要比已知的大）。
   // reauction = false（只改位置、時間、價值…）：得標者、得標價保留，手上有的照新內容重算（reevaluate；做不到就釋放）；
   // true（改了平台、能力、優先級）：得標者清掉、自己手上的釋放，重新出價。本機的成功率（失敗打折）保留。
+  // rescore = false（任務欄位補齊 04，2026-11-17：只動了位置而且位移 < retarget_threshold）：只換內容，不重算、不釋放，
+  // 得標者照舊（小幅移動不換人）。
   // 回傳 true 表示有改變（改版一定算，鄰居要盡快看到新的 revision）
-  bool updateTask(const Task & task, bool reauction, double now);
+  bool updateTask(const Task & task, bool reauction, double now, bool rescore = true);
 
   // 收到出價訊息。回傳 true 表示自己的表有改變，應立即廣播。
   bool onMessage(const CbbaMessage & msg, double now);

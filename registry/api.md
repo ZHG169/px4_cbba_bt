@@ -174,6 +174,36 @@ POST /test_run/tr_0007/cancel → {"status": "canceling"}
   revision + 1 後 B 的目標自動更新；A 是 optional 時沒有也不阻塞）。原文範例寫成一維 `[aerial_overwatch, front]`，
   這裡統一成二維，兩種都收（一維當成一組）。
 
+### 4.1 角色 TaskSpec（`current_task.spec`）的最上層（任務欄位補齊第一批，2026-11-17）
+
+閘道把每個角色拆成一個 CBBA 任務時，把**識別、語意、空間**寫在那個角色的 spec 最上層（`cbba_core/task_meta.hpp`；
+規劃器經 `InjectTask` 的欄位給，不要自己寫進 spec——寫了會被拒絕，`role`、`schema_version` 一樣的話例外）。
+這些不進 TASK_ANNOUNCE（TaskCore 只放出價、可行性、協同要的）；規劃器的 spec 是空的時不產生（只留在閘道，`assignments` 看得到）。
+
+```json
+{"schema_version": "1.1", "incident_id": "ev_0042", "source": "VMS", "source_id": 4,
+ "event_type": "perimeter_intrusion", "event_type_id": 1, "task_type": "confirm_intrusion", "task_type_id": 4,
+ "role": "front", "role_id": 2, "description": "入侵：前方確認",
+ "observe_pose": {"frame": "map", "floor_id": 1, "x": 12.0, "y": 0.0, "z": 0.0},
+ "target_kind": "moving", "target": {"frame": "map", "floor_id": 1, "x": 17.0, "y": 0.0, "z": 0.0},
+ "track_id": "trk_88", "uncertainty_m": 2.0, "standoff_m": 5.0,
+ "steps": [{"action": "go_to"}, {"action": "inspect", "object": "person:trk_88"}]}
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `schema_version` | 角色 spec 的版本；BT 看主版本（1），不認得的主版本不執行。1.0 = 只有 steps |
+| `incident_id` | 事件識別（＝閘道的冪等鍵；閘道重開後同一個 (incident_id, role) 沿用原 task_id） |
+| `source`／`source_id` | 固定列舉：0 UNKNOWN、1 ALARM、2 UAV、3 QUADRUPED、4 VMS、5 OPERATOR、6 SENSOR（只增不改） |
+| `event_type`、`task_type`、`role`（＋`_id`） | 名稱給人看、編號給程式比（`event_types.yaml` 的 id、`task_types.yaml`）；執行照 steps，`bt_subtree` 不採用 |
+| `observe_pose` | 這個角色真正要到的位置 ＝ TASK_ANNOUNCE 的 x、y、z（出價、TDR 都算到這裡）。`floor_id` 是 A 層的樓層編號 |
+| `target_kind`、`target` | 事件本身：point（固定）、area（`uncertainty_m` 是半徑）、moving（要 `track_id`）；沒有另外的目標時不寫 |
+| `standoff_m` | 觀察點至少離目標多遠（area 從邊緣算）；閘道注入時檢查，不夠就拒絕（觀察點由規劃器往外推，閘道不推） |
+
+- **移動目標**：規劃器改版（revision + 1）只動了位置、觀察點位移 < `retarget_threshold_m`（3 m，全隊一樣）→ CBBA 換成新內容但
+  **不重新評估**（得標者照舊，BT 收到新的 revision 更新導航）；≥ 3 m 或同時改了別的欄位 → 照一般改版重新評估。
+  規劃器改版時相對時間（deadline_sec 等）和上一版一樣 → 閘道沿用原本的絕對時刻（期限不會因改版往後推）。
+
 ## 5. ExecuteStep（REG-2 的通用 Action，給伯宇的提案）
 
 使用者 11/15 定：**一個通用的 `ExecuteStep.action`**（狗和無人機共用；BT 的 `ExecuteSteps` 逐步呼叫 `/<ns>/execute_step`），

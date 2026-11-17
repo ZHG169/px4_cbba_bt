@@ -1,0 +1,37 @@
+# 任務語意：task_type 與 role 的編號（任務欄位補齊 02，2026-11-17；docs/planner_task_definition_plan.md）
+#
+# 2-1 第二節的「任務語意」：task_type（這個角色要做什麼，例如 confirm_intrusion、thermal_recheck）、role（在角色組裡的位置）。
+# 名稱給人看（GCS、log），編號給程式比（assignments、統計），兩個都寫進每個角色的 TaskSpec 最上層（閘道填）。
+# 事件類型的編號在 event_types.yaml 的 id。
+#
+# 執行照 steps（使用者 11/17：正式採 steps 驅動），task_type 不選 BT 子樹（bt_subtree 不採用）；只是語意標籤。
+#
+# 規則
+#   - id 1～65535，**只增不改、不重用**（紀錄、統計靠它）；0 保留給「不知道」
+#   - 名稱用過不改；不要的標 deprecated: true 留著
+#   - 閘道給了 registry_dir 時：注入的 event_type、task_type、role 不在這裡（或 event_types.yaml）→ 拒絕；
+#     沒給 registry_dir 時照收、編號都是 0
+#   - 新增：在表的後面加一筆（id 用下一個沒用過的）
+schema_version: "1.0"
+
+task_types:
+  patrol_point:        {id: 1, description: 例行巡檢點}
+  air_recon:           {id: 2, description: 空中偵察（舊型 AIR_RECON）}
+  ground_intervention: {id: 3, description: 地面處置（舊型火警）}
+  confirm_intrusion:   {id: 4, description: 入侵確認}
+  aerial_overwatch:    {id: 5, description: 空中監看、定位}
+  thermal_recheck:     {id: 6, description: 熱像複查}
+  smoke_observe:       {id: 7, description: 煙霧觀察（安全距離外）}
+  fire_verify:         {id: 8, description: 火情確認}
+  left_object_check:   {id: 9, description: 遺留物確認}
+  track_target:        {id: 10, description: 追蹤目標}
+
+roles:
+  aerial_overwatch:    {id: 1, description: 空中監看（無人機，通常 optional）}
+  front:               {id: 2, description: 前方確認}
+  rear:                {id: 3, description: 後方包夾}
+  verifier:            {id: 4, description: 單獨確認（single_dog_verify）}
+  observer:            {id: 5, description: 觀察（不接近）}
+  responder:           {id: 6, description: 處置}
+  air_fire_watch:      {id: 7, description: 空中盯火（itest group）}
+  ground_fire_verify:  {id: 8, description: 地面確認火情（itest group）}

@@ -74,6 +74,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -108,6 +109,7 @@
 #include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
 #include "swarm_cbba/registry.hpp"
+#include "swarm_cbba/spec_compose.hpp"
 #include "swarm_cbba/spec_gates.hpp"
 
 namespace cbba_core
@@ -498,6 +500,8 @@ public:
       }
     }
     comm.gateway_timeout = declare_parameter<double>("gateway_timeout", comm.gateway_timeout);
+    // 移動目標的改版（任務欄位補齊 04，2026-11-17）：只動位置、位移 < 這個值（m）不重新評估（得標者照舊）；0 = 一律重新評估。全隊要一樣
+    comm.retarget_threshold = declare_parameter<double>("retarget_threshold_m", comm.retarget_threshold);
     comm.detection.capacity = static_cast<std::size_t>(
       declare_parameter<int>("detection_buffer", static_cast<int>(comm.detection.capacity)));
     comm.detection.merge_radius = declare_parameter<double>("detection_merge_radius", comm.detection.merge_radius);
@@ -572,7 +576,16 @@ public:
       // 連鎖撤銷（CB-4 第三批）：暫時不完整（沒有能做的載具、沒人得標、執行者失聯）等多久
       GatewayConfig gc;
       gc.group_recovery_timeout = declare_parameter<double>("group_recovery_timeout_s", gc.group_recovery_timeout);
+      // 對照表存檔（任務欄位補齊 01，2026-11-17）：(incident_id, role) → task_id，閘道重開後沿用；空字串 = 不存
+      gc.restore_confirm = declare_parameter<double>("restore_confirm_s", gc.restore_confirm);
       gateway_ = std::make_unique<Gateway>(*comm_, gc);
+      gateway_state_file_ = declare_parameter<std::string>("gateway_state_file",
+          state_dir + "/gateway_" + std::to_string(agent_id) + ".state");
+      registry_ = registry;   // event_type、task_type、role 的名稱 → 編號
+      if (!registry_) {
+        RCLCPP_WARN(get_logger(), "閘道沒有註冊表（registry_dir）：注入的 event_type、task_type、role 照收，編號都是 0（UNKNOWN）");
+      }
+      loadGatewayState(wallNow());
       incident_states_pub_ = create_publisher<IncidentStateMsg>(topic("incident_updates"), rclcpp::QoS(50).reliable());
       fallback_pub_ = create_publisher<FallbackRequestMsg>(topic("fallback_request"),
           rclcpp::QoS(20).reliable().transient_local());
@@ -1022,6 +1035,7 @@ private:
     publishOutputs(now);
     publishAssignments(now);
     dropOptionals(now);
+    saveGatewayState();
     handleIncidents(now);
     handleGroupFailures(now);
     checkSpecWait(now);
@@ -1558,7 +1572,33 @@ private:
       e.distinct_agent_set = req.distinct_agent_set;
       in.fallback_template = req.fallback_template;
       in.incident_revision = req.incident_revision;
-      r = gateway_->inject(in, now);
+      // 識別、語意、空間（任務欄位補齊第一批）：名稱 → 編號，寫進 spec 最上層
+      TaskMeta & m = in.meta;
+      m.incident_id = req.incident_id;
+      m.role = req.role;
+      m.source = static_cast<TaskSource>(req.source);
+      m.event_type = req.event_type;
+      m.task_type = req.task_type;
+      m.description = req.description;
+      m.target_kind = static_cast<TargetKind>(req.target_kind);
+      m.target = {req.target.x, req.target.y, req.target.z};
+      m.track_id = req.track_id;
+      m.uncertainty_m = req.uncertainty_m;
+      m.standoff_m = req.standoff_m;
+      std::string why = resolveSemantics(m);
+      if (why.empty()) {
+        why = checkMeta(m, t.position);   // 先檢查，組 spec 的錯誤訊息才不會蓋掉欄位的錯
+      }
+      if (why.empty()) {
+        if (const auto spec = swarm_cbba::composeSpec(req.spec, m, t.position, req.floor, &why)) {
+          in.spec = *spec;
+        }
+      }
+      if (!why.empty()) {
+        r.reason = why;
+      } else {
+        r = gateway_->inject(in, now);
+      }
     }
     res.accepted = r.status != InjectStatus::REJECTED;
     res.duplicate = r.status == InjectStatus::DUPLICATE;
@@ -1566,24 +1606,154 @@ private:
     res.task_id = r.task_id;
     res.group_id = r.group_id;
     res.revision = r.revision;
+    res.event_type_id = in.meta.event_type_id;
+    res.task_type_id = in.meta.task_type_id;
+    res.role_id = in.meta.role_id;
     const std::string key = req.incident_id + (req.role.empty() ? "" : "/" + req.role) + " rev " +
-      std::to_string(req.revision);
+      std::to_string(req.revision) + semanticLabel(in.meta);
     if (r.status == InjectStatus::CREATED) {
       RCLCPP_INFO(get_logger(), "注入 %s → 任務 %s%s：%s P%u (%.1f, %.1f, %.1f) 能力 %s%s",
         key.c_str(), taskName(r.task_id).c_str(),
         r.group_id != 0 ? (" 組 " + taskName(r.group_id)).c_str() : "",
         platformName(t.platform), static_cast<unsigned>(t.priority), t.position.x, t.position.y, t.position.z,
         capabilitiesToString(t.required_caps).c_str(),
-        req.spec.empty() ? "" : ("，TaskSpec " + std::to_string(req.spec.size()) + " B").c_str());
+        in.spec.empty() ? "" : ("，TaskSpec " + std::to_string(in.spec.size()) + " B").c_str());
     } else if (r.status == InjectStatus::REVISED) {
       RCLCPP_INFO(get_logger(), "注入 %s → 任務 %s 改版：%s P%u (%.1f, %.1f, %.1f) 能力 %s%s", key.c_str(),
         taskName(r.task_id).c_str(), platformName(t.platform), static_cast<unsigned>(t.priority),
         t.position.x, t.position.y, t.position.z, capabilitiesToString(t.required_caps).c_str(),
-        req.spec.empty() ? "" : ("，TaskSpec " + std::to_string(req.spec.size()) + " B").c_str());
+        in.spec.empty() ? "" : ("，TaskSpec " + std::to_string(in.spec.size()) + " B").c_str());
     } else if (r.status == InjectStatus::DUPLICATE) {
       RCLCPP_INFO(get_logger(), "注入 %s：重複，沿用任務 %s", key.c_str(), taskName(r.task_id).c_str());
     } else {
       RCLCPP_WARN(get_logger(), "注入 %s 拒絕：%s", key.c_str(), r.reason.c_str());
+    }
+  }
+
+  // ---------- 任務欄位補齊第一批（2026-11-17） ----------
+  // 名稱 → 編號（註冊表的 event_types.yaml、task_types.yaml）。有註冊表時不認得的名稱拒絕；沒有時編號 0
+  std::string resolveSemantics(TaskMeta & m) const
+  {
+    if (!registry_) {
+      return {};
+    }
+    if (!m.event_type.empty()) {
+      const swarm_cbba::EventType * e = registry_->eventType(m.event_type);
+      if (e == nullptr) {
+        return "不認得的 event_type \"" + m.event_type + "\"（不在 event_types.yaml）";
+      }
+      m.event_type_id = e->id;
+    }
+    if (!m.task_type.empty()) {
+      const swarm_cbba::SemanticEntry * e = registry_->taskType(m.task_type);
+      if (e == nullptr) {
+        return "不認得的 task_type \"" + m.task_type + "\"（不在 task_types.yaml）";
+      }
+      m.task_type_id = e->id;
+    }
+    if (!m.role.empty()) {
+      const swarm_cbba::SemanticEntry * e = registry_->role(m.role);
+      if (e == nullptr) {
+        return "不認得的 role \"" + m.role + "\"（不在 task_types.yaml 的 roles）";
+      }
+      m.role_id = e->id;
+    }
+    return {};
+  }
+
+  // log 用：「（perimeter_intrusion#1／confirm_intrusion#4／front#2，來源 VMS）」；都沒有時空字串
+  static std::string semanticLabel(const TaskMeta & m)
+  {
+    std::string out;
+    const auto add = [&out](const std::string & name, std::uint16_t id) {
+        if (!name.empty()) {
+          out += (out.empty() ? "" : "／") + name + "#" + std::to_string(id);
+        }
+      };
+    add(m.event_type, m.event_type_id);
+    add(m.task_type, m.task_type_id);
+    add(m.role, m.role_id);
+    if (m.source != TaskSource::UNKNOWN) {
+      out += std::string(out.empty() ? "" : "，") + "來源 " + toString(m.source);
+    }
+    return out.empty() ? std::string() : "（" + out + "）";
+  }
+
+  // 閘道啟動時讀回對照表（沒有檔案 = 第一次啟動）。格式不對：警告、不讀（不拒絕啟動：最壞是重開前的事件變成新任務）
+  void loadGatewayState(double now)
+  {
+    if (gateway_state_file_.empty()) {
+      return;
+    }
+    std::ifstream in(gateway_state_file_);
+    if (!in) {
+      RCLCPP_INFO(get_logger(), "閘道對照表 %s 還沒有（第一次啟動）", gateway_state_file_.c_str());
+      return;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string error;
+    if (!gateway_->loadState(text, now, &error)) {
+      RCLCPP_WARN(get_logger(), "閘道對照表 %s 讀不了（%s）：不沿用，重開前的事件再注入會變成新任務",
+        gateway_state_file_.c_str(), error.c_str());
+      return;
+    }
+    gateway_state_saved_ = text;
+    RCLCPP_INFO(get_logger(), "閘道對照表 %s：讀回 %zu 筆，任務從鄰居補回來之前（最多 %.0f s）同一個事件的注入先拒絕",
+      gateway_state_file_.c_str(), gateway_->injected().size(), gateway_->config().restore_confirm);
+  }
+
+  // 內容變了才寫（先寫暫存檔再 rename）；讀回卻等不到任務補回來而丟掉的對照印出來
+  void saveGatewayState()
+  {
+    if (!gateway_) {
+      return;
+    }
+    for (const auto & [incident, role] : gateway_->takePurged()) {
+      RCLCPP_WARN(get_logger(), "閘道對照表：%s%s 的任務全隊都不記得了（整隊重開？），丟掉這筆，之後再注入是新任務",
+        incident.c_str(), role.empty() ? "" : ("/" + role).c_str());
+    }
+    if (gateway_state_file_.empty()) {
+      return;
+    }
+    const std::string text = gateway_->saveState();
+    if (text == gateway_state_saved_) {
+      return;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(gateway_state_file_).parent_path(), ec);
+    const std::string tmp = gateway_state_file_ + ".tmp";
+    {
+      std::ofstream out(tmp, std::ios::trunc);
+      out << text;
+      out.flush();
+      if (!out) {
+        RCLCPP_WARN(get_logger(), "閘道對照表寫不進 %s", tmp.c_str());
+        return;
+      }
+    }
+    std::filesystem::rename(tmp, gateway_state_file_, ec);
+    if (ec) {
+      RCLCPP_WARN(get_logger(), "閘道對照表 rename 失敗：%s", ec.message().c_str());
+      return;
+    }
+    gateway_state_saved_ = text;
+  }
+
+  // 機器人：TaskSpec 的主版本不是這版認得的（kRoleSpecSchemaMajor）→ 警告一次（BT 照自己的規則處理；沒寫 = 1.0 以前的）
+  void warnSpecSchema(TaskId id, const std::string & spec)
+  {
+    if (spec.empty() || schema_warned_.count(id) > 0) {
+      return;
+    }
+    const std::string version = swarm_cbba::specSchemaVersion(spec);
+    if (version.empty()) {
+      return;
+    }
+    const auto major = specSchemaMajor(version);
+    if (!major || *major != kRoleSpecSchemaMajor) {
+      schema_warned_.insert(id);
+      RCLCPP_WARN(get_logger(), "任務 %s 的 TaskSpec schema_version %s 這版不認得（認得 %u.x）：BT 可能不能執行",
+        taskName(id).c_str(), version.c_str(), static_cast<unsigned>(kRoleSpecSchemaMajor));
     }
   }
 
@@ -1632,6 +1802,19 @@ private:
       a.assignee_id = as.assignee;
       a.assign_state = static_cast<std::uint8_t>(as.state);
       a.spec_ready = comm_->specReady(id);
+      if (gateway_) {
+        if (const auto * known = gateway_->findTask(id)) {
+          const TaskMeta & m = known->meta;
+          a.incident_id = m.incident_id;
+          a.source = static_cast<std::uint8_t>(m.source);
+          a.event_type = m.event_type;
+          a.event_type_id = m.event_type_id;
+          a.task_type = m.task_type;
+          a.task_type_id = m.task_type_id;
+          a.role = m.role;
+          a.role_id = m.role_id;
+        }
+      }
       msg.tasks.push_back(a);
     }
     if (assignments_sent_ && msg.tasks == last_assignments_.tasks) {
@@ -1731,6 +1914,7 @@ private:
         msg.spec = comm_->taskSpec(t.id).value_or(std::string());
         RCLCPP_INFO(get_logger(), "指派給 BT：%s (%.1f, %.1f, %.1f)", taskName(t.id).c_str(),
           t.position.x, t.position.y, t.position.z);
+        warnSpecSchema(t.id, msg.spec);
       } else {
         msg.status = TaskMsg::CANCELLED;   // task_id = 0：沒有任務
         msg.status_stamp = toRosTime(now);
@@ -1954,6 +2138,10 @@ private:
   rclcpp::Publisher<TaskMsg>::SharedPtr spec_missing_pub_;
   // 閘道（participate: never）
   std::unique_ptr<Gateway> gateway_;
+  std::optional<swarm_cbba::Registry> registry_;   // 閘道：語意名稱 → 編號（任務欄位補齊 02）
+  std::string gateway_state_file_;                 // 對照表存檔（任務欄位補齊 01）
+  std::string gateway_state_saved_;                // 上次寫進檔案的內容（變了才寫）
+  std::set<TaskId> schema_warned_;                 // 機器人：TaskSpec 的主版本不認得、已經警告過的任務
   rclcpp::Service<InjectTaskSrv>::SharedPtr inject_srv_;
   rclcpp::Publisher<AssignmentsMsg>::SharedPtr assignments_pub_;
   double assignments_period_{0.5};

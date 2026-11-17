@@ -1,9 +1,12 @@
 #include "cbba_core/gateway.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iterator>
 #include <optional>
 #include <set>
+#include <sstream>
 
 #include "cbba_core/wire_task_spec.hpp"
 
@@ -100,19 +103,51 @@ std::string Gateway::check(const InjectRequest & req) const
   if (req.spec.size() > wire::kMaxSpecChunk * wire::kMaxSpecParts) {
     return "spec 太大（上限 " + std::to_string(wire::kMaxSpecChunk * wire::kMaxSpecParts) + " B）";
   }
-  return {};
+  return checkMeta(req.meta, t.position);
+}
+
+namespace
+{
+// 對照表記住的 meta：incident_id、role 以請求的為準
+TaskMeta keptMeta(const InjectRequest & req)
+{
+  TaskMeta m = req.meta;
+  m.incident_id = req.incident_id;
+  m.role = req.role;
+  return m;
+}
+}  // namespace
+
+const Gateway::Injected * Gateway::findTask(TaskId task_id) const
+{
+  const auto key = by_task_.find(task_id);
+  if (key == by_task_.end()) {
+    return nullptr;
+  }
+  const auto it = injected_.find(key->second);
+  return it != injected_.end() ? &it->second : nullptr;
 }
 
 InjectResult Gateway::inject(const InjectRequest & req, double now)
 {
   InjectResult r;
   r.revision = req.revision;
+  confirmRestored(now);
   const auto key = std::make_pair(req.incident_id, req.role);
   const auto known = injected_.find(key);
   if (known != injected_.end()) {
     r.task_id = known->second.task_id;
     const auto group = groups_.find(req.incident_id);
     r.group_id = group != groups_.end() ? group->second : 0;
+    if (known->second.restored) {
+      // 重開前注入過，任務還沒從鄰居補回來：現在建新的會變成兩個任務，改版也沒有原本的內容可以比
+      char buf[256];
+      std::snprintf(buf, sizeof(buf), "閘道剛重開，任務 %s 還在從鄰居補回來（最多再 %.0f s），稍後再送",
+        taskName(known->second.task_id).c_str(), std::max(0.0, restored_at_ + config_.restore_confirm - now));
+      r.reason = buf;
+      r.revision = known->second.revision;
+      return r;
+    }
     if (req.revision == known->second.revision) {
       r.status = InjectStatus::DUPLICATE;   // 冪等：同一個鍵重送，不重發
       return r;
@@ -174,7 +209,15 @@ InjectResult Gateway::inject(const InjectRequest & req, double now)
     data.incident_id = req.incident_id;
     data.fallback_template = req.fallback_template;
   }
-  injected_[key] = Injected{t.id, t.revision};
+  Injected entry;
+  entry.task_id = t.id;
+  entry.revision = t.revision;
+  entry.deadline_sec = req.deadline_sec;
+  entry.release_sec = req.release_sec;
+  entry.expires_sec = req.expires_sec;
+  entry.meta = keptMeta(req);
+  injected_[key] = entry;
+  by_task_[t.id] = key;
   r.status = InjectStatus::CREATED;
   r.task_id = t.id;
   r.group_id = group_id;
@@ -217,6 +260,7 @@ bool Gateway::membershipReady(double now)
 std::vector<DroppedOptional> Gateway::step(double now)
 {
   std::vector<DroppedOptional> out;
+  confirmRestored(now);
   const bool ready = membershipReady(now);
   if (now < next_check_) {
     return out;
@@ -495,14 +539,292 @@ InjectResult Gateway::revise(const InjectRequest & req, Injected & known, double
   Task t = build(req, old.created, now);
   t.id = known.task_id;
   t.ext.group_id = old.ext.group_id;
+  // 相對時間和上一版一樣：規劃器沒改期限，沿用原本的絕對時刻（不然每次改版期限都往後推，也認不出只動位置的改版）
+  if (req.deadline_sec == known.deadline_sec) {
+    t.deadline_sec = old.deadline_sec;
+    t.explicit_deadline = old.explicit_deadline;
+  }
+  if (req.release_sec == known.release_sec) {
+    t.ext.release = old.ext.release;
+  }
+  if (req.expires_sec == known.expires_sec) {
+    t.ext.expires = old.ext.expires;
+  }
   if (!comm_.reviseLocalTask(t, now, req.spec)) {
     r.reason = "協定層拒收改版";
     return r;
   }
   known.revision = req.revision;
+  known.deadline_sec = req.deadline_sec;
+  known.release_sec = req.release_sec;
+  known.expires_sec = req.expires_sec;
+  known.meta = keptMeta(req);
   r.status = InjectStatus::REVISED;
   r.revision = req.revision;
   return r;
+}
+
+// ===========================================================================
+// 對照表存檔（任務欄位補齊 01，2026-11-17）
+// ===========================================================================
+// 格式（文字，一行一筆，欄位以空白分隔；字串用 %XX 編碼，空字串寫成 -）：
+//   cbba_gateway_state 1
+//   i <incident> <role> <task_id> <revision> <deadline_sec> <release_sec> <expires_sec> <source> <event_type>
+//     <event_type_id> <task_type> <task_type_id> <role_id>
+//   g <incident> <group_id> <failure_version> <terminated 0/1> <fallback_template> <failed_roles：逗號分隔或 ->
+//   c <task_id>                                   連鎖撤銷取消過的
+namespace
+{
+constexpr const char * kStateMagic = "cbba_gateway_state";
+constexpr int kStateVersion = 1;
+
+std::string enc(const std::string & s)
+{
+  if (s.empty()) {
+    return "-";
+  }
+  std::string out;
+  for (const char ch : s) {
+    const auto c = static_cast<unsigned char>(ch);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+      c == ':' || c == '/')
+    {
+      out += ch;
+    } else {
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned>(c));
+      out += buf;
+    }
+  }
+  return out;
+}
+
+std::optional<std::string> dec(const std::string & s)
+{
+  if (s == "-") {
+    return std::string();
+  }
+  std::string out;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (s[i] != '%') {
+      out += s[i];
+      continue;
+    }
+    if (i + 2 >= s.size()) {
+      return std::nullopt;
+    }
+    const std::string hex = s.substr(i + 1, 2);
+    if (hex.size() != 2 || hex.find_first_not_of("0123456789ABCDEFabcdef") != std::string::npos) {
+      return std::nullopt;
+    }
+    out += static_cast<char>(std::stoi(hex, nullptr, 16));
+    i += 2;
+  }
+  return out;
+}
+
+std::string num(double v)
+{
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%.17g", v);
+  return buf;
+}
+}  // namespace
+
+std::string Gateway::saveState() const
+{
+  std::ostringstream out;
+  out << kStateMagic << " " << kStateVersion << "\n";
+  for (const auto & [key, e] : injected_) {
+    const TaskMeta & m = e.meta;
+    out << "i " << enc(key.first) << " " << enc(key.second) << " " << e.task_id << " " << e.revision << " " <<
+      num(e.deadline_sec) << " " << num(e.release_sec) << " " << num(e.expires_sec) << " " <<
+      static_cast<unsigned>(m.source) << " " << enc(m.event_type) << " " << m.event_type_id << " " <<
+      enc(m.task_type) << " " << m.task_type_id << " " << m.role_id << "\n";
+  }
+  for (const auto & [incident, group_id] : groups_) {
+    const auto data = group_data_.find(group_id);
+    if (data == group_data_.end()) {
+      continue;
+    }
+    std::string roles;
+    for (const std::uint8_t r : data->second.failed_roles) {
+      roles += (roles.empty() ? "" : ",") + std::to_string(r);
+    }
+    out << "g " << enc(incident) << " " << group_id << " " << data->second.failure_version << " " <<
+      (data->second.terminated ? 1 : 0) << " " << enc(data->second.fallback_template) << " " <<
+      (roles.empty() ? "-" : roles) << "\n";
+  }
+  for (const TaskId t : cascade_cancelled_) {
+    out << "c " << t << "\n";
+  }
+  return out.str();
+}
+
+bool Gateway::loadState(const std::string & text, double now, std::string * error)
+{
+  const auto fail = [error](const std::string & why) {
+      if (error != nullptr) {
+        *error = why;
+      }
+      return false;
+    };
+  std::istringstream in(text);
+  std::string line;
+  if (!std::getline(in, line)) {
+    return fail("空檔案");
+  }
+  {
+    std::istringstream head(line);
+    std::string magic;
+    int version = 0;
+    if (!(head >> magic >> version) || magic != kStateMagic || version != kStateVersion) {
+      return fail("第一行不是 " + std::string(kStateMagic) + " " + std::to_string(kStateVersion));
+    }
+  }
+  std::map<std::pair<std::string, std::string>, Injected> injected;
+  std::map<TaskId, std::pair<std::string, std::string>> by_task;
+  std::map<std::string, TaskId> groups;
+  std::map<TaskId, GroupData> group_data;
+  std::set<TaskId> cascade;
+  int n = 1;
+  while (std::getline(in, line)) {
+    ++n;
+    if (line.empty()) {
+      continue;
+    }
+    std::istringstream ls(line);
+    std::string kind;
+    ls >> kind;
+    const std::string where = "第 " + std::to_string(n) + " 行";
+    if (kind == "i") {
+      std::string incident, role, event_type, task_type;
+      Injected e;
+      unsigned source = 0, revision = 0, event_id = 0, task_type_id = 0, role_id = 0;
+      if (!(ls >> incident >> role >> e.task_id >> revision >> e.deadline_sec >> e.release_sec >> e.expires_sec >>
+        source >> event_type >> event_id >> task_type >> task_type_id >> role_id) || revision > 0xFFFFu ||
+        source > kMaxTaskSource || event_id > 0xFFFFu || task_type_id > 0xFFFFu || role_id > 0xFFFFu)
+      {
+        return fail(where + "（i）欄位不對");
+      }
+      const auto inc = dec(incident), rl = dec(role), ev = dec(event_type), tt = dec(task_type);
+      if (!inc || !rl || !ev || !tt || inc->empty()) {
+        return fail(where + "（i）字串編碼不對");
+      }
+      e.revision = static_cast<std::uint16_t>(revision);
+      e.meta.incident_id = *inc;
+      e.meta.role = *rl;
+      e.meta.source = static_cast<TaskSource>(source);
+      e.meta.event_type = *ev;
+      e.meta.event_type_id = static_cast<std::uint16_t>(event_id);
+      e.meta.task_type = *tt;
+      e.meta.task_type_id = static_cast<std::uint16_t>(task_type_id);
+      e.meta.role_id = static_cast<std::uint16_t>(role_id);
+      e.restored = true;
+      const auto key = std::make_pair(*inc, *rl);
+      by_task[e.task_id] = key;
+      injected[key] = e;
+    } else if (kind == "g") {
+      std::string incident, fallback, roles;
+      TaskId group_id = 0;
+      unsigned terminated = 0;
+      GroupData d;
+      if (!(ls >> incident >> group_id >> d.failure_version >> terminated >> fallback >> roles) || terminated > 1) {
+        return fail(where + "（g）欄位不對");
+      }
+      const auto inc = dec(incident), fb = dec(fallback);
+      if (!inc || !fb || inc->empty() || group_id == 0) {
+        return fail(where + "（g）字串編碼不對");
+      }
+      if (roles != "-") {
+        std::istringstream rs(roles);
+        std::string r;
+        while (std::getline(rs, r, ',')) {
+          if (r.empty() || r.find_first_not_of("0123456789") != std::string::npos || std::stoul(r) > 255) {
+            return fail(where + "（g）failed_roles 不對");
+          }
+          d.failed_roles.insert(static_cast<std::uint8_t>(std::stoul(r)));
+        }
+      }
+      d.incident_id = *inc;
+      d.fallback_template = *fb;
+      d.terminated = terminated == 1;
+      d.restored = true;
+      groups[*inc] = group_id;
+      group_data[group_id] = d;
+    } else if (kind == "c") {
+      TaskId t = 0;
+      if (!(ls >> t)) {
+        return fail(where + "（c）欄位不對");
+      }
+      cascade.insert(t);
+    } else {
+      return fail(where + "：不認得的種類 " + kind);
+    }
+  }
+  injected_ = std::move(injected);
+  by_task_ = std::move(by_task);
+  groups_ = std::move(groups);
+  group_data_ = std::move(group_data);
+  cascade_cancelled_ = std::move(cascade);
+  restored_at_ = injected_.empty() && group_data_.empty() ? -1.0 : now;
+  confirmRestored(now);
+  return true;
+}
+
+void Gateway::confirmRestored(double now)
+{
+  if (restored_at_ < 0.0) {
+    return;
+  }
+  const auto & tasks = comm_.agent().tasks();
+  const bool expired = now - restored_at_ >= config_.restore_confirm;
+  bool pending = false;
+  for (auto it = injected_.begin(); it != injected_.end(); ) {
+    Injected & e = it->second;
+    if (!e.restored) {
+      ++it;
+      continue;
+    }
+    if (tasks.count(e.task_id) > 0) {
+      e.restored = false;   // 鄰居補回來了：之後照一般的冪等、改版
+      ++it;
+    } else if (expired) {
+      purged_.push_back(it->first);   // 全隊都不記得這個任務了（整隊重開）
+      by_task_.erase(e.task_id);
+      it = injected_.erase(it);
+    } else {
+      pending = true;
+      ++it;
+    }
+  }
+  for (auto it = group_data_.begin(); it != group_data_.end(); ) {
+    GroupData & d = it->second;
+    if (!d.restored) {
+      ++it;
+      continue;
+    }
+    if (!comm_.groupTasks(it->first).empty()) {
+      d.restored = false;
+      ++it;
+    } else if (expired) {
+      groups_.erase(d.incident_id);
+      it = group_data_.erase(it);
+    } else {
+      pending = true;
+      ++it;
+    }
+  }
+  if (!pending) {
+    restored_at_ = -1.0;
+  }
+}
+
+std::vector<std::pair<std::string, std::string>> Gateway::takePurged()
+{
+  std::vector<std::pair<std::string, std::string>> out;
+  out.swap(purged_);
+  return out;
 }
 
 }  // namespace cbba_core

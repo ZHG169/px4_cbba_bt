@@ -9,7 +9,14 @@
 //   同 (incident, role)、revision 較大 → 改版（REVISED，同一個 task_id；4b，2026-11-13）：CbbaComm::reviseLocalTask，
 //                            只改位置、時間、價值時指派保留，改了平台、能力、優先級重新競標；角色組（role_index、role_count）不能改
 //   revision 較小          → REJECTED
-// 對照表只在記憶體裡：閘道重開後同一個事件再注入會變成新任務（世代不同，task_id 不會撞）。
+// 對照表存檔（任務欄位補齊 01，2026-11-17）：saveState()／loadState() 由節點層寫到 <state_dir>，閘道重開後同一個
+//   (incident_id, role) 沿用原本的 task_id（PDF 01 的冪等鍵是 (incident_id, role_index)；role 名稱在同一個 incident
+//   裡和 role_index 一一對應，所以照舊用名稱）。重開時任務本身還要從鄰居補回來（閘道是建立者，鄰居一直記著）：
+//   讀回來的對照先標「待確認」，任務補回來就確認；restore_confirm（10 s）內還沒補回來的鍵再注入 → 拒絕、請規劃器稍後重送；
+//   過了還沒補回來 = 全隊都不記得這個任務（整隊重開），丟掉那筆對照，之後再注入就是新任務（新世代，task_id 不會撞）
+// 識別、語意、空間（任務欄位補齊 01、02、04）：meta 由節點層寫進 TaskSpec（cbba_core/task_meta.hpp），這裡只檢查欄位、
+//   記住名稱與編號（assignments、log 用）。改版時規劃器給的相對時間（deadline_sec 等）和上一版一樣 → 沿用原本的絕對時刻，
+//   只動位置的改版才認得出來（CbbaComm 的 retarget_threshold：小幅移動不重新評估）
 // group_id：同一個 incident 有角色組（role_count > 0）時配一個，格式同 task_id（和任務共用流水號）。
 //
 // 時間欄位是「從注入時刻起算的秒數」（0 = 沒有），方便 ros2 service call；轉成絕對時刻後放進任務定義，
@@ -49,6 +56,7 @@
 #include <vector>
 
 #include "cbba_core/cbba_comm.hpp"
+#include "cbba_core/task_meta.hpp"
 
 namespace cbba_core
 {
@@ -69,6 +77,9 @@ struct InjectRequest
   // incident_revision 是規劃器展開時依據的 incident revision，不能比閘道目前的新
   std::string fallback_template;
   std::uint16_t incident_revision{0};
+  // 任務欄位補齊第一批（2026-11-17）：識別、語意、空間。incident_id、role 以上面的為準（閘道覆寫）；
+  // spec 已經由節點層把它寫進最上層（metaJsonMembers）
+  TaskMeta meta;
 };
 
 enum class InjectStatus { CREATED, DUPLICATE, REVISED, REJECTED };
@@ -112,6 +123,7 @@ struct GroupEvent
 struct GatewayConfig
 {
   double group_recovery_timeout{10.0};  // 暫時不完整等多久（使用者 11/16：group_recovery_timeout_s = 10）
+  double restore_confirm{10.0};         // 重開後讀回的對照，等任務從鄰居補回來多久（任務欄位補齊 01）
 };
 
 struct InjectResult
@@ -129,14 +141,29 @@ public:
   explicit Gateway(CbbaComm & comm, GatewayConfig config = GatewayConfig{}) : comm_(comm), config_(config) {}
 
   InjectResult inject(const InjectRequest & req, double now);
+  const GatewayConfig & config() const {return config_;}
 
   // 已注入的 (incident_id, role) → task_id（查詢、測試用）
   struct Injected
   {
     TaskId task_id{0};
     std::uint16_t revision{0};
+    // 上一版請求的相對時間（改版時一樣就沿用絕對時刻）
+    double deadline_sec{0.0};
+    double release_sec{0.0};
+    double expires_sec{0.0};
+    TaskMeta meta;               // 存檔只存識別與語意（名稱、編號、來源）；空間在任務、TaskSpec 裡
+    bool restored{false};        // 從存檔讀回、任務還沒從鄰居補回來
   };
   const std::map<std::pair<std::string, std::string>, Injected> & injected() const {return injected_;}
+  const Injected * findTask(TaskId task_id) const;
+
+  // 存檔（任務欄位補齊 01）：文字格式、一行一筆；節點層內容變了才寫檔
+  std::string saveState() const;
+  // 讀回（啟動時、注入之前）。格式不對回 false 並寫 error，什麼都不改
+  bool loadState(const std::string & text, double now, std::string * error = nullptr);
+  // 讀回、等不到任務補回來而丟掉的對照（給節點層 log）；取走
+  std::vector<std::pair<std::string, std::string>> takePurged();
 
   // optional 角色的自動關閉：每個 tick 呼叫（內部每 0.2 s 檢查一次），回傳這次關掉的
   std::vector<DroppedOptional> step(double now);
@@ -159,6 +186,7 @@ public:
     std::map<TaskId, Recovery> recovering;   // 暫時不完整的角色：開始時刻、最初的觸發原因
     // 執行者失聯、還在等失聯接手的角色（開始標記的時刻）：這段期間不算恢復期限（做法 A）
     std::map<TaskId, double> holder_lost;
+    bool restored{false};               // 從存檔讀回、組裡的任務還沒補回來
   };
   const std::map<TaskId, GroupData> & groups() const {return group_data_;}
 
@@ -167,6 +195,8 @@ private:
   // 請求 → 任務內容（id、group_id、created 由呼叫端填）；期限從 created 起算
   static Task build(const InjectRequest & req, double created, double now);
   InjectResult revise(const InjectRequest & req, Injected & known, double now);
+  // 讀回的對照：任務補回來就確認；restore_confirm 之後還沒補回來的丟掉
+  void confirmRestored(double now);
 
   CbbaComm & comm_;
   GatewayConfig config_;
@@ -175,6 +205,9 @@ private:
   double next_group_check_{0.0};
   std::map<std::pair<std::string, std::string>, Injected> injected_;
   std::map<std::string, TaskId> groups_;   // incident_id → group_id
+  std::map<TaskId, std::pair<std::string, std::string>> by_task_;   // task_id → 對照的鍵
+  double restored_at_{-1.0};   // 讀回存檔的時刻；< 0 = 沒有待確認的
+  std::vector<std::pair<std::string, std::string>> purged_;
 
   double connected_since_{-1.0};   // 這次連上（聽得到鄰居）的時刻；< 0 = 斷線
   double next_check_{0.0};

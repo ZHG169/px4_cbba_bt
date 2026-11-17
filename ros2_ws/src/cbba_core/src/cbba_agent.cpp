@@ -320,7 +320,7 @@ bool CbbaAgent::onTask(const Task & task, double now)
   return changed;
 }
 
-bool CbbaAgent::updateTask(const Task & task, bool reauction, double now)
+bool CbbaAgent::updateTask(const Task & task, bool reauction, double now, bool rescore)
 {
   const auto it = tasks_.find(task.id);
   if (it == tasks_.end() || it->second.status != TaskStatus::OPEN || task.revision <= it->second.revision) {
@@ -337,7 +337,9 @@ bool CbbaAgent::updateTask(const Task & task, bool reauction, double now)
     buildBundle(now);
     return true;
   }
-  reevaluate(now);
+  if (rescore) {
+    reevaluate(now);
+  }
   return true;
 }
 

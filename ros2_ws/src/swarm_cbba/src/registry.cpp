@@ -272,6 +272,11 @@ EventType loadEventType(const std::string & name, const YAML::Node & n, const Wh
   }
   EventType e;
   e.name = name;
+  const int id = optionalField<int>(n, "id", 0, w);
+  if (id < 0 || id > 0xFFFF) {
+    fail(w, "id 要是 1～65535（0 = 沒有編號）");
+  }
+  e.id = static_cast<std::uint16_t>(id);
   e.category = need<std::string>(n, "category", w);
   e.detectors = optionalField<Strings>(n, "detectors", {}, w);
   if (const YAML::Node t = n["trigger"]) {
@@ -412,6 +417,52 @@ const EventType * Registry::eventType(const std::string & name) const
   }
   return nullptr;
 }
+
+const SemanticEntry * Registry::taskType(const std::string & name) const
+{
+  for (const SemanticEntry & e : task_types) {
+    if (e.name == name) {
+      return &e;
+    }
+  }
+  return nullptr;
+}
+
+const SemanticEntry * Registry::role(const std::string & name) const
+{
+  for (const SemanticEntry & e : roles) {
+    if (e.name == name) {
+      return &e;
+    }
+  }
+  return nullptr;
+}
+
+namespace
+{
+// task_types.yaml 的一張表：「名稱 → {id, description, deprecated}」
+std::vector<SemanticEntry> loadSemantic(const YAML::Node & root, const std::string & file, const std::string & table)
+{
+  std::vector<SemanticEntry> out;
+  for (const auto & kv : mapOf(root, table.c_str(), Where{file, ""})) {
+    SemanticEntry e;
+    e.name = kv.first.as<std::string>();
+    const Where w{file, table + "." + e.name};
+    if (!kv.second.IsMap()) {
+      fail(w, "要是表（{id: …, description: …}）");
+    }
+    const int id = need<int>(kv.second, "id", w);
+    if (id < 1 || id > 0xFFFF) {
+      fail(w, "id 要是 1～65535（0 保留給「不知道」）");
+    }
+    e.id = static_cast<std::uint16_t>(id);
+    e.description = optionalField<std::string>(kv.second, "description", "", w);
+    e.deprecated = optionalField<bool>(kv.second, "deprecated", false, w);
+    out.push_back(e);
+  }
+  return out;
+}
+}  // namespace
 
 Registry loadRegistry(const std::string & dir)
 {
@@ -554,6 +605,13 @@ Registry loadRegistry(const std::string & dir)
       const std::string name = kv.first.as<std::string>();
       reg.event_types.push_back(loadEventType(name, kv.second, Where{file, name}));
     }
+  }
+
+  {
+    const std::string file = "task_types.yaml";
+    const YAML::Node root = loadRoot(dir, file);
+    reg.task_types = loadSemantic(root, file, "task_types");
+    reg.roles = loadSemantic(root, file, "roles");
   }
   return reg;
 }
@@ -935,6 +993,37 @@ std::vector<std::string> checkRegistry(const Registry & reg)
     }
     if (!oneOf(e.status, {"open", "closed"})) {
       errors.push_back(at + " 的 status 要是 open／closed");
+    }
+  }
+  {
+    // 編號（任務欄位補齊 02）：不重複；0 = 沒寫，可以多個
+    std::map<std::uint16_t, std::string> by_id;
+    for (const EventType & e : reg.event_types) {
+      if (e.id == 0) {
+        continue;
+      }
+      const auto it = by_id.emplace(e.id, e.name);
+      if (!it.second) {
+        errors.push_back("event_types.yaml：id " + std::to_string(e.id) + " 同時給了 " + it.first->second + " 和 " + e.name);
+      }
+    }
+  }
+
+  // task_types.yaml：名稱、編號不重複
+  for (const auto & [table, entries] : {std::make_pair(std::string("task_types"), &reg.task_types),
+      std::make_pair(std::string("roles"), &reg.roles)})
+  {
+    std::set<std::string> names;
+    std::map<std::uint16_t, std::string> by_id;
+    for (const SemanticEntry & e : *entries) {
+      if (!names.insert(e.name).second) {
+        errors.push_back("task_types.yaml：" + table + " 的 " + e.name + " 重複");
+      }
+      const auto it = by_id.emplace(e.id, e.name);
+      if (!it.second) {
+        errors.push_back("task_types.yaml：" + table + " 的 id " + std::to_string(e.id) + " 同時給了 " +
+          it.first->second + " 和 " + e.name);
+      }
     }
   }
   return errors;

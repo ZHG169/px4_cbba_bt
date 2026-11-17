@@ -34,7 +34,7 @@ public:
     fs::remove_all(dir_);
     fs::create_directories(dir_ / "site");
     for (const char * f : {"tools.yaml", "platforms.yaml", "fleet.yaml", "actions.yaml", "objects.yaml",
-        "event_types.yaml"})
+        "event_types.yaml", "task_types.yaml"})
     {
       fs::copy_file(fs::path(REGISTRY_DIR) / f, dir_ / f);
     }
@@ -592,4 +592,42 @@ TEST(Registry, SiteErrors)
   EXPECT_THROW(loadSite(bad.site()), std::runtime_error);
   bad.write("site/docks.csv", "id,kind,platform,x,y,z,floor\nPAD_X,pad,uav,abc,0,0,1F\n");
   EXPECT_THROW(loadSite(bad.site()), std::runtime_error);
+}
+
+TEST(Registry, SemanticIds)
+{
+  // 任務語意的編號（任務欄位補齊 02，2026-11-17）：repo 的 event_types、task_types、roles 都有編號、不重複；
+  // 重複的 id、0、缺 id 是錯誤；事件類型可以不寫 id（編號 0）
+  const Registry reg = loadRegistry(REGISTRY_DIR);
+  EXPECT_TRUE(checkRegistry(reg).empty()) << firstOf(checkRegistry(reg));
+  ASSERT_NE(reg.eventType("perimeter_intrusion"), nullptr);
+  EXPECT_EQ(reg.eventType("perimeter_intrusion")->id, 1);
+  ASSERT_NE(reg.taskType("confirm_intrusion"), nullptr);
+  EXPECT_EQ(reg.taskType("confirm_intrusion")->id, 4);
+  ASSERT_NE(reg.role("front"), nullptr);
+  EXPECT_EQ(reg.role("front")->id, 2);
+  EXPECT_EQ(reg.role("nobody"), nullptr);
+  for (const EventType & e : reg.event_types) {
+    EXPECT_GT(e.id, 0) << e.name;
+  }
+
+  TempRegistry dup;
+  dup.append("task_types.yaml", "  hover_watch: {id: 4}\n");   // 接在 roles 後面：roles 的 id 4 重複
+  EXPECT_TRUE(hasError(checkRegistry(loadRegistry(dup.dir())), "roles 的 id 4")) <<
+    firstOf(checkRegistry(loadRegistry(dup.dir())));
+
+  TempRegistry zero;
+  zero.append("task_types.yaml", "  hover_watch: {id: 0}\n");
+  EXPECT_THROW(loadRegistry(zero.dir()), std::runtime_error);
+  TempRegistry missing;
+  missing.append("task_types.yaml", "  hover_watch: {description: x}\n");
+  EXPECT_THROW(loadRegistry(missing.dir()), std::runtime_error);
+
+  TempRegistry events;
+  std::string text = readFile(fs::path(REGISTRY_DIR) / "event_types.yaml");
+  const auto at = text.find("  smoke:\n    id: 4\n");
+  ASSERT_NE(at, std::string::npos);
+  text.replace(at, std::string("  smoke:\n    id: 4\n").size(), "  smoke:\n    id: 3\n");   // 和 fire 重複
+  events.write("event_types.yaml", text);
+  EXPECT_TRUE(hasError(checkRegistry(loadRegistry(events.dir())), "id 3 同時給了 fire 和 smoke"));
 }

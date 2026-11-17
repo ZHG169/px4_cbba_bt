@@ -136,6 +136,9 @@ struct CommConfig
   // 閘道在線 = gateway_timeout 內聽過閘道的 AGENT_STATE（直接鄰居），或某個還聽得到的鄰居的鄰居清單裡有 gateways 裡的機號
   //（多跳；AGENT_STATE 不轉送），或 gateway_timeout 內收過閘道的確認
   double gateway_timeout{3.0};
+  // 移動目標的改版（任務欄位補齊 04，2026-11-17）：只動了位置（觀察點）而且位移 < retarget_threshold（m）→ 換成新內容、
+  // 不重新評估（得標者照舊，BT 收到新的 revision 更新導航）；≥ 門檻照一般改版重新評估。0 = 一律重新評估。全隊要一樣
+  double retarget_threshold{3.0};
   std::vector<AgentId> gateways;  // 閘道的機號（多跳時判斷在線用）；直接鄰居的閘道不用列也認得
   DetectionOutboxConfig detection{};
   // 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md）：狀態變化時馬上送一份、之後再送 progress_repeat 兩份
@@ -304,6 +307,7 @@ struct CommStats
   // 改版（revision，2026-11-13）
   int revisions{0};             // 套用的改版（含自己建立的）
   int reauctions{0};            // 其中改了平台、能力、優先級，重新競標的
+  int retargets{0};             // 其中只動了位置、位移 < retarget_threshold，不重新評估的（任務欄位補齊 04）
   int rejected_revisions{0};    // 不是建立者送的改版（不套用、不轉送）
   int revision_pulls{0};        // 看到鄰居的紀錄是較新的 revision，向它要任務定義的次數
   // 過期（2026-11-13）
@@ -606,6 +610,8 @@ private:
 
   // 任務
   wire::TaskAnnounceBody announceBody(TaskId id) const;
+  static wire::TaskAnnounceBody bodyOf(const Task & t);   // 任務定義的欄位（relay 不填）
+  bool smallMove(const Task & old, const Task & task) const;
   bool assign(const Task & task, double now, const std::string & spec = std::string());
   void sendSpecParts(TaskId id, std::uint16_t revision, const std::string & spec, double now);
 

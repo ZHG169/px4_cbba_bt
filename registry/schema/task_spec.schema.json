@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "task_spec.schema.json",
-  "title": "TaskSpec（2-1b 第六節，schema 1.0，2026-11-16 草案）",
+  "title": "TaskSpec（2-1b 第六節，schema 1.1，2026-11-17：加識別、語意、空間；1.0 是 11/16 草案）",
   "description": "規劃器（範本展開、VLM 提案）的輸出、/validate 的輸入；說明見 registry/api.md 第 4 節。動作名稱、物件類別、參數的合法值由註冊表決定（/validate 的 vocabulary、params 層），這裡只管形狀",
   "type": "object",
   "required": ["schema_version", "priority", "roles"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"enum": ["1.0", "1.1"]},
     "group_id": {"type": "string"},
     "incident": {
       "type": "object",
@@ -16,7 +16,10 @@
         "event_type": {"type": "string"},
         "revision": {"type": "integer", "minimum": 1},
         "location": {"$ref": "#/$defs/location"},
-        "track_id": {"type": "string"}
+        "track_id": {"type": "string"},
+        "source": {"enum": ["UNKNOWN", "ALARM", "UAV", "QUADRUPED", "VMS", "OPERATOR", "SENSOR"]},
+        "target_kind": {"enum": ["point", "area", "moving"]},
+        "uncertainty_m": {"type": "number", "minimum": 0}
       }
     },
     "rule": {"type": "string"},
@@ -51,6 +54,10 @@
         "required_capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "optional": {"type": "boolean", "default": false},
         "skip_satisfies": {"type": "boolean", "default": false},
+        "task_type": {"type": "string", "description": "task_types.yaml 的 task_types（1.1）"},
+        "description": {"type": "string", "maxLength": 200},
+        "observe_pose": {"$ref": "#/$defs/location", "description": "這個角色要到的位置（閘道注入的 position）；沒寫 = 從 location 代換（1.1）"},
+        "standoff_m": {"type": "number", "minimum": 0},
         "steps": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/step"}}
       }
     },

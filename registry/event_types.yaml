@@ -18,6 +18,8 @@
 #   priority       P0～P3（P0 最高）；展開的任務照這個（CBBA 的搶占、失聯接手看它）
 #   requires_approval  展開的任務要值班核准才派（open 事件一定要）
 # 欄位（我們加的）
+#   id             編號（任務欄位補齊 02，2026-11-17）：TaskSpec 的 event_type_id、assignments 用。1～65535，只增不改、不重用；
+#                  0 = 不知道（沒寫 id 的事件類型注入時編號是 0）
 #   object_class   事件主體（objects.yaml 的類別）；steps 的 object 用「類別:實例」
 #   expires_s      事件成立後多久沒處理完就失效（s）；展開的任務帶同樣的 expires
 #   status         open（啟用）／closed（先不處理）
@@ -41,6 +43,7 @@ detectors:
 event_types:
   # ---- 原文的範例 ----
   perimeter_intrusion:
+    id: 1
     category: template
     detectors: [person_yolo_v1, vms_line_crossing]
     trigger: {zone_attr: restricted, time_rule: off_hours}
@@ -56,6 +59,7 @@ event_types:
     status: open
 
   unknown:
+    id: 2
     category: open
     vlm: {prompt_id: open_event_planner_v1, timeout_s: 8}
     requires_approval: true
@@ -65,6 +69,7 @@ event_types:
 
   # ---- 我們加的（模擬與場域會用到） ----
   fire:
+    id: 3
     category: template
     detectors: [apriltag_fire, fire_smoke_yolo]
     trigger: {zone_attr: any, time_rule: always}
@@ -79,6 +84,7 @@ event_types:
     status: open
 
   smoke:
+    id: 4
     category: template
     detectors: [fire_smoke_yolo]
     trigger: {zone_attr: any, time_rule: always}
@@ -94,6 +100,7 @@ event_types:
     status: open
 
   thermal_anomaly:
+    id: 5
     category: template
     detectors: [thermal_hotspot]
     trigger: {zone_attr: high_voltage, time_rule: always}
@@ -108,6 +115,7 @@ event_types:
     status: open
 
   left_object:
+    id: 6
     category: template
     detectors: [left_object_yolo]
     trigger: {zone_attr: any, time_rule: always}

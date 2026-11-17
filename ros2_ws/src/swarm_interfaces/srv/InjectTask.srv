@@ -41,6 +41,28 @@ string spec                        # TaskSpec（JSON，B 層：steps 等）；�
 uint8 distinct_agent_set           # 要由不同載具執行的角色（位元 = role_index；同組要一樣）：出價的硬性限制，Group Commit 再驗證
 string fallback_template           # 組資料：需要降級時 FallbackRequest 帶這個（同組要一樣；空 = 不發 FallbackRequest）
 uint16 incident_revision           # 規劃器展開時依據的 incident revision（incident_updates）；不能比閘道目前的新
+# 任務欄位補齊第一批（2026-11-17；docs/planner_task_definition_plan.md）：不進 TASK_ANNOUNCE，閘道寫進 spec 最上層
+# （spec 是空的時只留在閘道）。position 是這個角色的觀察點（observe pose，出價算到這裡）；事件本身的位置放 target
+uint8 SOURCE_UNKNOWN = 0
+uint8 SOURCE_ALARM = 1
+uint8 SOURCE_UAV = 2
+uint8 SOURCE_QUADRUPED = 3
+uint8 SOURCE_VMS = 4
+uint8 SOURCE_OPERATOR = 5
+uint8 SOURCE_SENSOR = 6
+uint8 source                       # 事件來源 SOURCE_*
+string event_type                  # event_types.yaml 的名稱；空 = 不指定（閘道有註冊表時不認得的拒絕）
+string task_type                   # task_types.yaml 的 task_types；空 = 不指定
+string description                 # 人看的說明（≤ 200 B）
+uint8 TARGET_NONE = 0              # 沒有另外的目標：position 就是目標
+uint8 TARGET_POINT = 1
+uint8 TARGET_AREA = 2              # uncertainty_m 是區域半徑
+uint8 TARGET_MOVING = 3            # 要給 track_id
+uint8 target_kind
+geometry_msgs/Point target         # 事件位置（map ENU）
+string track_id
+float32 uncertainty_m              # 目標位置的不確定半徑
+float32 standoff_m                 # 觀察點（position）至少離目標多遠；0 = 不檢查
 ---
 bool accepted                      # 建立了、改版了，或同一個鍵重送（duplicate）
 bool duplicate
@@ -48,3 +70,6 @@ string reason                      # 拒絕的原因
 uint64 task_id
 uint64 group_id                    # 角色組；0 = 單獨任務
 uint16 revision                    # 這個任務目前的 revision
+uint16 event_type_id               # 註冊表的編號；0 = 不知道（沒有註冊表、沒指定）
+uint16 task_type_id
+uint16 role_id

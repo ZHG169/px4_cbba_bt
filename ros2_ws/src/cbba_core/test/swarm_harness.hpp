@@ -60,6 +60,18 @@ public:
     return *nodes_[i];
   }
 
+  // 閘道重開機（任務欄位補齊 01）：新的 session、新的世代、什麼都不知道
+  CbbaComm & restartGateway(AgentId id, Epoch epoch)
+  {
+    const std::size_t i = indexOf(id);
+    const AgentState s = nodes_[i]->agent().state();
+    CommConfig config = config_;
+    config.gateway = true;
+    config.epoch = epoch;
+    nodes_[i] = std::make_unique<CbbaComm>(s, ScoringParams{}, config);
+    return *nodes_[i];
+  }
+
   CbbaComm & node(AgentId id) {return *nodes_.at(indexOf(id));}
   void setOnline(AgentId id, bool on) {online_[indexOf(id)] = on;}
   void cut(AgentId a, AgentId b) {cut_.insert({a, b}); cut_.insert({b, a});}

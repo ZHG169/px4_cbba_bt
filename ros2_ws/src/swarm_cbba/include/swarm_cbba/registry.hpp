@@ -159,6 +159,7 @@ struct DetectorEntry
 struct EventType
 {
   std::string name;
+  std::uint16_t id{0};         // 編號（任務欄位補齊 02）：0 = 沒寫
   std::string category;        // template、open
   std::vector<std::string> detectors;
   std::string zone_attr{"any"};          // trigger
@@ -187,6 +188,15 @@ struct EventType
   std::string status;          // open、closed
 };
 
+// 任務語意的編號表（task_types.yaml 的 task_types、roles；任務欄位補齊 02，2026-11-17）
+struct SemanticEntry
+{
+  std::string name;
+  std::uint16_t id{0};         // 1～65535，只增不改
+  std::string description;
+  bool deprecated{false};
+};
+
 struct Registry
 {
   std::string dir;
@@ -201,15 +211,19 @@ struct Registry
   std::vector<ObjectClass> object_classes;
   std::vector<DetectorEntry> detectors;
   std::vector<EventType> event_types;
+  std::vector<SemanticEntry> task_types;
+  std::vector<SemanticEntry> roles;
 
   const RobotEntry * robot(cbba_core::AgentId id) const;
   const ActionEntry * action(const std::string & name) const;
   const PlatformEntry * platform(const std::string & name) const;
   const ObjectClass * objectClass(const std::string & name) const;
   const EventType * eventType(const std::string & name) const;
+  const SemanticEntry * taskType(const std::string & name) const;
+  const SemanticEntry * role(const std::string & name) const;
 };
 
-// 讀 dir 底下的六份。檔案不在、不是 YAML、缺欄位、型別不對、schema_version 不是
+// 讀 dir 底下的六份＋task_types.yaml（任務語意的編號，2026-11-17）。檔案不在、不是 YAML、缺欄位、型別不對、schema_version 不是
 // kRegistrySchema 時丟出 std::runtime_error（訊息帶檔名與哪一筆）
 Registry loadRegistry(const std::string & dir);
 
@@ -230,7 +244,8 @@ Registry loadRegistry(const std::string & dir);
 //   event_types：category template 要有 detectors、default_rule；open 要有 vlm、requires_approval；detectors 要在清單；
 //            trigger 的 zone_attr（any、restricted、high_voltage）、time_rule；accumulate 0 < λ ≤ 1、theta_on > theta_off ≥ 0；
 //            associate dt_s > 0、r_m ≥ 0；vlm 要有 prompt_id、samples ≥ 1、timeout_s > 0；cost 都 > 0；locate；
-//            priority P0～P3；object_class 要在 objects；expires_s ≥ 0；status
+//            priority P0～P3；object_class 要在 objects；expires_s ≥ 0；status；id 不重複（0 = 沒寫，可以多個）
+//   task_types、roles：名稱、id 不重複；id 1～65535
 std::vector<std::string> checkRegistry(const Registry & registry);
 
 // 註冊表有、但這版程式（capabilities.hpp）不認得的能力標籤：註冊表比程式新。載具宣告了這些能力也用不到

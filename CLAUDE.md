@@ -431,6 +431,43 @@ CBBA 照現在各自分配（不動 TDR、17 條規則），協同在執行端�
 閘道 `incident_updates`、`fallback_request`。swarm_interfaces 2.3.0。測試：`test_group_progress`、`test_incident`、`test_wire_task_progress`、
 `test_wire_incident_update`、`test_spec_gates`；節點 `swarm_cbba/test/cb4_iface.sh`（P0～P7）、`cb4b_iface.sh`（S0～S4）、`cb4c_iface.sh`（I1、D1、D2、C1）。
 
+### 任務欄位補齊（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉，2026-11-17 規劃；**第一批 01、02、04 已完成、11/18 測過**）
+
+全文 `docs/planner_task_definition_plan.md`（欄位總表＋欠缺項目、TaskCore 最終定義、13 列規劃）。三層：TaskCore＝A 層 TASK_ANNOUNCE、
+TaskSpec＝B 層、IncidentRecord＝C 層（閘道／控制中心）。原則：CBBA 只管能不能做、誰適合、誰得標、團隊一致；Planner 把事件轉成合法角色
+與 steps；BT／Nav2 管安全執行與路徑可達（**CBBA 不估路徑繞行**）。
+
+**TaskCore 最終定義（使用者 11/17）**：TASK_ANNOUNCE 124 B ＋ `zone_policy_id` 2 B ＋ `zone_registry_version` 2 B ＝ **128 B**。
+CBBA 據此分配：平台、能力、樓層、禁飛／禁入區、observe pose（規劃器放進 `x, y, z`，事件位置移到 TaskSpec）、價值、到達與執行時間、
+hard deadline、half-life、電量與返航存量、優先級與搶占、distinct／optional／AON／precedence／sync。其他（incident_id、source、
+schema_version、event／task／role、target_kind、uncertainty、standoff、steps、success／abort、timeout、report、approval、evidence、簽章）放 TaskSpec／閘道。
+
+| # | 決定（使用者 11/17，最終） |
+|---|---|
+| 1 | TASK_ANNOUNCE 升為**協定版本 5**，固定 **128 B**（和版本 4 互相拒收，全隊含狗的 cbba_node 一起重編） |
+| 2 | 加入 `zone_policy_id`（區域註冊表裡事先定義的政策；0 = 只套用區域的 `no_entry`）與 `zone_registry_version`（`zones.geojson` 加版本欄位） |
+| 3 | Zone Registry 版本不符：第一階段**先告警**、照常出價；是否禁止出價後續定案 |
+| 4 | 補上載具樓層來源：**單一樓層先用 `fleet.yaml`**，多樓層再改 RobotState |
+| 5 | **本次必須實際啟用 `floor` 與 `preempt_margin_pct`**，不接受只序列化而未使用（floor 不符 → WRONG_FLOOR；同級搶占要遮罩允許且新分數 > 目前 ×(1 + margin)） |
+
+| 批 | 列（PDF 順序） |
+|---|---|
+| 1 合約骨架 | 01 識別與追溯（TaskSpec 帶 incident_id、source 列舉、schema_version；閘道對照表存檔、重開沿用 task_id）→ 02 任務語意（event／task／role 編號註冊表；steps 驅動、不用 bt_subtree）→ 04 空間（observe pose、target_kind、位移門檻） |
+| 2 安全可行性 | 05 區域（ZoneRegistry、CBBA 檢查觀察點的區域／平台／樓層／高度，原因 ZONE_FORBIDDEN、WRONG_FLOOR、ALTITUDE_LIMIT；TaskCore 加 2 欄、協定版本 5；載具樓層先用 fleet.yaml）→ 08 能力（indoor_flight 由規劃器推導、高度上限、能力恢復）→ 07 搶占（margin 生效；同級要遮罩允許且新分數 > 目前 ×(1+margin)；單一 P0 無人得標 10 s 看門狗） |
+| 3 正式執行 | 10 執行規格（TaskSpecValidator 放閘道、結構化 success／abort、任務 timeout、8 動作支援表）→ 12 人機與安全（閘道核准狀態 PROPOSED → WAITING_APPROVAL → APPROVED → INJECTED／REJECTED） |
+| 4 外部整合 | 11 回報（report_policy、TaskResult 擴充、結果 outbox）→ 03 證據（URI，CBBA 只帶 incident_id） |
+| 5 部署 | 13 簽章（HMAC → Ed25519；只簽有權限意義的封包；轉送時簽章只涵蓋原始 payload；nonce 沿用 (session, seq)） |
+| 整理 | 06 時間（現有絕對時刻寫成合約、補測試）、09 協同出價第二階段（有效到達 = max(自身、前置里程碑、同步)） |
+
+每列完成定義：合約 → 程式（不留只傳不用的欄位）→ 單元＋節點介面＋失敗情境 → itest group G0～G15 不退化 → 文件。
+
+**第一批（11/17 寫好、11/18 單元＋`meta_iface.sh`＋回歸＋itest group、comm 全過，細節見 `planner_task_definition_plan.md`「第一批的實作」）**：識別、語意、空間寫進角色 TaskSpec 最上層
+（`cbba_core/task_meta.*`、`swarm_cbba/spec_compose.*`，schema `"1.1"`）；`InjectTask` 加 source、event_type、task_type、description、
+target_kind、target、track_id、uncertainty_m、standoff_m；`registry/task_types.yaml`＋`event_types.yaml` 的 id；閘道對照表存檔
+（`gateway_state_file`、`restore_confirm_s`）；`retarget_threshold_m` 3 m（只動位置的小幅改版不重新評估）；`TaskAssignment` 加語意欄位；
+swarm_interfaces 2.4.0。協定封包不變（版本 4）。測試：`test_task_meta`、`test_gateway`（Identity、Retarget）、`test_registry` SemanticIds、
+`test_spec_compose`、`swarm_cbba/test/meta_iface.sh`（M1～M7）。
+
 ## 機間 UDP：現在有兩條（2026-10-13 整理）
 
 DDS 不走 mesh（`.env` 的 `DDS_OVER_MESH=0`）：ROS 話題（robot_state、current_task、PX4…）只在機內。機間只有這兩條 UDP：
@@ -552,15 +589,13 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 
 **使用者 11/16 的範圍**：完成 CB-4＋TDR → 用「指令注入＋假 BT／假 Planner」測試，先測到這裡；真的 BT、人機介面（Node-RED）之後再對接。
 
-1. **跑 itest `group`**（11/16 寫好）：`python3 docker/itest/itest.py group --dogs 3 --kill-existing`（G0～G7）。第一次跑遇到兩個我的錯
-  （`GroupSuite` 插在 `CommSuite` 定義之前、`ros_bridge.py` 縮排），都修了，還沒重跑。接著跑回歸 `itest comm --dogs 3`、
-  `itest loss --dogs 3 --levels 30,70`（CB-4 改了封包：TASK_ANNOUNCE 124 B、種類 12、13）。不用重編（C++ 沒變）
-2. **commit** CB-4 第二、三批＋itest＋文件（等使用者說；不 push）。
-3. **TDR 參數實驗**（`docs/tdr_experiment_plan.md`，11/16 照使用者的〈TDR 參數設定與測試計畫〉PDF 重新規劃）：階段 A、B 的程式寫好
+1. ~~itest `group`~~（11/17：G0～G15＋G14D、G15R 共 18 項全過，`20261117_015231_group`；影片 `group.mp4`、`group_0.5x.mp4`）
+2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 **11/18 測過**（還沒 commit）；下一批是第二批 05 區域 → 08 能力 → 07 搶占（協定版本 5、TASK_ANNOUNCE 128 B）
+3. ~~**TDR 參數實驗**~~（`docs/tdr_experiment_plan.md`，11/16 照使用者的〈TDR 參數設定與測試計畫〉PDF 重新規劃）：階段 A、B 的程式寫好
    （`mission_sim` 的量測、`tdr_experiment`〔S1～S6〕、`cbba_sim tdr`、`scripts/tdr_report.py`、`test_scoring` +3、`test_tdr_experiment` 9 項），
    ✅ 11/16 階段 A～D 跑完：**`energy_weight` 50 → 25**（程式預設已改），`half_life_by_priority` 維持 60/120/300/600 s；
    報告規則加返航餘量容許 0.5 %、S1～S3 選對 ≥ 90 %。剩 E（狗的實測模型）、F（Gazebo）
-4. ~~決定「執行者失聯 vs 失聯接手」的時限~~（11/16 採做法 A，`Gateway::stepGroups`＋`test_incident` 的 Takeover 3 項，**待跑測試**；`cb4_design.md`）。
+4. ~~決定「執行者失聯 vs 失聯接手」的時限~~（11/16 採做法 A，`Gateway::stepGroups`＋`test_incident` 的 Takeover 3 項，測試通過；itest G9、G10 也過）。
 5. **`ExecuteStep.action` 草案＋假 adapter**（使用者 11/16 確認：要讓狗、無人機、Node-RED 互相使用，執行端一定要有同一個 Action 介面；
    狗 BT 也要接 `teammates`、`task_progress`、`incident_update`，同 task_id 新 revision 更新目標不重做）：照 `registry/api.md` 第 5 節寫進
    `swarm_interfaces`，假 adapter 照 `actions.yaml` 檢查參數、模擬進度／取消／失敗碼，給伯宇、羅凡對欄位。使用者還沒說要不要現在做
@@ -569,7 +604,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 7. 和人對的（M0 收尾）：`/registry`、`/validate` 格式（羅凡）；`/test_run`、`ExecuteStep.action`、狗 BT 的 inspect 參數（`mode`／`duration_s`）、
    狗 BT 接 CB-4 的話題（伯宇）；Planner 訂 `incident_updates`、`fallback_request`；V60 的酬載填 `fleet.yaml`。
 8. 文件：`tdr_design.md` 的「收斂」一節寫「出價上限之後再加」，但程式（`CbbaAgent::buildBundle`、`bidFor`）早就有 bid warping 上限，要改成一致。
-9. **push** `hetero-tasking`（等使用者說）。
+9. ~~push~~（11/17：使用者 push 了 7 個 commit〔已拿掉 Co-Authored-By〕；README 的 `8315bd8` 由使用者 push）。
 10. 第 5 週收尾（選做）：重跑 `demo --scenario blackout`；斷網 8 s vs 20 s；C9 重複 5～10 次；loss 記每台實際分到的任務種類。
 11. 避碰選做（使用者：合理就好）：回起飛點最後一段限速；約 6 m/s 對飛時緊急退讓的抽動。
 12. 真的 V60：伯宇的部署換成 `hetero-tasking`（`README_v60.md` 第 0.1 節 A、第 0.2 節的測試）；巡檢中被火警搶占在真狗上跑。
@@ -592,7 +627,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 | 註冊表照原文修正 | **11/16 改好**（見「2-1b M0 的 CBBA 實作進度」的「註冊表照原文改寫」）；剩下要和人對的：`/registry`、`/validate` 的格式和羅凡確認、`/test_run` 與 `ExecuteStep.action`（`registry/api.md` 第 3、5 節的提案）和伯宇對、狗 BT 的 inspect 參數改成 `mode`／`duration_s`（目前讀 `snapshots`） |
 | `ExecuteStep.action` 的欄位 | 一個通用的 Action（11/15 使用者定），欄位要和伯宇對（REG-2）；`actions.yaml` 的參數也是初版、等他確認 |
 | 能力的品質 | **使用者 11/16 定：能力只定義有沒有**（`required_caps ⊆ 可用能力`），不分好壞、不進出價；需要時再加品質係數（乘在價值上） |
-| TDR 的參數 | `energy_weight` 50、預設 half_life [60, 120, 300, 600] s 是暫定；第八節的實驗（含掉包率）定案。實驗的電池設定（續航、插入時段、耗電誤差）同第七節還沒定 |
+| TDR 的參數 | **11/16 定案**：`energy_weight` 25（實驗後由 50 改）、`half_life_by_priority` 60/120/300/600 s 不改；狗的速度、耗電等伯宇實測（階段 E） |
 | 失聯的那台「不接新的」 | 各機分不出自己是不是失聯的那台，沒有另外實作 |
 | 斷網後舊持有者的完成被拒收 | 斷網 > 10 s 時火警被接手、原持有者其實已做完卻因版本較舊被拒收，任務被重做（`20261109_170653_demo`）；目前是設計（火警寧可重複），要不要改先和使用者確認 |
 | 2-1b：無人機的 CBBA | 機上直接跑 cbba_node（現在）還是地面站代理（文件待確認問題） |
