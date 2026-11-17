@@ -9,6 +9,8 @@
 | [`progress.md`](progress.md) | 自己、隊友、老師 | **目前進度**：週進度對照、最近的測試結果、缺失清單、已定案還沒實作的 | 持續更新 |
 | [`cbba_comm_status_20261012.md`](cbba_comm_status_20261012.md) | 簡報、隊友 | **CBBA 機間通訊進度**：架構、協定版本 2、已完成功能、測試結果、量測數據、介面對齊、修掉的問題、還沒做的 | 2026-10-12 快照 |
 | [`sim_scenario_plan.md`](sim_scenario_plan.md) | 自己 | 巡檢＋隨機插入、電池權重測試：當初的分析、使用者的決定、實作與第一次結果 | 已實作 |
+| [`tdr_experiment_plan.md`](tdr_experiment_plan.md) | 自己 | TDR 參數實驗（w_E、預設 half_life）：情境 S1～S6、指標、入選順序、`cbba_sim tdr`、`tdr_report.py` | 11/16 跑完、w_E 定 25 |
+| [`cbba_test_report_20261116.md`](cbba_test_report_20261116.md) | 自己 | 11/16 報告：CB-4 itest、失聯接手做法 A、TDR 參數實驗結果（w_E 50 → 25）、各測試指令的項目與指標、重跑方式 | 報告 |
 | [`protocol_v2_notice.md`](protocol_v2_notice.md) | 狗端（伯宇）、規格作者 | 機間通訊協定版本 2 的變更通知（不相容於規格書） | 有效，還沒送給規格作者 |
 | [`nav2_integration_plan.md`](nav2_integration_plan.md) | 自己、狗端（伯宇） | 模擬裡導入 Nav2：伯宇的 task_manager＋Nav2 取代假狗（dog 容器、Gazebo V60、座標、假雲台、itest） | 草案，還沒實作 |
 | [`task_insertion_guide.md`](task_insertion_guide.md) | 自己 | **插入任務點的使用方法**：itest demo 的 `--interactive`（terminal 手動、隨機插入）、`--scenario`（情境檔）、手動 SITL 的腳本 | 2026-10-14 |
