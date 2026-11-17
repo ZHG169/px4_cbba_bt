@@ -32,6 +32,7 @@ import os
 import random
 import re
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -271,6 +272,27 @@ def fill(obj, values):
     return obj
 
 
+def encode_frames(frames, mp4):
+    """每一格的 PNG（frames/%05d.png、fps.txt）→ MP4（主機的 ffmpeg）；成功就刪掉 frames"""
+    if not (os.path.isdir(frames) and os.listdir(frames)):
+        print(f"  沒有畫出動畫（看 {os.path.dirname(mp4)}/animate.log）")
+        return False
+    fps = int(open(os.path.join(frames, "fps.txt")).read().strip())
+    if not shutil.which("ffmpeg"):
+        print(f"  主機沒有 ffmpeg（sudo apt install ffmpeg），每一格留在 {frames}；裝好後：\n"
+              f"    ffmpeg -framerate {fps} -i {frames}/%05d.png -c:v libx264 -pix_fmt yuv420p {mp4}")
+        return False
+    r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps), "-i",
+                        os.path.join(frames, "%05d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", mp4], capture_output=True, text=True)
+    if r.returncode == 0:
+        shutil.rmtree(frames)
+        print(f"  動畫：{mp4}")
+        return True
+    print(f"  ffmpeg 失敗：{r.stderr.strip()[-300:]}")
+    return False
+
+
 # =============================================================================
 # 和 ros_bridge 的連線：commands.jsonl（寫）、events.jsonl（讀）
 # =============================================================================
@@ -290,6 +312,8 @@ class Run:
         self.paths = {}          # uav -> [task_id…]（cbba_path：這台目前的 bundle，2026-10-27）
         self.closed = {}         # uav -> {task_id: 收到 task_closed 的時刻}（這台確認任務結束，2026-10-27）
         self.tx = {}             # uav -> [(t, 送出位元組累計, 其中重傳, 其中轉送)]（cbba_tx，2026-11-09）
+        self.teammates = {}      # uav -> 最新的 teammates（CB-4 的同組角色與 gate，2026-11-16，itest group）
+        self.arrived = {}        # (uav, task_id) -> 假身體到達的時刻（itest group，2026-11-16）
         self.cmd_file = os.path.join(out_dir, "commands.jsonl")
         open(self.cmd_file, "w").close()
         open(os.path.join(out_dir, "events.jsonl"), "w").close()
@@ -331,6 +355,10 @@ class Run:
                 self.tx.setdefault(e["uav"], []).append((e["t"], *e["d"]))
             elif e["kind"] == "closed":
                 self.closed.setdefault(e["uav"], {}).setdefault(e["msg"].get(f_id), e["t"])
+            elif e["kind"] == "teammates":
+                self.teammates[e["uav"]] = (e["msg"], e["t"])
+            elif e["kind"] == "arrived":
+                self.arrived[(e["uav"], e["task_id"])] = e["t"]
             elif e["kind"] == "pos":
                 self.positions[e["uav"]] = (e["x"], e["y"], e["z"], e["t"])
             elif e["kind"] == "status":
@@ -1147,6 +1175,872 @@ class LossSuite(CommSuite):
                 for r in data:
                     f.write(",".join("" if v is None else str(v) for v in r.values()) + "\n")
         print(f"  畫圖：python3 docker/itest/plot_loss.py {run.out}")
+
+
+# =============================================================================
+# 角色組（group，CB-4，2026-11-16）：閘道注入角色組，跨容器（真的 UDP、mesh）驗證 CB-4 三批
+# =============================================================================
+class GroupSuite(CommSuite):
+    """閘道（cbba_gcs，機號 200）＋無人機＋狗（--dogs N）的 cbba_node，假 robot_state、用話題假裝 BT：
+      G0 節點、閘道上線
+      G1 precedence：空中角色（UAV）＋地面角色（狗，step 1 wait_for role 0 target_localized）→ 狗的 gate WAITING；
+         UAV 回報 task_progress（target_localized）→ 狗的 gate OPEN（量時間）
+      G2 incident：同一組，UAV 發 incident_update＋宣告定位 → 閘道接受（/gcs/incident_updates revision 1）、
+         狗的 teammates incident revision 1、gate 照樣 OPEN（定位在新 revision 通過驗證）
+      G3 會合點：兩個地面角色（distinct）step 1 sync "meet" → 一隻回報 ARRIVED_WAITING 時還在等，兩隻都到 → 都 OPEN
+      G4 distinct 案例 1：dog1 靠近 front、rear，其他狗很遠 → 兩個角色由不同的狗拿
+      G5 distinct 案例 2：all-or-nothing、地面角色比狗多一個 → 湊不齊、不發 current_task；group_recovery_timeout_s（10 s）後
+         閘道整組取消、/gcs/fallback_request（single_dog_verify）
+      假 Planner（2026-11-16，使用者：先測到「指令注入＋假 BT／假 Planner」，真的 BT、人機介面之後再對接）：
+      G6 收到 incident_updates → 重新展開：只有 TaskSpec 改了的地面角色 inject_task 改版（revision 2、incident_revision 1、新位置）
+         → 閘道 REVISED、執行中的狗收到同 task_id、revision 2 的 current_task；空中角色不改版
+      G7 收到 fallback_request → 展開 fallback 範本（single_dog_verify：一個地面角色）注入新的組 → 有狗接、拿到 current_task
+      團隊 CBBA 的其他行為（2026-11-16，使用者：用我們的參數測團隊 CBBA，做成動畫）：
+      G8  異質分工：限無人機、限狗、不限平台三種角色 → 限定的只給對的平台；不限平台的由 TDR 決定（得標者的出價最高，讀出價表）
+      G9  失聯接手成功（做法 A）：執行中的狗斷線 → 等 P0 接手時限（10 s）→ 別隻狗接手；組不取消、沒有 fallback
+      G10 接手逾時才 fallback：只有一隻狗能做（其他狗 MANUAL）→ 斷線 → 撤銷後 10 s 才 RECOVERY_TIMEOUT（失聯約 21.5 s），
+          依賴它的空中角色一起取消、fallback_request；19 s 前沒有任何取消
+      G11 非 all-or-nothing 的連鎖撤銷：取消必要角色 A → 依賴 A 的 B 取消、不依賴的 C 照做、fallback_request
+      G12 optional 略過：沒有能做空中角色的無人機（都 MANUAL）→ optional 的空中角色被閘道略過（reason 4），必要的地面角色照做
+      G13 優先級搶占：只有 dog3（多宣告 manipulator）能做 P3、P0 → 它中斷 P3 改做 P0，做完再接回 P3
+      偵測 → 假 Planner（寫死的範本，2026-11-17，照〈CBBA G0～G15 測試與影片規劃〉）：
+      G14 狗偵測到人 → 閘道 → perimeter_intrusion（aerial_overwatch optional＋front＋rear、all-or-nothing、distinct、
+          sync_window 15、inspect 等 target_localized）→ CBBA 組隊 → 執行完成；G14D 同一個偵測重送 → 同一組
+      G15 UAV 偵測到火 → fire_response（air_fire_watch optional＋ground_fire_verify）→ 狗接地面角色、UAV 對它出價 0；
+          G15R 建組時離線的狗回來後補到任務定義
+    載具用 ros_bridge 的假身體（不用真的 BT）：收到 current_task 就直線走過去（無人機 0.5、狗 1.0 m/s，group.body_speed），
+    到了才回報 progress／完成；無人機的 cbba_node 用預設參數（group.uav_start，w_E、half_life、速度、bundle 上限都是我們的設定）。
+    結束後畫 group.mp4（animate_group.py：照規劃的章節重排成約 80～90 s；sim 容器畫每一格、主機的 ffmpeg 合成）"""
+
+    def __init__(self, env, run, only):
+        super().__init__(env, run, only)
+        self.g = env.cfg["group"]
+        self.gcs = self.g["container"]
+        self.incident_file = os.path.join(run.out, "gcs_incident_updates.txt")
+        self.fallback_file = os.path.join(run.out, "gcs_fallback_request.txt")
+        self.detection_file = os.path.join(run.out, "gcs_detections.txt")
+        self.k = 0
+        self.last_inject = {}
+        self.plan = {"segments": [], "tasks": {}, "vehicles": {}}
+        self.offline = set()     # 斷線中的載具（crash）：它最後的 current_task 還留在 run.assigned，不能當成持有者
+
+    # ---------- 假身體、動畫的紀錄 ----------
+    def state_on(self, vid):
+        x, y = self.positions()[vid]
+        dog = self.env.is_dog(vid)
+        speed = self.g.get("body_speed", {}).get("dog" if dog else "uav", 1.0)
+        fields = fill(self.cfg["messages"]["robot_state"], dict(id=vid, x=float(x), y=float(y)))
+        self.run.send("body", vid=vid, x=float(x), y=float(y), speed=float(speed), platform="dog" if dog else "uav",
+                      fields=fields, **self.run.topic("robot_state", vid))
+        self.plan["vehicles"][str(vid)] = {"name": self.env.name(vid), "platform": "dog" if dog else "uav",
+                                           "speed": speed}
+
+    def special_dog(self):
+        """G13 唯一能做 P0、P3 的狗（group.special_dog：機號與多宣告的能力）；設定裡沒有 → None"""
+        sp = self.g.get("special_dog") or {}
+        return (sp["id"], sp["capability"]) if sp.get("id") in self.env.dogs else None
+
+    def start_node(self, vid):
+        sp = self.special_dog()
+        if sp and vid == sp[0]:
+            # 多宣告一個能力（其他狗沒有）：要求這個能力的任務只有它能做
+            c = self.cfg["comm"]
+            cmd = c["dog_start"].format(id=vid, ns=self.env.ns(vid))
+            cmd += "".join(f" -p {k}:={v}" for k, v in getattr(self.env, "node_params", []))
+            cmd += f" -p 'capabilities:=[mobility_ground, rgb_camera, {sp[1]}]'"
+            self.env.exec(self.env.uav(vid), "exec " + cmd, detach=True,
+                          log=f"{self.run.cout}/node_{self.env.name(vid)}.log")
+            return None
+        if self.env.is_dog(vid) or "uav_start" not in self.g:
+            return super().start_node(vid)
+        # 無人機用預設參數（我們的設定），不用 comm 的 cruise_speed 5、max_bundle 5
+        cmd = self.g["uav_start"].format(id=vid, ns=self.env.ns(vid))
+        cmd += "".join(f" -p {k}:={v}" for k, v in getattr(self.env, "node_params", []))
+        self.env.exec(self.env.uav(vid), "exec " + cmd, detach=True, log=f"{self.run.cout}/node_{self.env.name(vid)}.log")
+
+    def here(self, vid):
+        """假身體目前的位置（還沒有位置事件時用設定的出生點）"""
+        p = self.run.positions.get(vid)
+        return (p[0], p[1]) if p else tuple(self.positions()[vid])
+
+    def note(self, text, **kw):
+        self.run.send("note", text=text, **kw)
+
+    def segment(self, code, title, expected=""):
+        """開始一段測試（影片的段落）；expected：影片在這段開頭顯示的「預期」（英文，容器沒有中文字型）"""
+        now = time.time()
+        if self.plan["segments"]:
+            self.plan["segments"][-1].setdefault("t1", now)
+        self.plan["segments"].append({"id": code, "title": title, "expected": expected, "t0": now})
+        self.note(f"{code} {title}", segment=code)
+
+    def key(self, code, evidence):
+        """關鍵狀態改變（影片在這裡停 1.5 s，顯示 PASS／FAIL 與這段證據；英文）"""
+        self.note(evidence, key=code)
+
+    def timer(self, label):
+        """影片從這裡開始顯示計時器（例如斷線後經過幾秒）"""
+        self.note(label, timer=label)
+
+    def hold(self, vid, on):
+        self.run.send("body_hold", vid=vid, hold=bool(on))
+
+    def set_mode(self, vid, mode):
+        """robot_state 的 mode：0 AUTO、1 MANUAL（cbba_node 不出價、手上的任務釋放）"""
+        self.run.send("body_mode", vid=vid, mode=int(mode))
+
+    def wait_holder(self, tid, timeout, exclude=()):
+        return super().wait_holder(tid, timeout, exclude=tuple(exclude) + tuple(self.offline))
+
+    def wait_arrived(self, vid, tid, timeout):
+        return self.run.until(lambda: (vid, tid) in self.run.arrived, timeout)
+
+    def crash(self, vid):
+        """模擬斷線、當機：停掉 cbba_node，假身體停在原地"""
+        self.stop_node(vid)
+        self.hold(vid, True)
+        self.offline.add(vid)
+        self.note(f"{self.env.name(vid)} offline (cbba_node stopped)", vehicle=vid, event="offline")
+        return time.time()
+
+    def revive(self, vid, timeout=20.0):
+        since = time.time()
+        self.hold(vid, False)
+        self.start_node(vid)
+        self.offline.discard(vid)
+        ok = self.run.until(lambda: any(u == vid and t >= since for (t, u, _, _) in self.run.history), timeout)
+        self.note(f"{self.env.name(vid)} back online", vehicle=vid, event="online")
+        return ok
+
+    def finish_role(self, tid, timeout=60.0):
+        """目前持有者走到任務點後回報完成（動畫看得到做完）；回傳持有者"""
+        h, _ = self.wait_holder(tid, 10)
+        if h is None:
+            return None
+        self.wait_arrived(h, tid, timeout)
+        self.report(h, tid, True)
+        self.wait_released(h, tid, 5.0)
+        return h
+
+    @staticmethod
+    def task_name(tid):
+        """cbba_node log 裡的任務名稱：版本 4 是 建立者.世代.流水號（十六進位）"""
+        return f"{(tid >> 48) & 0xFFFF:04X}.{(tid >> 32) & 0xFFFF:04X}.{tid & 0xFFFFFFFF:08X}"
+
+    def bids_at(self, tid, t_until):
+        """各台 cbba_node 的出價表（log）在 t_until 之前最後一行（跳過 locked：正式指派後別台都是 0）：機號 -> (出價, 原因)"""
+        name = self.task_name(tid)
+        pat = re.compile(r"\[(\d+\.\d+)\].*?出價表 task=" + re.escape(name) + r" .*?agent=(\d+) bid=(\S+) why=(\S+)")
+        out = {}
+        for vid in self.env.ids:
+            path = os.path.join(self.run.out, f"node_{self.env.name(vid)}.log")
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        m = pat.search(line)
+                        if m and float(m.group(1)) <= t_until and m.group(4) != "locked":
+                            out[int(m.group(2))] = (float(m.group(3)), m.group(4))
+            except OSError:
+                pass
+        return out
+
+    # ---------- 偵測與假規劃器（G14、G15，2026-11-17；照〈CBBA G0～G15 測試與影片規劃〉）----------
+    def detect(self, vid, detector, label, x, y, track_id, score=0.92):
+        """機器人的偵測器發 detection（cbba_node 補 agent_id、流水號，送 DETECTION 給閘道）"""
+        fields = {"detector": detector, "source": f"{self.env.name(vid)}/camera", "label": label, "score": score,
+                  "track_id": int(track_id), "position_valid": True, "position": {"x": float(x), "y": float(y), "z": 0.0},
+                  "attrs": "{}"}
+        self.run.publish("detection", vid, fields)
+        self.note(f"{self.env.name(vid)} detects {label}", event="detection", vehicle=vid, x=float(x), y=float(y),
+                  label=label)
+
+    def read_detections(self):
+        """閘道的 /gcs/detections（ros2 topic echo 的 YAML）：[{agent_id, label, seq, x, y, received}]"""
+        try:
+            with open(self.detection_file, encoding="utf-8", errors="replace") as f:
+                docs = f.read().split("---")
+        except OSError:
+            return []
+        out = []
+        for d in docs:
+            a = re.search(r"^agent_id: (\d+)", d, re.M)
+            lab = re.search(r"^label: (.+)$", d, re.M)
+            seq = re.search(r"^detection_seq: (\d+)", d, re.M)
+            pos = re.search(r"^position:\s*\n\s+x: (\S+)\s*\n\s+y: (\S+)", d, re.M)
+            rec = re.search(r"^received:\s*\n\s+sec: (\d+)\s*\n\s+nanosec: (\d+)", d, re.M)
+            if a and lab:
+                out.append({"agent_id": int(a.group(1)), "label": lab.group(1).strip().strip("'\""),
+                            "seq": int(seq.group(1)) if seq else 0,
+                            "x": float(pos.group(1)) if pos else None, "y": float(pos.group(2)) if pos else None,
+                            "received": int(rec.group(1)) + int(rec.group(2)) * 1e-9 if rec else None})
+        return out
+
+    def wait_detection(self, vid, label, since, timeout):
+        found = []
+
+        def seen():
+            found[:] = [d for d in self.read_detections() if d["agent_id"] == vid and d["label"] == label and
+                        (d["received"] is None or d["received"] >= since - 1.0)]
+            return bool(found)
+        t = self.run.until(seen, timeout)
+        return (t, found[-1]) if t else (None, None)
+
+    # 寫死的假規劃器（PLN-1 之前）：事件種類 → 固定範本 → InjectTask[]。只決定角色與 TaskSpec，不指定哪一台
+    WAIT_LOC = {"role_index": 0, "milestone": "target_localized"}
+    TEMPLATES = {
+        "perimeter_intrusion": {"labels": ("person", "perimeter_intrusion"), "roles": [
+            {"role": "aerial_overwatch", "platform": 1, "caps": "AIR", "optional": True, "skip_satisfies": True,
+             "dx": 0.0, "dy": 0.0, "steps": [{"action": "go_to"}, {"action": "track", "object": "person"}]},
+            {"role": "front", "platform": 2, "caps": "GROUND", "dx": 3.0, "dy": 0.0, "precedence": 1,
+             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", "wait_for": [WAIT_LOC],
+                                              "sync": "front_rear"}, {"action": "speak"}]},
+            {"role": "rear", "platform": 2, "caps": "GROUND", "dx": -3.0, "dy": 0.0, "precedence": 1,
+             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", "wait_for": [WAIT_LOC],
+                                              "sync": "front_rear"}]}],
+         "group": {"all_or_nothing": True, "distinct": 0b110, "sync_window": 15}},
+        "fire_response": {"labels": ("fire", "smoke"), "roles": [
+            {"role": "air_fire_watch", "platform": 1, "caps": "AIR", "optional": True, "skip_satisfies": True,
+             "dx": 0.0, "dy": 2.0, "steps": [{"action": "go_to"}, {"action": "track", "object": "fire"},
+                                             {"action": "wait"}]},
+            {"role": "ground_fire_verify", "platform": 2, "caps": "GROUND", "dx": 0.0, "dy": 0.0,
+             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "fire"}, {"action": "alert_operator"}]}],
+         "group": {}},
+    }
+
+    def plan_from_detection(self, det, caps):
+        """假 Planner：Detection → 範本 → inject_task。incident_id 由偵測決定（同一個偵測重送 → 同一組，閘道冪等）。
+        回傳 (範本名稱, incident_id, {角色: task_id}, group_id, 全部都是 duplicate)"""
+        name = next(k for k, t in self.TEMPLATES.items() if det["label"] in t["labels"])
+        tpl = self.TEMPLATES[name]
+        inc = f"det-{det['agent_id']}-{det['seq']}"
+        g = tpl["group"]
+        out, dups, gid = {}, [], 0
+        roles = tpl["roles"]
+        for i, r in enumerate(roles):
+            spec = json.dumps({"template": name, "role": r["role"], "steps": r["steps"]}, separators=(",", ":"))
+            out[r["role"]] = self.inject(inc, r["role"], i, len(roles), r["platform"], caps[r["caps"]],
+                                         det["x"] + r["dx"], det["y"] + r["dy"], spec=spec,
+                                         precedence=r.get("precedence", 0), all_or_nothing=g.get("all_or_nothing", False),
+                                         distinct=g.get("distinct", 0), sync_window=g.get("sync_window", 0),
+                                         optional=r.get("optional", False), skip_satisfies=r.get("skip_satisfies", False))
+            dups.append(self.last_inject.get("duplicate", False))
+            gid = self.last_inject.get("group_id", 0)
+        return name, inc, out, gid, all(dups)
+
+    def assigned_msg(self, vid, tid):
+        """這台最近一則 current_task（tid）的完整訊息"""
+        for e in reversed(self.run.events):
+            if e["kind"] == "assigned" and e.get("uav") == vid and e["msg"].get("task_id") == tid:
+                return e["msg"]
+        return None
+
+    def fallback_for(self, inc):
+        """這個事件的 fallback_request 有沒有出現（ros2 topic echo 的檔案）"""
+        return self.file_has(self.fallback_file, f"incident_id: {inc}")
+
+    def closed_anywhere(self, tid):
+        return any(tid in c for c in self.run.closed.values())
+
+    def gcs_log_has(self, *needles):
+        return self.file_has(os.path.join(self.run.out, "node_gcs.log"), *needles)
+
+    def positions(self):
+        pos = super().positions()
+        pos.update({int(k): v for k, v in self.g.get("dog_positions", {}).items() if int(k) in self.env.dogs})
+        return pos
+
+    # ---------- 閘道 ----------
+    def start_gateway(self):
+        state = f"{self.run.cout}/gw_state"
+        cmd = self.g["gateway_start"].format(state_dir=state)
+        cmd += "".join(f" -p {k}:={v}" for k, v in getattr(self.env, "node_params", []))
+        self.env.exec(self.gcs, f"mkdir -p {state}; exec " + cmd, detach=True, log=f"{self.run.cout}/node_gcs.log")
+        for topic, typ, path in (("/gcs/incident_updates", "swarm_interfaces/msg/IncidentState", self.incident_file),
+                                 ("/gcs/fallback_request", "swarm_interfaces/msg/FallbackRequest", self.fallback_file),
+                                 ("/gcs/detections", "swarm_interfaces/msg/Detection", self.detection_file)):
+            self.env.exec(self.gcs, f"exec ros2 topic echo {topic} {typ}", detach=True,
+                          log=self.env.to_container(path))
+
+    def stop_gateway(self):
+        self.env.pkill(self.gcs, self.g["gateway_stop_pattern"])
+        self.env.pkill(self.gcs, self.g["echo_pattern"])
+
+    def inject(self, incident, role, index, count, platform, caps, x, y, spec="", precedence=0, all_or_nothing=False,
+               distinct=0, fallback="", sync_window=0, optional=False, revision=1, incident_revision=0, want=None,
+               priority=0, skip_satisfies=False):
+        """回傳 task_id；want = "revised" 時要求回應是改版（InjectTask 的 revision 和 duplicate 判斷）"""
+        req = (f"{{incident_id: '{incident}', role: '{role}', revision: {revision}, incident_revision: {incident_revision}, "
+               f"platform: {platform}, "
+               f"required_capabilities: {json.dumps(caps)}, priority: {priority}, position: {{x: {x}, y: {y}, z: 0.0}}, "
+               f"value: 100.0, service_time_s: 30.0, role_index: {index}, role_count: {count}, optional: {str(optional).lower()}, "
+               f"precedence: {precedence}, all_or_nothing: {str(all_or_nothing).lower()}, skip_satisfies: {str(skip_satisfies).lower()}, "
+               f"distinct_agent_set: {distinct}, "
+               f"fallback_template: '{fallback}', sync_window_s: {sync_window}, spec: '{spec}'}}")
+        r = self.env.exec(self.gcs, "ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask " + shlex.quote(req))
+        m = re.search(r"task_id=(\d+)", r.stdout)
+        if not m or "accepted=True" not in r.stdout:
+            raise RuntimeError(f"inject_task 失敗（{incident}/{role}）：{r.stdout.strip()[-300:]} {r.stderr.strip()[-200:]}")
+        if want == "revised" and (f"revision={revision}" not in r.stdout or "duplicate=True" in r.stdout):
+            raise RuntimeError(f"inject_task 沒有改版（{incident}/{role} revision {revision}）：{r.stdout.strip()[-300:]}")
+        tid = int(m.group(1))
+        g = re.search(r"group_id=(\d+)", r.stdout)
+        self.last_inject = {"group_id": int(g.group(1)) if g else 0, "duplicate": "duplicate=True" in r.stdout}
+        seg = self.plan["segments"][-1]["id"] if self.plan["segments"] else ""
+        self.plan["tasks"].setdefault(str(tid), {"label": role, "segment": seg, "incident": incident, "priority": priority,
+                                                 "platform": platform, "optional": bool(optional), "precedence": precedence,
+                                                 "t": time.time()})
+        self.plan["tasks"][str(tid)].update(x=float(x), y=float(y))
+        return tid
+
+    def assigned_revision(self, vid, tid):
+        """這台最近一則 current_task（tid）的 revision；沒有 → None"""
+        for e in reversed(self.run.events):
+            if e["kind"] == "assigned" and e.get("uav") == vid and e["msg"].get("task_id") == tid:
+                return e["msg"].get("revision")
+        return None
+
+    def read_fallback(self):
+        """fallback_request 的最後一則（ros2 topic echo 的 YAML，用 --- 分開）：{欄位: 值}；沒有 → None"""
+        try:
+            with open(self.fallback_file, encoding="utf-8", errors="replace") as f:
+                docs = [d for d in f.read().split("---") if "fallback_template:" in d]
+        except OSError:
+            return None
+        if not docs:
+            return None
+        out = {}
+        for line in docs[-1].splitlines():
+            k, sep, v = line.partition(":")
+            if sep and not line.startswith(" ") and not line.startswith("-"):
+                out[k.strip()] = v.strip().strip("'")
+        return out
+
+    def cancel(self, tids):
+        for tid in tids:
+            self.env.exec(self.gcs, "ros2 topic pub --once -w 1 /gcs/cancel_task swarm_interfaces/msg/Task " +
+                          shlex.quote(f"{{task_id: {tid}}}"))
+
+    def incident_name(self, tag):
+        self.k += 1
+        return f"itest-{tag}-{int(time.time()) % 100000}-{self.k}"
+
+    # ---------- 查詢 ----------
+    def gate(self, vid, step):
+        """這台目前 teammates 裡 step 的 gate 狀態（0 OPEN、1 WAITING、2 UNSATISFIABLE）；沒有 → None"""
+        msg, _ = self.run.teammates.get(vid, ({}, 0))
+        for g in msg.get("gates") or []:
+            if g.get("step_index") == step:
+                return g.get("state")
+        return None
+
+    def wait_gate(self, vid, step, state, timeout):
+        return self.run.until(lambda: self.gate(vid, step) == state, timeout)
+
+    def progress(self, vid, tid, phase, step, milestones=()):
+        self.run.publish("progress", vid, {"task_id": tid, "phase": phase, "step_index": step,
+                                           "milestones": list(milestones)})
+
+    def file_has(self, path, *needles):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return False
+        return all(n in text for n in needles)
+
+    def wait_file(self, path, needles, timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.file_has(path, *needles):
+                return True
+            time.sleep(0.2)
+        return False
+
+    # ---------- 測試 ----------
+    def run_all(self):
+        env, run, res = self.env, self.run, self.res
+        dogs = sorted(env.dogs)
+        uavs = list(env.uav_ids)
+        if len(dogs) < 2 or not uavs:
+            res.add("G0", "設定", "FAIL", "group 要至少 1 台無人機＋2 隻狗（--dogs 2 以上）")
+            return
+        ids = env.ids
+        for vid in ids:
+            self.state_on(vid)
+        for vid in ids:
+            self.start_node(vid)
+        self.start_gateway()
+        t = run.until(lambda: all(v in run.assigned for v in ids), self.cfg["comm"]["warmup"] + 15)
+        run.sleep(4.0)    # 閘道的 membership_ready（lost_timeout ＋ status_period）、開機同步
+        missing = [env.name(v) for v in ids if v not in run.assigned]
+        res.add("G0", "節點、閘道上線", "PASS" if t and not missing and env.running(self.gcs, self.g["gateway_stop_pattern"])
+                else "FAIL", "沒上線：" + "、".join(missing) if missing else f"{len(ids)} 台＋閘道")
+        if missing:
+            return
+        GROUND = ["mobility_ground", "rgb_camera"]
+        AIR = ["mobility_air", "rgb_camera"]
+        uav = uavs[0]
+        ux, uy = self.positions()[uav]
+        dx, dy = self.positions()[dogs[0]]
+
+        # ---------- G1、G2：precedence、incident ----------
+        if self.want("G1") or self.want("G2"):
+            self.segment("G1", "precedence: dog waits until UAV localizes", "dog's inspect stays WAITING until the UAV reports target_localized, then OPEN")
+            inc = self.incident_name("prec")
+            wait_spec = ('{"steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", '
+                         '"wait_for": [{"role_index": 0, "milestone": "target_localized"}]}]}')
+            air = self.inject(inc, "overwatch", 0, 2, 1, AIR, ux + 5, uy)
+            ground = self.inject(inc, "front", 1, 2, 2, GROUND, dx + 5, dy, spec=wait_spec, precedence=1)
+            ha, _ = self.wait_holder(air, 15)
+            hg, _ = self.wait_holder(ground, 15)
+            ok = ha is not None and hg is not None and self.wait_gate(hg, 1, 1, 10) is not None
+            if self.want("G1"):
+                if not ok:
+                    res.add("G1", "precedence", "FAIL", f"指派或 gate（空中 {ha}、地面 {hg}、gate {self.gate(hg, 1) if hg else None}）")
+                else:
+                    self.wait_arrived(ha, air, 30)     # 假身體飛到空中角色的點，才回報定位
+                    self.note(f"{env.name(ha)} reports target_localized", vehicle=ha)
+                    self.progress(ha, air, 4, 1, ["target_localized"])
+                    t0 = time.time()
+                    t1 = self.wait_gate(hg, 1, 0, 10)
+                    if t1:
+                        self.key("G1", f"{env.name(hg)} gate OPEN {t1 - t0:.2f} s after {env.name(ha)} localized")
+                    res.add("G1", "precedence：UAV 定位 → 狗的 gate OPEN", "PASS" if t1 else "FAIL",
+                            f"{env.name(ha)} → {env.name(hg)}：" + (f"{t1 - t0:.2f} s" if t1 else "10 s 內沒有 OPEN"),
+                            latency=round(t1 - t0, 3) if t1 else None)
+            if self.want("G2") and ok:
+                self.segment("G2", "incident update: gateway accepts, revision 1", "gateway accepts the update; whole team sees incident revision 1")
+                upd = {"task_id": air, "position_valid": True, "position": {"x": float(ux + 7), "y": float(uy), "z": 0.0},
+                       "radius": 1.5, "track_id": 88, "declares_localized": True}
+                run.publish("incident", ha, upd)
+                acc = self.wait_file(self.incident_file, ["incident_revision: 1", f"incident_id: {inc}"], 10)
+                rev = run.until(lambda: run.teammates.get(hg, ({}, 0))[0].get("incident_revision") == 1, 10)
+                still = self.gate(hg, 1) == 0
+                res.add("G2", "incident：閘道接受、全隊 revision 1、定位在新 revision 有效",
+                        "PASS" if acc and rev and still else "FAIL",
+                        f"incident_updates {'有' if acc else '沒有'}、{env.name(hg)} 的 revision "
+                        f"{run.teammates.get(hg, ({}, 0))[0].get('incident_revision')}、gate {self.gate(hg, 1)}")
+            # 假 Planner：收到 incident_updates（revision 1）→ 依新位置重新展開；front 的觀察點跟著目標移動（spec 改了）→ 改版，
+            # overwatch 的 spec 沒變 → 不改版（使用者 11/16：只有 TaskSpec 實際改變的角色才增加 task revision）
+            if self.want("G6") and ok and self.file_has(self.incident_file, "incident_revision: 1"):
+                self.segment("G6", "planner revises only the changed role", "only the role whose TaskSpec changed gets task revision 2")
+                new_spec = wait_spec.replace('"action": "go_to"}', '"action": "go_to", "location": {"x": 9.0, "y": 1.0, "z": 0.0}}')
+                try:
+                    self.inject(inc, "front", 1, 2, 2, GROUND, dx + 9, dy + 1, spec=new_spec, precedence=1, revision=2,
+                                incident_revision=1, want="revised")
+                    revised = run.until(lambda: self.assigned_revision(hg, ground) == 2, 10)
+                    air_rev = self.assigned_revision(ha, air)
+                    res.add("G6", "假 Planner：incident 更新後只改版 TaskSpec 改了的角色",
+                            "PASS" if revised and air_rev == 1 else "FAIL",
+                            f"{env.name(hg)} 的 current_task revision {self.assigned_revision(hg, ground)}（要 2）、"
+                            f"空中角色 revision {air_rev}（要 1）")
+                except RuntimeError as e:
+                    res.add("G6", "假 Planner：incident 更新後改版", "FAIL", str(e)[:300])
+            self.cancel([air, ground])
+            run.sleep(2.0)
+
+        # ---------- G3：會合點 ----------
+        if self.want("G3"):
+            self.segment("G3", "sync point: start together", "first dog to arrive WAITS; when both arrived, both gates OPEN")
+            inc = self.incident_name("sync")
+            sync_spec = '{"steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", "sync": "meet"}]}'
+            a = self.inject(inc, "front", 0, 2, 2, GROUND, dx + 5, dy, spec=sync_spec, distinct=3, sync_window=30)
+            b = self.inject(inc, "rear", 1, 2, 2, GROUND, dx + 8, dy, spec=sync_spec, distinct=3, sync_window=30)
+            ha, _ = self.wait_holder(a, 15)
+            hb, _ = self.wait_holder(b, 15)
+            if ha is None or hb is None or ha == hb:
+                res.add("G3", "會合點", "FAIL", f"指派（{ha}、{hb}）")
+            else:
+                self.wait_arrived(ha, a, 40)
+                self.note(f"{env.name(ha)} arrived, waiting at sync point", vehicle=ha)
+                self.progress(ha, a, 6, 1)
+                run.sleep(2.0)
+                early = self.gate(ha, 1)
+                self.wait_arrived(hb, b, 40)
+                self.note(f"{env.name(hb)} arrived", vehicle=hb)
+                self.progress(hb, b, 6, 1)
+                t0 = time.time()
+                ta = self.wait_gate(ha, 1, 0, 10)
+                tb = self.wait_gate(hb, 1, 0, 10)
+                if ta and tb:
+                    self.key("G3", f"{env.name(ha)} waited; both arrived -> both gates OPEN")
+                res.add("G3", "會合點：都到了才一起開始", "PASS" if early == 1 and ta and tb else "FAIL",
+                        f"只有 {env.name(ha)} 到時 gate {early}（要 1 WAITING）；兩隻都到後 " +
+                        (f"{max(ta, tb) - t0:.2f} s 都 OPEN" if ta and tb else "沒有都 OPEN"))
+            self.cancel([a, b])
+            run.sleep(2.0)
+
+        # ---------- G4：distinct 案例 1 ----------
+        if self.want("G4"):
+            self.segment("G4", "distinct roles: different dogs", "front and rear go to two different dogs (distinct_agent_set)")
+            inc = self.incident_name("dist")
+            f = self.inject(inc, "front", 0, 2, 2, GROUND, dx + 5, dy, distinct=3)
+            r = self.inject(inc, "rear", 1, 2, 2, GROUND, dx + 7, dy, distinct=3)
+            hf, _ = self.wait_holder(f, 15)
+            hr, _ = self.wait_holder(r, 15)
+            if hf and hr:
+                self.key("G4", f"front -> {env.name(hf)}, rear -> {env.name(hr)}")
+            res.add("G4", "distinct：靠近的狗只拿一個角色", "PASS" if hf and hr and hf != hr else "FAIL",
+                    f"front {env.name(hf) if hf else '無'}、rear {env.name(hr) if hr else '無'}")
+            self.cancel([f, r])
+            run.sleep(2.0)
+
+        # ---------- G5：distinct 案例 2（all-or-nothing 湊不齊 → fallback） ----------
+        if self.want("G5"):
+            self.segment("G5", "all-or-nothing incomplete -> cancel + fallback", "4 mandatory roles but 3 dogs: no current_task; after 10 s the group is cancelled + fallback")
+            inc = self.incident_name("aon")
+            n = len(dogs) + 1
+            mask = (1 << n) - 1
+            since = time.time()
+            tids = [self.inject(inc, f"role{i}", i, n, 2, GROUND, dx + 3 * i, dy, all_or_nothing=True, distinct=mask,
+                                fallback="single_dog_verify") for i in range(n)]
+            run.sleep(6.0)
+            assigned_early = [t for t in tids if run.ever_held(t, since)]
+            fb = self.wait_file(self.fallback_file, ["fallback_template: single_dog_verify", "failure_version: 1"], 15)
+            closed = run.until(lambda: all(t in run.closed.get(dogs[0], {}) for t in tids), 5)
+            if fb and closed:
+                self.key("G5", f"no current_task for {n} roles; group cancelled + fallback")
+            res.add("G5", "all-or-nothing 湊不齊：不發任務，10 s 後整組取消、FallbackRequest",
+                    "PASS" if not assigned_early and fb and closed else "FAIL",
+                    f"{n} 個角色、{len(dogs)} 隻狗；發過 current_task 的 {len(assigned_early)} 個；"
+                    f"fallback_request {'有' if fb else '沒有'}；整組 {'已' if closed else '沒有'}取消")
+            if not closed:
+                self.cancel(tids)
+            # 假 Planner：收到 fallback_request → 展開 fallback 範本（single_dog_verify：一個地面角色，新的事件）
+            if self.want("G7"):
+                req = self.read_fallback() if fb else None
+                if not req:
+                    res.add("G7", "假 Planner：fallback 範本", "FAIL", "沒有 fallback_request")
+                else:
+                    self.segment("G7", "planner injects fallback template", "planner expands single_dog_verify; a dog takes it")
+                    since = time.time()
+                    fb_inc = f"{req.get('incident_id', inc)}-fallback-{req.get('failure_version', '1')}"
+                    tid = self.inject(fb_inc, "verify", 0, 1, 2, GROUND, dx + 3, dy)
+                    h, t = self.wait_holder(tid, 15)
+                    res.add("G7", "假 Planner：收到 fallback_request → 注入降級的組、有狗接",
+                            "PASS" if h is not None else "FAIL",
+                            f"範本 {req.get('fallback_template')}、failure_version {req.get('failure_version')}；" +
+                            (f"{env.name(h)} {t - since:.1f} s 拿到" if h is not None else "15 s 內沒人接"))
+                    if h is not None:
+                        self.finish_role(tid)
+
+        self.run_team(dogs, uavs, GROUND, AIR)
+        self.animate()
+
+    # ---------- G8～G13：團隊 CBBA 的其他行為（2026-11-16） ----------
+    def run_team(self, dogs, uavs, GROUND, AIR):
+        env, run, res = self.env, self.run, self.res
+        uav = uavs[0]
+
+        # ---------- G8：異質分工 ----------
+        if self.want("G8"):
+            self.segment("G8", "heterogeneous roles: platform filter + TDR bids", "UAV-only role -> UAV, dog-only role -> dog, any-platform role -> highest TDR bid")
+            inc = self.incident_name("hetero")
+            ux, uy = self.here(uav)
+            dx, dy = self.here(dogs[0])
+            mx, my = (ux + dx) / 2, (uy + dy) / 2
+            t_air = self.inject(inc, "air", 0, 3, 1, AIR, ux + 4, uy + 4, distinct=0)
+            t_gnd = self.inject(inc, "ground", 1, 3, 2, GROUND, dx + 4, dy - 3)
+            t_any = self.inject(inc, "any", 2, 3, 0, ["rgb_camera"], mx, my + 6)
+            got = {t: self.wait_holder(t, 20) for t in (t_air, t_gnd, t_any)}
+            h_air, h_gnd, (h_any, t_assign) = got[t_air][0], got[t_gnd][0], got[t_any]
+            run.sleep(1.0)
+            bids = self.bids_at(t_any, (t_assign or time.time()) + 0.5)
+            positive = {v: b for v, (b, _) in bids.items() if b > 0}
+            best = max(positive.values()) if positive else None
+            win_bid = bids.get(h_any, (None, ""))[0] if h_any is not None else None
+            ok = (h_air is not None and not env.is_dog(h_air) and h_gnd is not None and env.is_dog(h_gnd) and
+                  h_any is not None and win_bid is not None and best is not None and win_bid >= best - 1e-3)
+            table = "、".join(f"{env.name(v)} {b:.1f}（{w}）" for v, (b, w) in sorted(bids.items()))
+            res.add("G8", "異質分工：限定的角色只給對的平台，不限平台的由 TDR 出價最高者得標", "PASS" if ok else "FAIL",
+                    f"空中 → {env.name(h_air) if h_air else '無'}、地面 → {env.name(h_gnd) if h_gnd else '無'}、"
+                    f"不限 → {env.name(h_any) if h_any else '無'}；不限平台的出價：{table or '（log 裡沒有）'}")
+            if h_any is not None:
+                self.key("G8", f"air -> {env.name(h_air) if h_air else '-'}, ground -> {env.name(h_gnd) if h_gnd else '-'}, "
+                         f"any -> {env.name(h_any)}" + (f" (top bid {win_bid:.1f})" if win_bid is not None else ""))
+            for t in (t_air, t_gnd, t_any):
+                self.finish_role(t)
+
+        # ---------- G9：失聯接手成功（做法 A） ----------
+        if self.want("G9"):
+            self.segment("G9", "holder lost -> wait takeover (P0 10 s) -> another dog takes over", "holder goes offline: wait the P0 takeover limit (10 s), another dog takes over; no cancel, no fallback")
+            inc = self.incident_name("takeover")
+            dx, dy = self.here(dogs[0])
+            tid = self.inject(inc, "front", 0, 1, 2, GROUND, dx + 6, dy, fallback="fb_takeover")
+            h, _ = self.wait_holder(tid, 15)
+            if h is None:
+                res.add("G9", "失聯接手成功", "FAIL", "沒人拿到任務")
+            else:
+                self.wait_arrived(h, tid, 30)
+                t_k = self.crash(h)
+                self.timer("since offline")
+                h2, t2 = self.wait_holder(tid, 30, exclude=(h,))
+                if h2 is not None:
+                    self.key("G9", f"{env.name(h2)} takes over {t2 - t_k:.1f} s after offline (limit 10 s)")
+                run.until(lambda: False, max(0.0, t_k + 25 - time.time()))   # 舊規則在 ≈ 11.5 s 會取消，多等到 25 s
+                fb = self.fallback_for(inc)
+                if not fb:
+                    self.key("G9", "25 s after offline: group kept, no fallback")
+                ok = h2 is not None and t2 - t_k >= 10.0 and not fb and not self.closed_anywhere(tid)
+                res.add("G9", "失聯接手成功：等 P0 接手時限後別台接手，組不取消、沒有 fallback", "PASS" if ok else "FAIL",
+                        f"{env.name(h)} 斷線 → " + (f"{env.name(h2)} {t2 - t_k:.1f} s 後接手（要 ≥ 10 s）" if h2 else
+                                                     "30 s 內沒人接手") + f"；fallback {'有（錯）' if fb else '沒有'}",
+                        latency=round(t2 - t_k, 2) if h2 else None)
+                if h2 is not None:
+                    self.finish_role(tid)
+                self.revive(h)
+
+        # ---------- G10：接手逾時才 fallback ----------
+        if self.want("G10"):
+            self.segment("G10", "only one capable dog lost -> fallback after takeover + 10 s", "only capable dog offline: takeover ~11.5 s, then 10 s recovery -> RECOVERY_TIMEOUT ~21.5 s, cancel + fallback")
+            d0 = dogs[0]
+            others = [d for d in dogs if d != d0]
+            for d in others:
+                self.set_mode(d, 1)
+            self.note("other dogs MANUAL (not bidding): only " + env.name(d0) + " can do ground roles")
+            run.sleep(2.0)
+            inc = self.incident_name("timeout")
+            dx, dy = self.here(d0)
+            ux, uy = self.here(uav)
+            g = self.inject(inc, "ground", 0, 2, 2, GROUND, dx + 5, dy, fallback="fb_timeout")
+            a = self.inject(inc, "overwatch", 1, 2, 1, AIR, ux + 4, uy + 3, precedence=1, fallback="fb_timeout")
+            hg, _ = self.wait_holder(g, 15)
+            ha, _ = self.wait_holder(a, 15)
+            if hg is None or ha is None:
+                res.add("G10", "接手逾時才 fallback", "FAIL", f"指派（地面 {hg}、空中 {ha}）")
+            else:
+                self.wait_arrived(hg, g, 30)
+                t_k = self.crash(hg)
+                self.timer("since offline")
+                run.until(lambda: self.fallback_for(inc) or self.closed_anywhere(g), 19.0)
+                early = self.fallback_for(inc) or self.closed_anywhere(g)
+                t_fb = run.until(lambda: self.fallback_for(inc), max(1.0, t_k + 32 - time.time()))
+                both = run.until(lambda: self.closed_anywhere(g) and self.closed_anywhere(a), 5.0)
+                if t_fb:
+                    self.key("G10", f"RECOVERY_TIMEOUT {t_fb - t_k:.1f} s after offline -> both roles cancelled, fallback")
+                ok = not early and t_fb is not None and 20.0 <= t_fb - t_k <= 30.0 and both is not None
+                res.add("G10", "接手逾時才 fallback：撤銷後 10 s 沒人接 → 取消失效＋依賴的角色、fallback",
+                        "PASS" if ok else "FAIL",
+                        f"斷線後 19 s 內{'有（錯）' if early else '沒有'}取消；fallback " +
+                        (f"{t_fb - t_k:.1f} s（要 20～30 s，規則 ≈ 21.5 s）" if t_fb else "沒有") +
+                        f"；兩個角色{'都' if both else '沒有都'}取消", latency=round(t_fb - t_k, 2) if t_fb else None)
+                self.revive(hg)
+            for d in others:
+                self.set_mode(d, 0)
+            run.sleep(2.0)
+
+        # ---------- G11：非 all-or-nothing 的連鎖撤銷 ----------
+        if self.want("G11"):
+            self.segment("G11", "cancel role A -> dependent B cancelled, independent C continues", "cancel A: B (depends on A) is cancelled, C keeps going, fallback is sent")
+            inc = self.incident_name("cascade")
+            dx, dy = self.here(dogs[0])
+            ux, uy = self.here(uav)
+            a = self.inject(inc, "A_ground", 0, 3, 2, GROUND, dx + 4, dy, fallback="fb_cascade")
+            b = self.inject(inc, "B_after_A", 1, 3, 1, AIR, ux + 3, uy + 4, precedence=1, fallback="fb_cascade")
+            c = self.inject(inc, "C_indep", 2, 3, 2, GROUND, dx + 6, dy - 4, fallback="fb_cascade")
+            held = all(self.wait_holder(t, 15)[0] is not None for t in (a, b, c))
+            run.sleep(2.0)
+            self.note("operator cancels role A")
+            self.cancel([a])
+            b_closed = run.until(lambda: self.closed_anywhere(b), 6.0)
+            fb = self.wait_file(self.fallback_file, [f"incident_id: {inc}"], 6.0)
+            run.sleep(2.0)
+            c_alive = bool(run.holders(c)) and not self.closed_anywhere(c)
+            if b_closed and c_alive:
+                self.key("G11", "A cancelled -> B cancelled, C continues" + (", fallback sent" if fb else ""))
+            res.add("G11", "連鎖撤銷：取消 A → 依賴 A 的 B 取消、不依賴的 C 照做、fallback",
+                    "PASS" if held and b_closed and fb and c_alive else "FAIL",
+                    f"指派 {'齊' if held else '不齊'}；B {'已' if b_closed else '沒有'}取消；"
+                    f"C {'照做' if c_alive else '被取消或沒人拿'}；fallback {'有' if fb else '沒有'}")
+            if c_alive:
+                self.finish_role(c)
+
+        # ---------- G12：optional 略過 ----------
+        if self.want("G12"):
+            self.segment("G12", "optional air role, no UAV available -> skipped", "no UAV available: optional air role SKIPPED, ground role continues")
+            for u in uavs:
+                self.set_mode(u, 1)
+            self.note("all UAVs MANUAL (not bidding)")
+            run.sleep(2.0)
+            inc = self.incident_name("optional")
+            dx, dy = self.here(dogs[0])
+            g = self.inject(inc, "ground", 0, 2, 2, GROUND, dx + 4, dy + 2)
+            o = self.inject(inc, "overwatch_opt", 1, 2, 1, AIR, dx + 4, dy + 5, optional=True)
+            hg, _ = self.wait_holder(g, 15)
+            t_skip = run.until(lambda: self.closed_anywhere(o), 30.0)
+            logged = self.gcs_log_has(f"optional 角色 {self.task_name(o)} 略過")
+            g_alive = hg is not None and not self.closed_anywhere(g)
+            if t_skip:
+                self.key("G12", "optional air role SKIPPED (reason 4); ground role continues")
+            res.add("G12", "optional 略過：沒有能做的無人機 → 空中角色略過，地面角色照做",
+                    "PASS" if t_skip and logged and g_alive else "FAIL",
+                    f"空中角色 {'略過' if t_skip else '30 s 內沒有關閉'}（閘道 log {'有' if logged else '沒有'}「略過」）；"
+                    f"地面角色 {'照做（' + env.name(hg) + '）' if g_alive else '沒有照做'}")
+            if g_alive:
+                self.finish_role(g)
+            for u in uavs:
+                self.set_mode(u, 0)
+            run.sleep(2.0)
+
+        # ---------- G13：優先級搶占 ----------
+        # 只有一台能做：P3、P0 都要求 special_dog 的能力（其他狗出價 0、原因 capability，不會搶走）。
+        # 測的是唯一能做的那台正在做 P3 時，CBBA 會不會讓它中斷 P3 改做 P0，做完再接回 P3（P3 不算失敗、不被關閉）
+        sp = self.special_dog()
+        if self.want("G13") and sp is None:
+            res.add("G13", "優先級搶占", "FAIL", "config 的 group.special_dog 沒設定、或那隻狗沒有啟動")
+        elif self.want("G13"):
+            self.segment("G13", "only " + env.name(sp[0]) + " can do P0/P3: it preempts its own P3 for P0", "the only capable dog interrupts its P3 for the P0, then returns to P3")
+            d = sp[0]
+            caps = GROUND + [sp[1]]
+            dx, dy = self.here(d)
+            p3 = self.inject(self.incident_name("patrol"), "patrol_P3", 0, 1, 2, caps, dx - 15, dy, priority=3)
+            h3, _ = self.wait_holder(p3, 15)
+            if h3 != d:
+                res.add("G13", "優先級搶占", "FAIL", f"P3 應該只有 {env.name(d)} 能做，實際 {env.name(h3) if h3 else '沒人'} 拿")
+            else:
+                run.sleep(4.0)    # 前往 P3 的途中
+                hx, hy = self.here(d)
+                self.note(f"P0 (needs {sp[1]}) injected; only {env.name(d)} can do it", vehicle=d)
+                t0 = time.time()
+                p0 = self.inject(self.incident_name("urgent"), "urgent_P0", 0, 1, 2, caps, hx + 2, hy + 2, priority=0)
+                t_sw = run.until(lambda: run.assigned.get(d, (None,))[0] == p0, 10.0)
+                p3_open = not self.closed_anywhere(p3)
+                if t_sw:
+                    self.key("G13", f"{env.name(d)} interrupts P3 -> P0 in {t_sw - t0:.2f} s")
+                    self.finish_role(p0)
+                h3b, _ = self.wait_holder(p3, 40)
+                if h3b == d:
+                    self.key("G13", f"{env.name(d)} returns to P3; nobody else took P0/P3")
+                others = sorted({u for (t, u, task, _) in run.history if task in (p0, p3) and u != d})
+                ok = t_sw is not None and p3_open and h3b == d and not others
+                res.add("G13", "優先級搶占：只有一台能做 → 它中斷 P3 改做 P0，做完再接回 P3（沒被別台搶、P3 沒被關閉）",
+                        "PASS" if ok else "FAIL",
+                        f"{env.name(d)} " + (f"{t_sw - t0:.2f} s 換成 P0" if t_sw else "10 s 內沒換成 P0") +
+                        f"；P3 {'沒被關閉' if p3_open else '被關閉（錯）'}、之後由 " +
+                        (env.name(h3b) if h3b is not None else "（40 s 內沒人）") + " 接回" +
+                        (f"；別台拿過：{'、'.join(env.name(u) for u in others)}（錯）" if others else ""),
+                        latency=round(t_sw - t0, 3) if t_sw else None)
+                if h3b is not None:
+                    self.finish_role(p3)
+
+        # ---------- G14：狗偵測到人 → 入侵範本 → CBBA 組隊（2026-11-17） ----------
+        caps = {"AIR": AIR, "GROUND": GROUND}
+        if self.want("G14"):
+            self.segment("G14", "dog detects a person -> gateway -> intrusion template -> CBBA team",
+                         "dog detection -> gateway -> template (overwatch optional + front + rear) -> CBBA picks the team; "
+                         "the source is not forced to win")
+            src = dogs[0]
+            sx, sy = self.here(src)
+            px, py = sx + 6.0, sy + 5.0
+            t_d = time.time()
+            self.detect(src, "person_yolo_v1", "person", px, py, track_id=77)
+            t_g, det = self.wait_detection(src, "person", t_d, 10)
+            if det is None:
+                res.add("G14", "狗偵測到人 → 入侵範本 → CBBA 組隊", "FAIL", f"10 s 內閘道沒收到 {env.name(src)} 的偵測")
+            else:
+                pos_ok = det["x"] is not None and math.dist((det["x"], det["y"]), (px, py)) < 0.1
+                self.key("G14", f"detection from {env.name(src)} reached the gateway in {t_g - t_d:.2f} s")
+                name, inc, roles, gid, _ = self.plan_from_detection(det, caps)
+                # 去重：同一個偵測再給假 Planner 一次 → 同一個 incident，閘道冪等、不建第二組
+                _, _, roles2, gid2, dup = self.plan_from_detection(det, caps)
+                dedup_ok = dup and roles2 == roles and gid2 == gid
+                res.add("G14D", "去重：同一個偵測重送給規劃器 → 閘道回同一組、不建第二組", "PASS" if dedup_ok else "FAIL",
+                        f"incident {inc}、group {gid}；重送 duplicate {dup}、task_id {'相同' if roles2 == roles else '不同'}")
+                hold = {r: self.wait_holder(t, 25) for r, t in roles.items()}
+                h = {r: v[0] for r, v in hold.items()}
+                ha, hf, hr = h["aerial_overwatch"], h["front"], h["rear"]
+                t_team = max((v[1] for v in hold.values() if v[1]), default=None)
+                team_ok = (ha is not None and not env.is_dog(ha) and hf is not None and hr is not None and
+                           env.is_dog(hf) and env.is_dog(hr) and hf != hr)
+                spec_ok = all((m := self.assigned_msg(v, roles[r])) is not None and f'"template":"{name}"' in
+                              (m.get("spec") or "") and int(m.get("group_id", 0)) == gid
+                              for r, v in h.items() if v is not None)
+                gates = done = assoc_ok = False
+                if team_ok:
+                    self.key("G14", f"team: overwatch {env.name(ha)}, front {env.name(hf)}, rear {env.name(hr)} "
+                             f"(source {env.name(src)})")
+                    self.wait_arrived(ha, roles["aerial_overwatch"], 40)
+                    self.progress(ha, roles["aerial_overwatch"], 4, 1, ["target_localized"])
+                    for r, v in (("front", hf), ("rear", hr)):
+                        self.wait_arrived(v, roles[r], 40)
+                        self.progress(v, roles[r], 6, 1)
+                    gates = all(self.wait_gate(v, 1, 0, 10) for v in (hf, hr))
+                    tm = [run.teammates.get(v, ({}, 0))[0] for v in (hf, hr)]
+                    assoc_ok = all(int(m.get("group_id", 0)) == gid for m in tm) and \
+                        len({m.get("incident_revision") for m in tm}) == 1
+                    for t in roles.values():
+                        self.finish_role(t)
+                    done = run.until(lambda: all(self.closed_anywhere(t) for t in roles.values()), 10) is not None
+                    if gates and done:
+                        self.key("G14", "both dogs OPEN after UAV localized and both arrived; all roles DONE")
+                ok = pos_ok and team_ok and spec_ok and gates and assoc_ok and done
+                res.add("G14", "狗偵測到人 → 閘道 → 假 Planner 入侵範本 → CBBA 組隊 → 執行完成", "PASS" if ok else "FAIL",
+                        f"來源 {env.name(src)}（位置{'正確' if pos_ok else '不對'}）、偵測到閘道 {t_g - t_d:.2f} s；"
+                        f"範本 {name}：overwatch {env.name(ha) if ha else '無'}、front {env.name(hf) if hf else '無'}、"
+                        f"rear {env.name(hr) if hr else '無'}" + (f"，偵測到組隊 {t_team - t_d:.1f} s" if t_team else "") +
+                        f"；TaskSpec／group {'一致' if spec_ok else '不一致'}；teammates {'一致' if assoc_ok else '不一致'}；"
+                        f"gate {'都 OPEN' if gates else '沒有都 OPEN'}；{'全部完成' if done else '沒有全部完成'}",
+                        latency=round(t_team - t_d, 2) if t_team else None)
+
+        # ---------- G15：UAV 偵測到火 → 火警範本 → 狗接手（2026-11-17） ----------
+        if self.want("G15"):
+            self.segment("G15", "UAV detects fire -> gateway -> fire template -> a dog takes over",
+                         "UAV detection -> gateway -> fire_response (air watch optional + ground verify) -> a dog takes "
+                         "the ground role; UAVs bid 0 for it")
+            src = uav
+            late = dogs[-1]
+            self.crash(late)     # 弱網補發：建組時離線，回來後要補到任務定義
+            sx, sy = self.here(src)
+            fx, fy = sx + 5.0, sy + 4.0
+            t_d = time.time()
+            self.detect(src, "apriltag_fire", "fire", fx, fy, track_id=101)
+            t_g, det = self.wait_detection(src, "fire", t_d, 10)
+            if det is None:
+                res.add("G15", "UAV 偵測到火 → 火警範本 → 狗接手", "FAIL", f"10 s 內閘道沒收到 {env.name(src)} 的偵測")
+                self.revive(late)
+            else:
+                pos_ok = det["x"] is not None and math.dist((det["x"], det["y"]), (fx, fy)) < 0.1
+                self.key("G15", f"detection from {env.name(src)} reached the gateway in {t_g - t_d:.2f} s")
+                name, inc, roles, gid, _ = self.plan_from_detection(det, caps)
+                gv, aw = roles["ground_fire_verify"], roles["air_fire_watch"]
+                hg, tg = self.wait_holder(gv, 25)
+                ha, _ = self.wait_holder(aw, 25)
+                run.sleep(1.0)
+                bids = self.bids_at(gv, (tg or time.time()) + 0.5)
+                uav_bids = {v: b for v, (b, _) in bids.items() if not env.is_dog(v)}
+                uav_zero = bool(uav_bids) and all(b == 0 for b in uav_bids.values())
+                cross_ok = hg is not None and env.is_dog(hg)
+                if cross_ok:
+                    self.key("G15", f"ground_fire_verify -> {env.name(hg)}; UAVs bid 0 (source {env.name(src)})")
+                t_r = time.time()
+                self.revive(late)
+                repaired = run.until(lambda: all(t in run.known.get(late, {}) for t in roles.values()), 15)
+                res.add("G15R", "補發：建組時離線的狗回來後補到任務定義", "PASS" if repaired else "FAIL",
+                        f"{env.name(late)} 回來 " + (f"{repaired - t_r:.1f} s 後認得兩個角色" if repaired else "15 s 內沒補到"))
+                if repaired:
+                    self.key("G15", f"{env.name(late)} back online: missing task definitions repaired")
+                for t in (gv, aw):
+                    self.finish_role(t)
+                done = run.until(lambda: self.closed_anywhere(gv) and self.closed_anywhere(aw), 10) is not None
+                ok = pos_ok and cross_ok and uav_zero and done
+                res.add("G15", "UAV 偵測到火 → 閘道 → 假 Planner 火警範本 → 狗接手地面角色", "PASS" if ok else "FAIL",
+                        f"來源 {env.name(src)}（位置{'正確' if pos_ok else '不對'}）、偵測到閘道 {t_g - t_d:.2f} s；"
+                        f"ground_fire_verify → {env.name(hg) if hg else '無'}、air_fire_watch → {env.name(ha) if ha else '無'}；"
+                        f"無人機對地面角色的出價 " + "、".join(f"{env.name(v)} {b:.0f}" for v, b in sorted(uav_bids.items())) +
+                        f"；{'全部完成' if done else '沒有全部完成'}", latency=round(tg - t_d, 2) if tg else None)
+
+    # ---------- 動畫 ----------
+    def animate(self):
+        env, run = self.env, self.run
+        if self.plan["segments"]:
+            self.plan["segments"][-1].setdefault("t1", time.time())
+        self.plan["results"] = {r["code"]: r["status"] for r in self.res.rows}
+        with open(os.path.join(run.out, "group_plan.json"), "w", encoding="utf-8") as f:
+            json.dump(self.plan, f, ensure_ascii=False, indent=1)
+        frames = os.path.join(run.out, "frames")
+        env.exec(env.sim(), f"python3 {env.repo}/docker/itest/animate_group.py {run.cout} --frames {run.cout}/frames",
+                 log=f"{run.cout}/animate.log")
+        encode_frames(frames, os.path.join(run.out, "group.mp4"))
 
 
 # -----------------------------------------------------------------------------
@@ -3195,7 +4089,7 @@ class DemoSuite(UavSuite):
 # =============================================================================
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("suite", choices=["comm", "uav", "loss", "demo"])
+    ap.add_argument("suite", choices=["comm", "uav", "loss", "demo", "group"])
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"))
     ap.add_argument("--only", default="")
     ap.add_argument("--kill-existing", action="store_true")
@@ -3252,9 +4146,12 @@ def main():
             print(f"--node-param 要寫成 KEY=VALUE：{kv}")
             return 2
         env.node_params.append((k.strip(), v.strip()))
+    if args.suite == "group" and args.dogs < 2:
+        print("group 要 --dogs 2 以上（CB-4 的地面角色組；docker/.env 的 DOG_COUNT 要夠）")
+        return 2
     if args.dogs:
-        if args.suite not in ("comm", "loss"):
-            print("--dogs 只用在 comm、loss（demo 的狗照 --dog）")
+        if args.suite not in ("comm", "loss", "group"):
+            print("--dogs 只用在 comm、loss、group（demo 的狗照 --dog）")
             return 2
         env.add_dogs(args.dogs)
     if args.tasks is None:
@@ -3264,7 +4161,8 @@ def main():
     only = {s.strip() for s in args.only.split(",") if s.strip()}
 
     # 容器沒開時 docker exec 直接失敗，連紀錄檔都不會有（2026-10-24：容器停了 33 小時，只看到「ros_bridge 沒有啟動」）
-    need = [env.sim()] + [env.uav(v) for v in env.ids] + (env.dog_containers() if args.suite == "demo" else [])
+    need = [env.sim()] + [env.uav(v) for v in env.ids] + (env.dog_containers() if args.suite == "demo" else []) + \
+        ([env.cfg["group"]["container"]] if args.suite == "group" else [])
     down = [c for c in dict.fromkeys(need)
             if subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", c],
                               capture_output=True, text=True).stdout.strip() != "true"]
@@ -3283,6 +4181,10 @@ def main():
                 "record_cameras.py"):
         if env.running(env.sim(), pat):
             busy.append((env.sim(), pat))
+    if args.suite == "group":
+        for pat in (env.cfg["group"]["gateway_stop_pattern"], env.cfg["group"]["echo_pattern"]):
+            if env.running(env.cfg["group"]["container"], pat):
+                busy.append((env.cfg["group"]["container"], pat))
     dog = env.cfg.get("dog")
     for pat in ((dog["stop_pattern"], dog.get("bt_stop_pattern")) if dog else ()):
         for dc in env.dog_containers():
@@ -3327,6 +4229,8 @@ def main():
             scenario["_file"] = os.path.basename(path)
         suite = DemoSuite(env, run, only, args.hold, seed, args.speed, not args.no_record, args.fire_mode, scenario,
                           args.interactive, args.area, not args.no_patrol)
+    elif args.suite == "group":
+        suite = GroupSuite(env, run, only)
     else:
         suite = (CommSuite if args.suite == "comm" else UavSuite)(env, run, only)
     try:
@@ -3351,7 +4255,9 @@ def main():
             # 一直累積；而且容器的主程序也是 sleep infinity，不能用它比對）
             for pat in ("bin/px4 -i", "gz[ ]sim", "parameter_bridge", "tail -f /dev/null", "record_cameras.py"):
                 env.pkill_hard(env.sim(), pat)
-        if args.suite in ("comm", "loss"):
+        if args.suite == "group":
+            suite.stop_gateway()
+        if args.suite in ("comm", "loss", "group"):
             for vid in env.ids:
                 env.exec(env.uav(vid), "mesh_tc.sh clear")
         if args.suite == "demo" and (getattr(suite, "scenario", None) or {}).get("blackout"):
@@ -3359,7 +4265,7 @@ def main():
             for c in dict.fromkeys([env.uav(v) for v in env.ids] + env.dog_containers()):
                 env.exec(c, "mesh_tc.sh clear")
     title = {"comm": "CBBA 之間的通訊", "uav": "UAV 整串", "loss": "弱網量測（掉包梯度）",
-             "demo": "展示（Gazebo＋GIF）"}[args.suite]
+             "demo": "展示（Gazebo＋GIF）", "group": "角色組（CB-4）"}[args.suite]
     return 1 if suite.res.write(out_dir, f"整合測試：{title}") else 0
 
 

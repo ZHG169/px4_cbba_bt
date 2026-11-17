@@ -27,6 +27,7 @@ python3 docker/itest/itest.py loss --tasks 3                   # 每次 3 個任
 python3 docker/itest/itest.py loss --dogs 3                    # 空地（2026-11-09）：3 架無人機＋3 隻狗，每次 12 個任務（空中 6、火警＋巡檢 6）
 python3 docker/itest/itest.py comm --dogs 3 --only C9          # 100% 斷網，空地各自退化成單機
 python3 docker/itest/itest.py demo --world yard --scenario blackout --seed 7 --dog bt   # 100% 斷網的任務退化（真的 BT，報告 B1～B4）
+python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（CB-4，2026-11-16）：閘道注入角色組＋假身體、假 Planner，G0～G13，約 8～10 分鐘；group.mp4
 ```
 
 容器裡已經有在跑的節點、PX4、Gazebo 時會停下來，避免打斷你正在做的事；加 `--kill-existing` 先關掉再跑。
@@ -49,6 +50,41 @@ python3 docker/itest/itest.py demo --world yard --scenario blackout --seed 7 --d
 | C7 | 掉包 30%、延遲 50±30 ms | 10 s 內恰好一台拿到；完成後撤下 |
 | C8 | 斷網 | 斷網時只有建立者拿到（證明協調走 mesh）；恢復後不重複 |
 | C9 | 100% 斷網（週計畫第 5 週） | 各台拿著身邊的任務 → 全部斷網 6 s：失聯後手上的照樣拿著、斷網中回報完成本機就確認結束、斷網中自己建的任務自己接（單機貪婪）；恢復後全隊都知道那些完成、知道新任務而且在原本那台，沒有重複認領、完成的沒再派。只跑這項：`--only C9` |
+
+**group：角色組（CB-4，2026-11-16）**（不開 PX4、BT；閘道 200 在 `cbba_gcs` 跑 cbba_node，`ros2 service call /gcs/inject_task` 注入角色組；
+其他台照 comm 的方式啟動、假 robot_state；BT 用 `task_progress`、`incident_update` 話題假裝；Planner 由 itest 自己扮演（讀 `gcs_incident_updates.txt`、`gcs_fallback_request.txt` 後 `inject_task`）。`/gcs/incident_updates`、`/gcs/fallback_request`
+用 `ros2 topic echo` 寫進輸出目錄的 `gcs_*.txt`，閘道的 log 是 `node_gcs.log`。要 `--dogs 2` 以上，`--dogs 3` 才跑得到 G5 的「角色比狗多」）
+
+載具是 ros_bridge 的**假身體**（2026-11-16，不用真的 BT）：收到 current_task 就直線走過去（無人機 0.5、狗 1.0 m/s，`group.body_speed`），
+到了才回報 progress／完成；`body_hold` 模擬斷線（同時停掉 cbba_node）、`body_mode` 改 mode（MANUAL 時不出價）。無人機的 cbba_node 用
+**預設參數**（`group.uav_start`：w_E 25、half_life 60/120/300/600 s、0.5 m/s、bundle 上限依平台）。結束後 `animate_group.py`
+（sim 容器畫每一格）＋主機 ffmpeg → **`group.mp4`**（4 倍速；每段測試一個標題，右邊列角色的執行者、狀態、gate 與事件）；`group_plan.json` 記每段的時間與角色。
+
+| 項目 | 測什麼 | 通過的條件 |
+|---|---|---|
+| G0 | 節點、閘道上線 | 每台的 assigned 收得到、閘道在跑 |
+| G1 | precedence | 空中角色（UAV）＋地面角色（step 1 wait_for target_localized）：狗的 gate WAITING；UAV 回報定位 → 10 s 內 OPEN（記時間） |
+| G2 | incident | UAV 發 incident_update＋宣告定位 → `/gcs/incident_updates` revision 1、狗的 teammates incident revision 1、gate 照樣 OPEN |
+| G3 | 會合點 | 兩個地面角色 step 1 sync "meet"：只有一隻到時 WAITING，兩隻都到後都 OPEN |
+| G4 | distinct 案例 1 | dog1 靠近 front、rear，其他狗遠：兩個角色由不同的狗拿 |
+| G5 | distinct 案例 2 | all-or-nothing、角色比狗多一個：不發 current_task；10 s（group_recovery_timeout_s）後整組取消、`fallback_request`（failure_version 1） |
+| G6 | 假 Planner：incident 更新後重新展開 | 只對 TaskSpec 改了的地面角色 `inject_task` 改版（revision 2、incident_revision 1）：閘道 REVISED、執行中的狗收到 revision 2 的 current_task；空中角色維持 revision 1 |
+| G7 | 假 Planner：fallback | 讀 `fallback_request`，展開 single_dog_verify（一個地面角色、新的事件）注入 → 15 s 內有狗接 |
+| G8 | 異質分工 | 限無人機、限狗、不限平台三個角色：限定的只給對的平台；不限平台的得標者在出價表（cbba_node log）裡出價最高 |
+| G9 | 失聯接手成功（做法 A） | 執行中的狗斷線 → ≥ 10 s（P0 接手時限）後別隻狗接手；25 s 內沒有 fallback、任務沒被關閉 |
+| G10 | 接手逾時才 fallback | 其他狗 MANUAL、只有一隻能做；它斷線後 19 s 內沒有取消，20～30 s（規則 ≈ 21.5 s）出現 fallback_request，地面角色和依賴它的空中角色都取消 |
+| G11 | 非 all-or-nothing 連鎖撤銷 | 取消 A → 依賴 A 的 B 在 6 s 內取消、fallback_request；不依賴的 C 照做 |
+| G12 | optional 略過 | 無人機都 MANUAL：optional 的空中角色 30 s 內被關閉、閘道 log「optional 角色 … 略過」；必要的地面角色照做 |
+| G13 | 優先級搶占 | 只有一台能做：dog3 多宣告 `manipulator`（`group.special_dog`），P3、P0 都要求它 → dog3 前往 P3 途中注入 P0：10 s 內中斷 P3 換成 P0，做完 40 s 內接回 P3；P3 沒被關閉、別台沒拿過 |
+| G14 | 狗偵測到人 → 入侵範本 | dog1 發 `detection`（person）→ `/gcs/detections`（來源、位置正確）→ 假 Planner（寫死）展開 perimeter_intrusion：aerial_overwatch（UAV、optional、skip_satisfies）＋front＋rear（狗、all-or-nothing、distinct、sync_window 15、inspect 等 target_localized）→ overwatch 給 UAV、front／rear 不同的狗；current_task 的 spec、group_id 一致；UAV 定位、兩隻狗到位後 gate 都 OPEN；全部完成 |
+| G14D | 去重 | 同一個偵測再給假 Planner 一次 → 閘道回 duplicate、同一組 task_id、group_id |
+| G15 | UAV 偵測到火 → 狗接手 | uav1 發 `detection`（fire）→ 假 Planner 展開 fire_response：air_fire_watch（UAV、optional）＋ground_fire_verify（狗）→ 地面角色給狗、每台 UAV 對它出價 0（出價表）；全部完成 |
+| G15R | 補發 | dog3 在建組前離線、建組後回來 → 15 s 內認得兩個角色（task_announced） |
+
+**影片 `group.mp4`**（2026-11-17，照〈CBBA G0～G15 測試與影片規劃〉第 8 頁）：約 80～90 s，章節順序：測試架構（4 s）→ ① 異質可行性 G8 → ② 必要角色完整性 G4＋G5 →
+③ Optional 降級 G12 → ④ 時序協同 G1＋G3 → ⑤ 一致與恢復 G9、G10、G11、G13 → G14 → G15 → 結論（G0～G15 狀態，沒跑的不標 PASS）。每段先顯示 Expected、
+關鍵狀態（itest 的 `key`）凍結 1.5 s 顯示 PASS／FAIL 證據、倍速依章節長度自動算（最多 8 倍，右上角顯示）、斷線後顯示計時器、G14／G15 用星號標偵測來源。
+圖示和 demo 一樣（無人機、狗、旗子；旗子顏色 = 優先級，空心 = optional，做完灰）；文字是英文（容器沒有中文字型）。
 
 **uav：UAV 整串**（`fire_site` 場景）
 

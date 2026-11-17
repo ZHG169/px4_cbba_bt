@@ -4,6 +4,10 @@
 sim 容器經線材網路連得到每一台 uav 的 DDS，所以在這裡：
   - 訂閱每台的 assigned、result、new_task（和 PX4 的位置、狀態），每則寫一行到 <dir>/events.jsonl
   - 讀 <dir>/commands.jsonl（itest.py 寫入），發話題、開始／停止週期性的假 robot_state
+  - 假身體（2026-11-16，itest group 的動畫；不用真的 BT）：收到 current_task 就直線走向任務點（速度由 itest 給），
+    到了發 {"kind": "arrived"}；位置寫成 robot_state（10 Hz）與 {"kind": "pos"}（5 Hz）。task_id = 0 或 CANCELLED → 停下。
+    body_hold 讓它停在原地（模擬當機）、body_mode 改 robot_state 的 mode（MANUAL 時 cbba_node 不出價）、
+    note 寫一筆說明給動畫（{"kind": "note"}）
 
 只看話題，不看任何節點的 log；話題名稱、型別、QoS 都由 config.json 決定，換成別人的實作時不用改這裡。
 時間用 time.time()（主機和容器共用核心的時鐘），itest.py 才能和自己的時間比較。
@@ -41,11 +45,15 @@ class Bridge(Node):
         self.periodic = {}          # key -> (publisher, msg, period, next)
         self.pending = []           # 等訂閱者出現的一次性訊息：(publisher, msg, id, deadline)
         self.last_pos = {}          # 位置每台最多 5 Hz 寫一次
+        self.bodies = {}            # 假身體：機號 -> {x, y, speed, task, target, arrived, frozen, pub, msg, next}
+        self.last_body = time.time()
         ids = cfg["vehicles"]["ids"]
         topics = cfg["topics"]
         # announced（task_announced：這台知道的任務）、path（cbba_path：這台的 bundle）給弱網測試算「每台該收到幾個任務」
         # （2026-10-27）；設定裡沒有就不訂（換成別人的 CBBA Node 時）
-        watch = ["assigned", "result", "new_task"] + [k for k in ("closed", "announced", "path", "tx") if k in topics] + \
+        # teammates（2026-11-16，itest group：CB-4 的同組角色與 gate）
+        watch = ["assigned", "result", "new_task"] + \
+            [k for k in ("closed", "announced", "path", "tx", "teammates") if k in topics] + \
             (["px4_position", "px4_status"] if with_px4 else []) + \
             (["px4_battery"] if with_px4 and "px4_battery" in topics else [])
         self.subs = []
@@ -121,6 +129,15 @@ class Bridge(Node):
             # cbba_node 送出位元組的累計 [全部, 重傳, 轉送]（2026-11-09，第 5 週頻寬圖），每 0.2 s 一筆，只記數字
             self.emit({"kind": "tx", "uav": vid, "d": [int(x) for x in msg.data]})
             return
+        if kind == "assigned" and vid in self.bodies:
+            b = self.bodies[vid]
+            tid = int(msg.task_id)
+            if tid == 0 or int(msg.status) == 2:
+                b.update(task=0, target=None)
+            else:
+                target = (float(msg.position.x), float(msg.position.y))
+                if tid != b["task"] or target != b["target"]:   # 新任務，或同一個任務改版換了位置
+                    b.update(task=tid, target=target, arrived=False)
         self.emit({"kind": kind, "uav": vid, "msg": message_to_ordereddict(msg)})
 
     def on_dog(self, dog_id, msg):
@@ -172,6 +189,29 @@ class Bridge(Node):
             elif op == "stop_periodic":
                 self.periodic.pop(c["key"], None)
                 self.emit({"kind": "ack", "id": c["id"]})
+            elif op == "body":
+                pub = self.publisher(c["topic"], c["type"], c)
+                msg = self.build(c["type"], c["fields"])
+                self.bodies[c["vid"]] = dict(x=float(c["x"]), y=float(c["y"]), z=float(c.get("z", 0.0)),
+                                             speed=float(c["speed"]), task=0, target=None, arrived=False,
+                                             frozen=False, pub=pub, msg=msg, next=0.0)
+                self.emit({"kind": "body", "uav": c["vid"], "x": c["x"], "y": c["y"], "speed": c["speed"],
+                           "platform": c.get("platform", "")})
+                self.emit({"kind": "ack", "id": c["id"]})
+            elif op == "body_hold":
+                self.bodies[c["vid"]]["frozen"] = bool(c["hold"])
+                self.emit({"kind": "body_hold", "uav": c["vid"], "hold": bool(c["hold"])})
+                self.emit({"kind": "ack", "id": c["id"]})
+            elif op == "body_mode":
+                self.bodies[c["vid"]]["msg"].mode = int(c["mode"])
+                self.emit({"kind": "body_mode", "uav": c["vid"], "mode": int(c["mode"])})
+                self.emit({"kind": "ack", "id": c["id"]})
+            elif op == "body_off":
+                self.bodies.pop(c["vid"], None)
+                self.emit({"kind": "ack", "id": c["id"]})
+            elif op == "note":
+                self.emit({k: v for k, v in c.items() if k not in ("op", "id")} | {"kind": "note"})
+                self.emit({"kind": "ack", "id": c["id"]})
             elif op == "quit":
                 self.emit({"kind": "ack", "id": c["id"]})
                 raise SystemExit(0)
@@ -192,7 +232,33 @@ class Bridge(Node):
                 keep.append((pub, msg, cid, deadline))
         self.pending = keep
 
+    def tick_bodies(self):
+        now = time.time()
+        dt = min(0.2, now - self.last_body)
+        self.last_body = now
+        for vid, b in self.bodies.items():
+            if b["target"] is not None and not b["frozen"]:
+                tx, ty = b["target"]
+                dx, dy = tx - b["x"], ty - b["y"]
+                d = (dx * dx + dy * dy) ** 0.5
+                step = min(d, b["speed"] * dt)
+                if d > 1e-6:
+                    b["x"] += dx / d * step
+                    b["y"] += dy / d * step
+                if d - step <= 0.3 and not b["arrived"]:
+                    b["arrived"] = True
+                    self.emit({"kind": "arrived", "uav": vid, "task_id": b["task"], "x": b["x"], "y": b["y"]})
+            if now >= b["next"]:
+                b["next"] = now + 0.1
+                b["msg"].position.x = b["x"]
+                b["msg"].position.y = b["y"]
+                b["pub"].publish(b["msg"])
+            if now - self.last_pos.get(("body", vid), 0.0) >= 0.2:
+                self.last_pos[("body", vid)] = now
+                self.emit({"kind": "pos", "uav": vid, "x": round(b["x"], 3), "y": round(b["y"], 3), "z": b["z"]})
+
     def tick_periodic(self):
+        self.tick_bodies()
         now = time.time()
         for key, (pub, msg, period, nxt) in list(self.periodic.items()):
             if now >= nxt:

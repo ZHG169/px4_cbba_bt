@@ -60,7 +60,11 @@
     "tx":          {"name": "/{ns}/cbba_tx",       "type": "std_msgs/msg/UInt64MultiArray",   "reliable": true,  "transient_local": false},
     "px4_position": {"name": "/{ns}/fmu/out/vehicle_local_position_v1", "type": "px4_msgs/msg/VehicleLocalPosition", "reliable": false, "transient_local": false},
     "px4_status":   {"name": "/{ns}/fmu/out/vehicle_status_v1",         "type": "px4_msgs/msg/VehicleStatus",        "reliable": false, "transient_local": false},
-    "px4_battery":  {"name": "/{ns}/fmu/out/battery_status_v1",         "type": "px4_msgs/msg/BatteryStatus",        "reliable": false, "transient_local": false}
+    "px4_battery":  {"name": "/{ns}/fmu/out/battery_status_v1",         "type": "px4_msgs/msg/BatteryStatus",        "reliable": false, "transient_local": false},
+    "teammates":   {"name": "/{ns}/teammates",     "type": "swarm_interfaces/msg/Teammates",  "reliable": true,  "transient_local": true},
+    "progress":    {"name": "/{ns}/task_progress", "type": "swarm_interfaces/msg/TaskProgress", "reliable": true, "transient_local": false},
+    "incident":    {"name": "/{ns}/incident_update", "type": "swarm_interfaces/msg/IncidentUpdate", "reliable": true, "transient_local": false},
+    "detection":   {"name": "/{ns}/detection", "type": "swarm_interfaces/msg/Detection", "reliable": true, "transient_local": false}
   },
   "fields": {
     "task_id": "task_id",
@@ -78,6 +82,18 @@
     "result_failure": {"task_id": "{task_id}", "success": false, "detail": "ITEST", "reason": 2},
     "robot_state": {"agent_id": "{id}", "position": {"x": "{x}", "y": "{y}", "z": 5.0}, "battery": 90.0, "mode": 0},
     "_說明": "測試發的訊息；{...} 會換成數值。result_failure 的 reason 2 = TRANSIENT（失敗的那台 60 s 內不接）。robot_state 只在通訊測試用（mode 0 = AUTO，假裝已經起飛）"
+  },
+
+  "group": {
+    "container": "cbba_gcs",
+    "gateway_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/gcs -r __node:=gcs_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_gateway.yaml -p state_dir:={state_dir}",
+    "gateway_stop_pattern": "__node:=gcs_cbba_node( |$)",
+    "echo_pattern": "ros2 topic echo /gcs/",
+    "uav_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:=uav{id}_cbba_node -p agent_id:={id} -p agent_type:=UAV",
+    "body_speed": {"uav": 0.5, "dog": 1.0},
+    "special_dog": {"id": 52, "capability": "manipulator", "_說明": "G13：這隻狗多宣告一個能力，P3、P0 都要求它 → 只有它能做（其他狗出價 0、原因 capability）"},
+    "dog_positions": {"50": [0.0, 0.0], "51": [25.0, 0.0], "52": [0.0, 25.0]},
+    "_說明": "itest group（CB-4，2026-11-16）：閘道（機號 200）在 cbba_gcs 跑 cbba_node（cbba_gateway.yaml），用 ros2 service call /gcs/inject_task 注入角色組；/gcs/incident_updates、/gcs/fallback_request 用 ros2 topic echo 寫進輸出目錄（gcs 的 DDS 不經 mesh，sim 的 ros_bridge 看不到）。dog_positions 蓋掉 comm.dogs 的狗位置：dog1（50）在原點、dog2、dog3 在 25 m 外（distinct 的案例 1；2026-11-16 從 60 m 拉近，動畫裡走得到）。uav_start：無人機用 cbba_node 的預設參數（w_E 25、0.5 m/s、bundle 上限依平台），不用 comm 的 cruise_speed 5、max_bundle 5。body_speed：ros_bridge 假身體的速度（m/s），和 cbba_node 的速度一致"
   },
 
   "comm": {
