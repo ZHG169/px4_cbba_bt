@@ -7,6 +7,9 @@ uint8 PRECONDITION = 4          # 執行端回報 E_PRECONDITION：規劃錯誤�
 uint8 OPTIONAL_NO_CAPABLE = 5   # optional 角色略過 O1（閘道）
 uint8 OPTIONAL_UNASSIGNED = 6   # optional 角色略過 O2（閘道）
 uint8 OPTIONAL_GROUP_DONE = 7   # optional 角色略過 O3：同組必要角色都結束了（閘道）
+uint8 GROUP_INCOMPLETE = 8      # all-or-nothing 的組等了 group_commit_timeout（30 s）還沒湊齊（CB-4 第二批，2026-11-16）：
+                                # 排第一的那台發一次、繼續等（不建立正式指派）；取消或 fallback 由閘道決定（第三批）
+uint8 GROUP_BROKEN = 9          # 角色組的必要角色永久不可恢復（閘道，CB-4 第三批）：detail 寫原因、取消了哪些角色、有沒有 FallbackRequest
 
 Task task
 uint8 reason

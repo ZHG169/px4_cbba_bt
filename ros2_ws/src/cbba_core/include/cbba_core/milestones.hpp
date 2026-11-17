@@ -4,7 +4,7 @@
 // 名稱與 bit 也寫在註冊表 registry/actions.yaml 的 milestones，swarm_cbba 的 test_registry 檢查兩邊一致。
 //
 // 兩類（使用者 11/16 定）：
-//   執行者相關（accepted、en_route、arrived、started、target_locked）：跟著那一次正式指派；換人（新的指派版本）就清掉
+//   執行者相關（accepted、en_route、arrived、started、target_locked、sync_reached）：跟著那一次正式指派；換人（新的指派版本）就清掉
 //   事件結果（target_localized、has_observation）：關於目標本身，換人後保留，但只在「同一個 incident revision」而且
 //     任務還沒過期時算數（目標位置改版了，舊的定位就不算）。我們用前一個角色任務的 revision 代表 incident revision：
 //     第三批的 IncidentUpdate 會讓同組的任務一起改版
@@ -29,8 +29,9 @@ enum class Milestone : std::uint8_t
   TARGET_LOCKED = 5,      // 追蹤已鎖定
   HAS_OBSERVATION = 6,    // 已取得觀測（事件結果）
   COMPLETED = 7,          // 任務完成（TASK_CLOSE reason 1）
+  SYNC_REACHED = 8,       // 到了 sync 的那一步、等同伴（第二批；BT 回報 ARRIVED_WAITING 時 cbba_node 自動加）
 };
-constexpr unsigned kMilestoneCount = 8;
+constexpr unsigned kMilestoneCount = 9;
 
 using MilestoneMask = std::uint16_t;
 

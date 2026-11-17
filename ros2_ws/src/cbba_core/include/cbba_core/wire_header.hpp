@@ -68,6 +68,7 @@ enum class PacketType : std::uint8_t
   DETECTION = 10,      // 機器人的偵測 → 閘道（版本 4，2026-11-14），轉送
   DETECTION_ACK = 11,  // 閘道收到偵測的確認 → 機器人（版本 4，2026-11-14），轉送
   TASK_PROGRESS = 12,  // 角色的執行進度（版本 4，CB-4 第一批，2026-11-16），轉送；沒升級的節點在 parseHeader 丟掉
+  INCIDENT_UPDATE = 13,   // 組層級的 incident state：Proposal／Accepted／Rejected（版本 4，CB-4 第三批，2026-11-16），轉送
 };
 
 constexpr std::uint16_t kMagic = 0x4342;

@@ -20,7 +20,7 @@ cbba_core · 2026-10-07，2026-10-09 改成協定版本 2（見 [`protocol.md`](
 | 參數 | 預設 | 什麼時候要改 |
 |---|---|---|
 | `energy_per_meter`、`hover_energy_per_sec` | 0.5、0.2（SITL：0.022、0.111） | **一定要校正**。換機型、換電池、上實機都要重量 |
-| `energy_weight` | 50 | TDR（2026-11-15）的耗電權重 w_E：用掉全部可用電量相當於少多少分；暫定，`docs/sim_scenario_plan.md` 第八節的實驗調 |
+| `energy_weight` | 25 | TDR（2026-11-15）的耗電權重 w_E：用掉全部可用電量相當於少多少分；2026-11-16 依參數實驗從 50 改成 25（`docs/tdr_experiment_plan.md`） |
 | `half_life_by_priority` | [60, 120, 300, 600] s | 任務沒帶 half_life 時 P0～P3 的預設；越短越偏好先到的載具 |
 | `lost_timeout` | 1.5 s | 網路很差、常誤判失聯時加大（全隊要一樣） |
 | `takeover_by_priority` | [10, 15, 30, 30] s | 失聯接手：已接受任務的持有者失聯後多久重新競標，依優先級 P0～P3（2026-11-13；舊的 `takeover_fire`＝P0、`takeover_patrol`＝P1～P3 仍可用，當成它的預設）。全隊要一樣 |
@@ -132,7 +132,7 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `energy_weight` | 50 | **時間折扣報酬（TDR，2026-11-15，`doc/formula/tdr_design.md`）**的耗電權重 w_E：路徑報酬 = Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量。用掉全部可用電量相當於少 50 分。全隊要一樣 |
+| `energy_weight` | 25 | **時間折扣報酬（TDR，2026-11-15，`doc/formula/tdr_design.md`）**的耗電權重 w_E：路徑報酬 = Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量。用掉全部可用電量相當於少 25 分（2026-11-16 從 50 改成 25，`docs/tdr_experiment_plan.md`）。全隊要一樣 |
 | `half_life_by_priority` | [60, 120, 300, 600] s | 任務沒帶 `half_life_s` 時依優先級 P0～P3 的預設：晚到 half_life 秒價值剩一半。0 = 不打折。全隊要一樣 |
 | `max_bundle` | 5 | 一台最多同時排幾個任務。限制計算量（約 O(任務數 × n³)）和規劃視野 |
 

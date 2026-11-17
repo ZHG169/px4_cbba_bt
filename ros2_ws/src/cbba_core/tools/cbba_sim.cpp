@@ -1,13 +1,18 @@
 // 離線模擬工具：讀取場景檔，執行 CBBA 協商，把結果寫成 CSV（再用 scripts/plot_results.py 畫圖）
 // run 另外輸出 bids.csv：協商結束後每台載具對每個任務算出的成本與出價，用來說明為什麼是誰得標
 //
-//   cbba_sim run     <場景檔>          [--loss 0.3] [--seed 1] [--energy-weight 50] [--out 目錄]
+//   cbba_sim run     <場景檔>          [--loss 0.3] [--seed 1] [--energy-weight 25] [--out 目錄]
 //   cbba_sim sweep   <場景檔|random>   [--trials 200] [--agents 3] [--tasks 6] [--out 目錄]
 //   cbba_sim weights <場景檔>          [--out 目錄]
 //   cbba_sim insert  <任務點檔>        [--trials 100] [--weights 0,25,50,100,200] [--batteries 100,70,45] [--out 目錄]
 //       巡檢＋隨機插入的任務模擬（docs/sim_scenario_plan.md）：G 點一開始就有，R 點在隨機時刻插入；
 //       每個權重用同一組亂數（配對比較），統計完成／逾期／接了沒飛到／沒人接
+//   cbba_sim tdr     <S1,S2,…|all>     [--trials 100] [--weights 0,25,50,100,200] [--gammas 0.5,1,2] [--losses 0]
+//                                      [--jobs N] [--bids 1] [--out 目錄]
+//       TDR 參數實驗（docs/tdr_experiment_plan.md）：情境 × w_E × half_life 倍率 γ × 掉包率，每格同一組種子；
+//       輸出 runs.csv（每次一列）、tasks.csv、agents.csv、bids.csv（收斂當下的出價分項）、summary.csv（每格的統計）
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -17,11 +22,13 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "cbba_core/capabilities.hpp"
 #include "cbba_core/mission_sim.hpp"
 #include "cbba_core/network_sim.hpp"
+#include "cbba_core/tdr_experiment.hpp"
 
 using namespace cbba_core;
 
@@ -51,6 +58,12 @@ struct Options
   double task_duration{10.0};
   double task_deadline{300.0};
   double reserve{20.0};
+  // tdr
+  std::vector<double> gammas{0.5, 1.0, 2.0};
+  std::vector<double> losses{0.0};
+  int jobs{0};          // 0 = CPU 核心數
+  bool bids{true};
+  ScenarioOptions scenario_opt;
 };
 
 std::vector<double> parseList(const std::string & text)
@@ -75,6 +88,7 @@ void usage()
     "  cbba_sim sweep   <場景檔|random>  [選項]   各丟包率下重複多次，輸出收斂統計\n"
     "  cbba_sim weights <場景檔>         [選項]   比較不同電池權重的分配結果\n"
     "  cbba_sim insert  <任務點檔>       [選項]   巡檢＋隨機插入的任務模擬，比較電池權重\n"
+    "  cbba_sim tdr     <S1,…,S6|all>    [選項]   TDR 參數實驗（w_E × half_life 倍率 × 掉包率）\n"
     "                                            （任務點檔：docker/gz/worlds/patrol_site_points.csv）\n"
     "選項：\n"
     "  --out DIR             輸出目錄（預設 cbba_out）\n"
@@ -82,7 +96,7 @@ void usage()
     "  --seed N              亂數種子（預設 1）\n"
     "  --trials N            sweep 每個丟包率的次數（預設 200）\n"
     "  --agents N --tasks M  sweep random 時的規模（預設 3、6）\n"
-    "  --energy-weight W     耗電權重 w_E：用掉全部可用電量相當於少多少分（預設 50；舊名 --battery-weight）\n"
+    "  --energy-weight W     耗電權重 w_E：用掉全部可用電量相當於少多少分（預設 25；舊名 --battery-weight）\n"
     "  --speed V             預設速度 m/s（場景檔有指定時以場景檔為準）\n"
 
     "  --max-bundle N        一次最多接幾個任務（預設 5）\n"
@@ -93,7 +107,15 @@ void usage()
     "  --drain-error 0.1        實際耗電和模型的誤差：每次試驗、每台在 ±這個比例內隨機\n"
     "  --window 120             R 點在 0～window 秒之間的隨機時刻插入\n"
     "  --spacing 2 --altitude 5 出生點間距（UAV_SPAWN_SPACING）、巡檢高度\n"
-    "  --value 80 --duration 10 --deadline 300 --reserve 20   任務、安全存量（和 patrol_scenario.sh 一致）\n";
+    "  --value 80 --duration 10 --deadline 300 --reserve 20   任務、安全存量（和 patrol_scenario.sh 一致）\n"
+    "tdr 的選項（<情境> = S1～S6 用逗號分開，或 all；--trials 預設 100、--seed 決定情境與網路）：\n"
+    "  --weights 0,25,50,100,200   耗電權重 w_E\n"
+    "  --gammas 0.5,1,2            預設 half_life 的倍率（基準 P0～P3 = 60/120/300/600 s）\n"
+    "  --losses 0                  掉包率（0～1，延遲 50±30 ms），例如 0,0.3,0.5,0.7\n"
+    "  --jobs N                    平行的執行緒數（預設 CPU 核心數）\n"
+    "  --bids 1                    輸出 bids.csv（收斂當下每台的出價分項；0 = 不輸出）\n"
+    "  --uav-speed 0.5 --uav-endurance 900 --dog-speed 1.0 --dog-per-meter 0.1 --dog-per-sec 0.05\n"
+    "  --drain-error 0.1 --reserve 20 --t0 3   實際耗電誤差、安全存量、第一批任務的插入時刻\n";
 }
 
 bool parse(int argc, char ** argv, Options & opt)
@@ -134,6 +156,7 @@ bool parse(int argc, char ** argv, Options & opt)
         opt.endurance = parseList(value);
       } else if (key == "--drain-error") {
         opt.drain_error = std::stod(value);
+        opt.scenario_opt.drain_error = opt.drain_error;
       } else if (key == "--window") {
         opt.window = std::stod(value);
       } else if (key == "--spacing") {
@@ -148,6 +171,27 @@ bool parse(int argc, char ** argv, Options & opt)
         opt.task_deadline = std::stod(value);
       } else if (key == "--reserve") {
         opt.reserve = std::stod(value);
+        opt.scenario_opt.reserve = opt.reserve;
+      } else if (key == "--gammas") {
+        opt.gammas = parseList(value);
+      } else if (key == "--losses") {
+        opt.losses = parseList(value);
+      } else if (key == "--jobs") {
+        opt.jobs = std::stoi(value);
+      } else if (key == "--bids") {
+        opt.bids = std::stoi(value) != 0;
+      } else if (key == "--uav-speed") {
+        opt.scenario_opt.uav_speed = std::stod(value);
+      } else if (key == "--uav-endurance") {
+        opt.scenario_opt.uav_endurance = std::stod(value);
+      } else if (key == "--dog-speed") {
+        opt.scenario_opt.dog_speed = std::stod(value);
+      } else if (key == "--dog-per-meter") {
+        opt.scenario_opt.dog_per_meter = std::stod(value);
+      } else if (key == "--dog-per-sec") {
+        opt.scenario_opt.dog_per_sec = std::stod(value);
+      } else if (key == "--t0") {
+        opt.scenario_opt.t0 = std::stod(value);
       } else {
         std::cerr << "不認得的選項：" << key << "\n";
         return false;
@@ -160,6 +204,12 @@ bool parse(int argc, char ** argv, Options & opt)
   if (opt.loss < 0.0 || opt.loss > 1.0) {
     std::cerr << "--loss 必須在 0 到 1 之間\n";
     return false;
+  }
+  for (double l : opt.losses) {
+    if (l < 0.0 || l > 1.0) {
+      std::cerr << "--losses 必須在 0 到 1 之間\n";
+      return false;
+    }
   }
   if (opt.endurance.size() != 1 && opt.endurance.size() != opt.batteries.size()) {
     std::cerr << "--endurance 要是一個值，或和 --batteries 一樣多個\n";
@@ -584,6 +634,268 @@ int cmdInsert(const Options & opt)
   std::cout << "\n結果已寫入 " << opt.out << "/（summary、trials、tasks、agents、schedules/）\n";
   return 0;
 }
+
+// ===========================================================================
+// tdr：TDR 參數實驗（docs/tdr_experiment_plan.md）
+// ===========================================================================
+struct TdrJob
+{
+  std::string scenario;
+  ParamSet set;
+  double loss{0.0};
+  int trial{0};
+  std::uint32_t scenario_seed{0};
+  std::uint32_t network_seed{0};
+};
+
+struct TdrRun
+{
+  TdrJob job;
+  MissionResult result;
+  RunSummary summary;
+};
+
+double quantile(std::vector<double> v, double q)
+{
+  if (v.empty()) {
+    return -1.0;
+  }
+  std::sort(v.begin(), v.end());
+  const double pos = q * static_cast<double>(v.size() - 1);
+  const auto lo = static_cast<std::size_t>(pos);
+  const std::size_t hi = std::min(lo + 1, v.size() - 1);
+  return v[lo] + (v[hi] - v[lo]) * (pos - static_cast<double>(lo));
+}
+
+double mean(const std::vector<double> & v)
+{
+  if (v.empty()) {
+    return -1.0;
+  }
+  double sum = 0.0;
+  for (double x : v) {
+    sum += x;
+  }
+  return sum / static_cast<double>(v.size());
+}
+
+std::vector<std::string> parseNames(const std::string & text)
+{
+  if (text == "all") {
+    return scenarioNames();
+  }
+  std::vector<std::string> out;
+  std::stringstream ss(text);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    out.push_back(item);
+  }
+  return out;
+}
+
+int cmdTdr(const Options & opt)
+{
+  const std::vector<std::string> names = parseNames(opt.scenario);
+  for (const std::string & name : names) {
+    makeScenario(name, 1, opt.scenario_opt);   // 名稱不對時在這裡丟例外
+  }
+  const int trials = opt.trials_set ? opt.trials : 100;
+
+  // 種子只由 (seed, trial) 決定：每個參數組、掉包率用同一組情境與網路亂數（配對比較）
+  std::vector<TdrJob> jobs;
+  for (const std::string & name : names) {
+    for (double loss : opt.losses) {
+      for (double weight : opt.weights) {
+        for (double gamma : opt.gammas) {
+          for (int k = 0; k < trials; ++k) {
+            TdrJob j;
+            j.scenario = name;
+            j.set = ParamSet{weight, gamma};
+            j.loss = loss;
+            j.trial = k;
+            j.scenario_seed = opt.seed * 100003u + static_cast<std::uint32_t>(k);
+            j.network_seed = opt.seed * 7919u + static_cast<std::uint32_t>(k);
+            jobs.push_back(j);
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<TdrRun> runs(jobs.size());
+  std::atomic<std::size_t> next{0};
+  std::atomic<std::size_t> done{0};
+  const auto worker = [&]() {
+      for (std::size_t i = next++; i < jobs.size(); i = next++) {
+        const TdrJob & j = jobs[i];
+        const ScenarioCase c = makeScenario(j.scenario, j.scenario_seed, opt.scenario_opt);
+        MissionConfig config;
+        config.params = applyParamSet(opt.params, j.set);
+        config.loss = j.loss;
+        config.max_time = c.max_time;
+        config.critical_battery = opt.scenario_opt.reserve;
+        config.assign.assign_hold = 0.4;   // cbba_node 的設定
+        config.record_bids = opt.bids;
+        runs[i].job = j;
+        runs[i].result = runMission(c.agents, c.tasks, config, j.network_seed);
+        runs[i].summary = summarize(runs[i].result);
+        const std::size_t n = ++done;
+        if (n % 200 == 0 || n == jobs.size()) {
+          std::cerr << "\r" << n << " / " << jobs.size() << std::flush;
+        }
+      }
+    };
+  int threads = opt.jobs > 0 ? opt.jobs : static_cast<int>(std::thread::hardware_concurrency());
+  threads = std::max(1, threads);
+  std::cout << "TDR 參數實驗：" << names.size() << " 個情境 × " << opt.weights.size() << " 個 w_E × "
+            << opt.gammas.size() << " 個 γ × " << opt.losses.size() << " 個掉包率 × " << trials << " 次 = "
+            << jobs.size() << " 次（" << threads << " 個執行緒）\n";
+  std::vector<std::thread> pool;
+  for (int k = 0; k < threads; ++k) {
+    pool.emplace_back(worker);
+  }
+  for (std::thread & t : pool) {
+    t.join();
+  }
+  std::cerr << "\n";
+
+  auto runs_csv = openOut(opt.out, "runs.csv");
+  runs_csv << "run_id,scenario,seed,trial,w_E,gamma,half_life_set,loss_rate,tasks,completed,converge_s,unconverged,"
+    "conv_5s,duplicate,duplicate_time,handoff,handoff_unforced,preempted,score_gap,near_tie,deadline_miss,"
+    "energy_used,min_battery,min_return_margin,P0_eta,P1_eta,discounted_value,choice_total,choice_ok,"
+    "bundle_drops,wrong_accepts,max_tasks,min_tasks,old_delay,end_time,winner_map\n";
+  auto tasks_csv = openOut(opt.out, "tasks.csv");
+  tasks_csv << "run_id,label,task_id,priority,platform,inserted,converge_s,converged_winner,first_executor,"
+    "expected,done_by,eta,discounted_value,handoffs,handoffs_forced,preemptions,duplicate_time,top_bid,"
+    "second_bid,score_gap,bidders,delay,deadline_miss,outcome\n";
+  auto agents_csv = openOut(opt.out, "agents.csv");
+  agents_csv << "run_id,agent_id,platform,battery_start,battery_end,min_battery,energy_used,completed,distance,"
+    "work_time,return_margin,bundle_drops,rtl_at\n";
+  std::ofstream bids_csv;
+  if (opt.bids) {
+    bids_csv = openOut(opt.out, "bids.csv");
+    bids_csv << "run_id,label,agent_id,bid,why,feasible,position,eta,time_reward,energy_penalty,gain,winner\n";
+  }
+  for (std::size_t i = 0; i < runs.size(); ++i) {
+    const TdrRun & run = runs[i];
+    const TdrJob & j = run.job;
+    const RunSummary & s = run.summary;
+    runs_csv << i << "," << j.scenario << "," << j.scenario_seed << "," << j.trial << "," << j.set.energy_weight
+             << "," << j.set.gamma << "," << halfLifeLabel(j.set.gamma) << "," << j.loss << "," << s.tasks << ","
+             << s.completed << "," << s.converge_s << "," << s.unconverged << "," << (s.conv_5s ? 1 : 0) << ","
+             << s.duplicate << "," << s.duplicate_time << "," << s.handoff << "," << s.handoff_unforced << ","
+             << s.preempted << "," << s.score_gap << "," << s.near_tie << "," << s.deadline_miss << ","
+             << s.energy_used << "," << s.min_battery << "," << s.min_return_margin << "," << s.p0_eta << ","
+             << s.p1_eta << "," << s.discounted_value << "," << s.choice_total << "," << s.choice_ok << ","
+             << s.bundle_drops << "," << s.wrong_accepts << "," << s.max_tasks << "," << s.min_tasks << ","
+             << s.old_delay << "," << run.result.end_time << "," << s.winner_map << "\n";
+    std::map<TaskId, std::string> labels;
+    for (const TaskRecord & t : run.result.tasks) {
+      labels[t.id] = t.label;
+      tasks_csv << i << "," << t.label << "," << taskName(t.id) << "," << int(t.priority) << ","
+                << platformName(t.platform) << "," << t.inserted << ","
+                << (t.converged_at >= 0.0 ? t.converged_at - t.inserted : -1.0) << "," << t.converged_winner << ","
+                << t.first_executor << "," << t.expected << "," << t.done_by << "," << t.eta() << ","
+                << t.discounted_value << "," << t.handoffs << "," << t.handoffs_forced << "," << t.preemptions << ","
+                << t.duplicate_time << "," << t.top_bid << "," << t.second_bid << "," << t.score_gap << ","
+                << t.bidders << "," << t.delay << "," << (t.deadline_miss ? 1 : 0) << "," << toString(t.outcome)
+                << "\n";
+    }
+    for (const AgentRecord & a : run.result.agents) {
+      agents_csv << i << "," << a.id << "," << platformName(a.platform) << "," << a.battery_start << ","
+                 << a.battery_end << "," << a.min_battery << "," << a.energy_used << "," << a.completed << ","
+                 << a.distance << "," << a.work_time << "," << a.return_margin << "," << a.bundle_drops << ","
+                 << a.rtl_at << "\n";
+    }
+    if (opt.bids) {
+      for (const BidRecord & b : run.result.bids) {
+        bids_csv << i << "," << labels[b.task] << "," << b.agent << "," << b.bid << "," << b.why << ","
+                 << (b.feasible ? 1 : 0) << "," << b.position << "," << b.eta << "," << b.time_reward << ","
+                 << b.energy_penalty << "," << b.gain << "," << (b.winner ? 1 : 0) << "\n";
+      }
+    }
+  }
+
+  // 每格（情境 × w_E × γ × 掉包率）的統計。沒收斂的試驗收斂時間記 10 s（和 itest loss 一樣）
+  auto summary = openOut(opt.out, "summary.csv");
+  summary << "scenario,w_E,gamma,half_life_set,loss_rate,runs,conv_5s_rate,converge_median,converge_p95,"
+    "unconverged_runs,duplicate_runs,handoff_mean,handoff_unforced_mean,preempted_mean,score_gap_median,"
+    "near_tie_rate,deadline_miss_runs,completion_rate,energy_mean,min_battery_p5,return_margin_min,"
+    "p0_eta_median,p0_eta_p95,p1_eta_median,p1_eta_p95,discounted_value_mean,choice_ok_rate,"
+    "bundle_drops_mean,wrong_accepts_mean,task_spread_mean,old_delay_median\n";
+  std::cout << "  情境   w_E    γ   掉包  5s收斂  收斂中位/P95(s)  重複  換手(非被迫)  選對    P0到達中位/P95(s)  耗電    折扣價值\n";
+  std::size_t begin = 0;
+  while (begin < runs.size()) {
+    std::size_t end = begin;
+    const TdrJob & key = runs[begin].job;
+    while (end < runs.size() && runs[end].job.scenario == key.scenario && runs[end].job.loss == key.loss &&
+      runs[end].job.set.energy_weight == key.set.energy_weight && runs[end].job.set.gamma == key.set.gamma)
+    {
+      ++end;
+    }
+    std::vector<double> conv, gap, energy, min_bat, p0, p1, value, handoff, unforced, preempt, drops, wrong, spread,
+      delay;
+    int conv5 = 0, unconv = 0, dup = 0, miss = 0, done = 0, total = 0, choice = 0, choice_total = 0, ties = 0,
+      tie_total = 0;
+    double margin = 0.0;
+    for (std::size_t i = begin; i < end; ++i) {
+      const RunSummary & s = runs[i].summary;
+      conv.push_back(s.converge_s >= 0.0 ? s.converge_s : 10.0);
+      conv5 += s.conv_5s ? 1 : 0;
+      unconv += s.unconverged > 0 ? 1 : 0;
+      dup += s.duplicate > 0 ? 1 : 0;
+      miss += s.deadline_miss > 0 ? 1 : 0;
+      done += s.completed;
+      total += s.tasks;
+      choice += s.choice_ok;
+      choice_total += s.choice_total;
+      energy.push_back(s.energy_used);
+      min_bat.push_back(s.min_battery);
+      margin = i == begin ? s.min_return_margin : std::min(margin, s.min_return_margin);
+      value.push_back(s.discounted_value);
+      handoff.push_back(s.handoff);
+      unforced.push_back(s.handoff_unforced);
+      preempt.push_back(s.preempted);
+      drops.push_back(s.bundle_drops);
+      wrong.push_back(s.wrong_accepts);
+      spread.push_back(s.max_tasks - s.min_tasks);
+      if (s.p0_eta >= 0.0) {p0.push_back(s.p0_eta);}
+      if (s.p1_eta >= 0.0) {p1.push_back(s.p1_eta);}
+      if (s.old_delay >= 0.0) {delay.push_back(s.old_delay);}
+      for (const TaskRecord & t : runs[i].result.tasks) {
+        if (t.bidders >= 2) {
+          gap.push_back(t.score_gap);
+          ++tie_total;
+          ties += t.score_gap < 0.01 ? 1 : 0;
+        }
+      }
+    }
+    const double n = static_cast<double>(end - begin);
+    summary << key.scenario << "," << key.set.energy_weight << "," << key.set.gamma << ","
+            << halfLifeLabel(key.set.gamma) << "," << key.loss << "," << end - begin << "," << conv5 / n << ","
+            << quantile(conv, 0.5) << "," << quantile(conv, 0.95) << "," << unconv << "," << dup << ","
+            << mean(handoff) << "," << mean(unforced) << "," << mean(preempt) << "," << quantile(gap, 0.5) << ","
+            << (tie_total > 0 ? static_cast<double>(ties) / tie_total : -1.0) << "," << miss << ","
+            << (total > 0 ? static_cast<double>(done) / total : -1.0) << "," << mean(energy) << ","
+            << quantile(min_bat, 0.05) << "," << margin << "," << quantile(p0, 0.5) << "," << quantile(p0, 0.95)
+            << "," << quantile(p1, 0.5) << "," << quantile(p1, 0.95) << "," << mean(value) << ","
+            << (choice_total > 0 ? static_cast<double>(choice) / choice_total : -1.0) << "," << mean(drops) << ","
+            << mean(wrong) << "," << mean(spread) << "," << quantile(delay, 0.5) << "\n";
+    std::cout << std::fixed << std::setprecision(1) << "  " << std::setw(4) << key.scenario << std::setw(6)
+              << key.set.energy_weight << std::setw(5) << key.set.gamma << std::setw(5) << key.loss * 100 << "%"
+              << std::setw(7) << 100.0 * conv5 / n << "%" << std::setprecision(2) << std::setw(8)
+              << quantile(conv, 0.5) << "/" << std::left << std::setw(6) << quantile(conv, 0.95) << std::right
+              << std::setw(6) << dup << std::setprecision(1) << std::setw(7) << mean(handoff) << "("
+              << mean(unforced) << ")" << std::setw(7)
+              << (choice_total > 0 ? 100.0 * choice / choice_total : -1.0) << "%" << std::setw(10)
+              << quantile(p0, 0.5) << "/" << std::left << std::setw(7) << quantile(p0, 0.95) << std::right
+              << std::setw(8) << mean(energy) << std::setw(10) << mean(value) << "\n";
+    begin = end;
+  }
+  std::cout << "\n結果已寫入 " << opt.out << "/（runs、tasks、agents、" << (opt.bids ? "bids、" : "")
+            << "summary）；報告：scripts/tdr_report.py " << opt.out << "\n";
+  return 0;
+}
 }  // namespace
 
 int main(int argc, char ** argv)
@@ -598,6 +910,7 @@ int main(int argc, char ** argv)
     if (opt.command == "sweep") {return cmdSweep(opt);}
     if (opt.command == "weights") {return cmdWeights(opt);}
     if (opt.command == "insert") {return cmdInsert(opt);}
+    if (opt.command == "tdr") {return cmdTdr(opt);}
     std::cerr << "不認得的指令：" << opt.command << "\n";
     usage();
     return 2;

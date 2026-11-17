@@ -1,11 +1,13 @@
 // TASK_PROGRESS（種類 12）：角色的執行進度（協定版本 4，CB-4 第一批，2026-11-16；doc/cb4_design.md）。轉送。
 //
-//   表頭 20 | 轉送區塊 14 | task_id 8 | revision 2 | assign_version 8 | executor 2 | progress_seq 2 |
+//   表頭 20 | 轉送區塊 14 | task_id 8 | revision 2 | incident_revision 2 | assign_version 8 | executor 2 | progress_seq 2 |
 //   phase 1 | step_index 1 | milestones 2 | flags 1
-//   = 61 B
+//   = 63 B（2026-11-16 第三批加 incident_revision，原本 61 B）
 //
 //   executor        回報的執行者；執行者自己送的 origin = executor。補發（SYNC_BATCH 的快照）沿用原本的轉送區塊
-//   revision        回報時任務的 revision（事件結果型里程碑只在同一個 revision 算數）
+//   revision        回報時任務的 revision（task_revision）
+//   incident_revision  回報時這個組的 incident revision（組層級的 incident state，INCIDENT_UPDATE 的 Accepted）；
+//                   事件結果型里程碑只在同一個 incident revision 算數。沒有角色組、還沒有 incident state 的是 0
 //   assign_version  正式指派版本；換人（新的版本）時執行者相關的里程碑重算
 //   progress_seq    同一個 (task_id, assign_version) 內遞增（從 1 起）；收的一方只留最大的
 //   phase           cbba_core::ProgressPhase（0～7）
@@ -28,7 +30,7 @@
 namespace cbba_core::wire
 {
 
-constexpr std::size_t kTaskProgressSize = kHeaderSize + kRelaySize + 27;
+constexpr std::size_t kTaskProgressSize = kHeaderSize + kRelaySize + 29;
 constexpr std::uint8_t kUnknownStep = 255;
 
 struct TaskProgressBody
@@ -36,6 +38,7 @@ struct TaskProgressBody
   RelayHeader relay;
   TaskId task_id{0};
   std::uint16_t revision{0};
+  std::uint16_t incident_revision{0};
   std::uint64_t assign_version{0};
   std::uint16_t executor{0};
   std::uint16_t progress_seq{0};

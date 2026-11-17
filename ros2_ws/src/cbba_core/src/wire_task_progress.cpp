@@ -30,6 +30,7 @@ std::vector<std::uint8_t> encodeTaskProgress(Header header, const TaskProgressBo
   ByteWriter w(out);
   w.u64(b.task_id);
   w.u16(b.revision);
+  w.u16(b.incident_revision);
   w.u64(b.assign_version);
   w.u16(b.executor);
   w.u16(b.progress_seq);
@@ -56,6 +57,7 @@ std::optional<TaskProgressBody> decodeTaskProgress(const std::uint8_t * data, st
   b.relay = *relay;
   b.task_id = r.u64();
   b.revision = r.u16();
+  b.incident_revision = r.u16();
   b.assign_version = r.u64();
   b.executor = r.u16();
   b.progress_seq = r.u16();

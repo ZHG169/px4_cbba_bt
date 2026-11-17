@@ -14,6 +14,7 @@ const char * toString(Milestone m)
     case Milestone::TARGET_LOCKED: return "target_locked";
     case Milestone::HAS_OBSERVATION: return "has_observation";
     case Milestone::COMPLETED: return "completed";
+    case Milestone::SYNC_REACHED: return "sync_reached";
   }
   return "?";
 }

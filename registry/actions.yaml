@@ -57,6 +57,7 @@ milestones:
   - {name: target_locked, bit: 5, kind: executor, description: 追蹤已鎖定}
   - {name: has_observation, bit: 6, kind: event, description: 已取得觀測}
   - {name: completed, bit: 7, kind: completion, description: 任務完成（TASK_CLOSE reason 1，cbba_node 判定）}
+  - {name: sync_reached, bit: 8, kind: executor, description: 到了 sync 的會合點、等同伴（BT 回報 ARRIVED_WAITING 時 cbba_node 自動加）}
 
 actions:
   # ===== 可規劃 =====

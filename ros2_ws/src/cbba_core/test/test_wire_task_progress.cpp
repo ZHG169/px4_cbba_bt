@@ -28,6 +28,7 @@ TaskProgressBody sample()
   b.relay = RelayHeader{1, 0xAB, 7};
   b.task_id = 0x00C8000300000005ULL;
   b.revision = 2;
+  b.incident_revision = 3;
   b.assign_version = 4;
   b.executor = 1;
   b.progress_seq = 3;
@@ -40,14 +41,17 @@ TaskProgressBody sample()
 
 TEST(WireTaskProgress, SizeAndLayout)
 {
-  // 表頭 20 + 轉送 14 + 27 = 61 B；task_id 緊接在轉送區塊之後、大端序；里程碑在倒數第 3、2 個位元組
+  // 表頭 20 + 轉送 14 + 29 = 63 B（第三批加 incident_revision）；task_id 緊接在轉送區塊之後、大端序；
+  // incident_revision 在 revision 之後；里程碑在倒數第 3、2 個位元組
   const auto bytes = encodeTaskProgress(makeHeader(), sample());
-  ASSERT_EQ(bytes.size(), 61u);
+  ASSERT_EQ(bytes.size(), 63u);
   EXPECT_EQ(bytes.size(), kTaskProgressSize);
   EXPECT_EQ(parseHeader(bytes)->type, PacketType::TASK_PROGRESS);
   EXPECT_EQ(bytes[kHeaderSize + kRelaySize], 0x00);
   EXPECT_EQ(bytes[kHeaderSize + kRelaySize + 1], 0xC8);
   EXPECT_EQ(bytes[kHeaderSize + kRelaySize + 7], 0x05);
+  EXPECT_EQ(bytes[kHeaderSize + kRelaySize + 9], 0x02);    // revision
+  EXPECT_EQ(bytes[kHeaderSize + kRelaySize + 11], 0x03);   // incident_revision
   EXPECT_EQ(bytes[bytes.size() - 3], 0x00);
   EXPECT_EQ(bytes[bytes.size() - 2], 0x14);   // bit 2（arrived）＋ bit 4（target_localized）
   EXPECT_EQ(bytes.back(), 0x00);              // flags
@@ -62,6 +66,7 @@ TEST(WireTaskProgress, RoundTripAndRelay)
   EXPECT_EQ(got->relay, b.relay);
   EXPECT_EQ(got->task_id, b.task_id);
   EXPECT_EQ(got->revision, 2);
+  EXPECT_EQ(got->incident_revision, 3);
   EXPECT_EQ(got->assign_version, 4u);
   EXPECT_EQ(got->executor, 1);
   EXPECT_EQ(got->progress_seq, 3);
@@ -110,7 +115,7 @@ TEST(WireTaskProgress, RejectsInvalid)
   finishPacket(longer);
   EXPECT_FALSE(decodeTaskProgress(longer));
   auto bad = bytes;
-  bad[kHeaderSize + kRelaySize + 22] = 9;   // phase
+  bad[kHeaderSize + kRelaySize + 24] = 9;   // phase
   EXPECT_FALSE(decodeTaskProgress(bad));
 }
 

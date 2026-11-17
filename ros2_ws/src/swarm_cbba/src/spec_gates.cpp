@@ -15,6 +15,7 @@ SpecGates parseSpecGates(const std::string & spec, std::uint8_t precedence, std:
 {
   SpecGates out;
   std::map<std::uint8_t, std::vector<WaitFor>> by_step;
+  std::map<std::uint8_t, std::string> syncs;
   std::set<std::uint8_t> mentioned;
 
   if (!spec.empty()) {
@@ -27,6 +28,14 @@ SpecGates parseSpecGates(const std::string & spec, std::uint8_t precedence, std:
     const YAML::Node steps = root.IsMap() ? root["steps"] : YAML::Node();
     if (steps && steps.IsSequence()) {
       for (std::size_t i = 0; i < steps.size() && i < 255; ++i) {
+        const YAML::Node sync = steps[i].IsMap() ? steps[i]["sync"] : YAML::Node();
+        if (sync) {
+          if (sync.IsScalar() && !sync.as<std::string>().empty()) {
+            syncs[static_cast<std::uint8_t>(i)] = sync.as<std::string>();
+          } else {
+            out.warnings.push_back("steps[" + std::to_string(i) + "].sync 要是會合點的名稱（字串）");
+          }
+        }
         const YAML::Node wait = steps[i].IsMap() ? steps[i]["wait_for"] : YAML::Node();
         if (!wait) {
           continue;
@@ -74,10 +83,32 @@ SpecGates parseSpecGates(const std::string & spec, std::uint8_t precedence, std:
       by_step[0].push_back(WaitFor{static_cast<std::uint8_t>(r), Milestone::COMPLETED});
     }
   }
+  for (const auto & [step, name] : syncs) {
+    by_step[step];   // 只有會合點、沒有 wait_for 的步驟也列
+  }
   for (auto & [step, waits] : by_step) {
-    out.steps.push_back(StepGateDef{step, std::move(waits)});
+    const auto s = syncs.find(step);
+    out.steps.push_back(StepGateDef{step, std::move(waits), s != syncs.end() ? s->second : std::string()});
   }
   return out;
+}
+
+SyncResult evaluateSync(const std::vector<std::pair<std::uint8_t, SyncMember>> & others,
+  std::optional<double> first_arrival, double now, double window)
+{
+  SyncResult r;
+  for (const auto & [role, m] : others) {
+    if (m == SyncMember::MISSING) {
+      r.missing.push_back(role);
+    }
+  }
+  if (r.missing.empty()) {
+    r.state = cbba_core::GateState::OPEN;
+  } else if (first_arrival && window > 0.0 && now - *first_arrival >= window) {
+    r.state = cbba_core::GateState::OPEN;   // 時間窗過了：已到的先開始
+    r.timed_out = true;
+  }
+  return r;
 }
 
 }  // namespace swarm_cbba

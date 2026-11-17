@@ -35,7 +35,7 @@ struct ScoringParams
 {
   double cruise_speed{5.0};      // 標稱速度 (m/s)；載具自己有設定時以載具的為準
   double speed_margin{0.8};      // 估到達時間用 cruise_speed * speed_margin，預留餘裕
-  double energy_weight{50.0};    // w_E：用掉全部可用電量相當於少多少分（暫定，docs/sim_scenario_plan.md 第八節的實驗調）
+  double energy_weight{25.0};    // w_E：用掉全部可用電量相當於少多少分（2026-11-16 依 TDR 參數實驗定案，docs/tdr_experiment_plan.md）
   // 任務沒帶 half_life 時依優先級 P0～P3 的預設（秒）；0 = 不打折
   std::array<double, 4> half_life_by_priority{{60.0, 120.0, 300.0, 600.0}};
   double score_epsilon{1e-3};    // 兩個分數相差在此以內視為平手

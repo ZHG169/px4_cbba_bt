@@ -37,6 +37,10 @@ uint16 sync_window_s
 uint16 optional_no_capable_s       # optional 關閉 O1 的等待；0 = 預設 10 s
 uint16 optional_unassigned_s       # optional 關閉 O2 的等待；0 = 預設 15 s
 string spec                        # TaskSpec（JSON，B 層：steps 等）；空 = 沒有
+# CB-4 第三批（2026-11-16）
+uint8 distinct_agent_set           # 要由不同載具執行的角色（位元 = role_index；同組要一樣）：出價的硬性限制，Group Commit 再驗證
+string fallback_template           # 組資料：需要降級時 FallbackRequest 帶這個（同組要一樣；空 = 不發 FallbackRequest）
+uint16 incident_revision           # 規劃器展開時依據的 incident revision（incident_updates）；不能比閘道目前的新
 ---
 bool accepted                      # 建立了、改版了，或同一個鍵重送（duplicate）
 bool duplicate

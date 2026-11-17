@@ -562,6 +562,7 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     case PacketType::DETECTION: onDetection(bytes, now); break;
     case PacketType::DETECTION_ACK: onDetectionAck(bytes, now); break;
     case PacketType::TASK_PROGRESS: onTaskProgress(bytes, now); break;
+    case PacketType::INCIDENT_UPDATE: onIncidentUpdate(bytes, now); break;
   }
 }
 
@@ -664,6 +665,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
 
   // 角色進度（CB-4）：自己是執行者的錯開重送、定期快照；發現新鄰居時進度快照排進補發
   sendProgress(now);
+  sendIncidents(now);
   if (progress_snapshot_due_) {
     progress_snapshot_due_ = false;
     queueProgressSnapshot();
@@ -1184,11 +1186,14 @@ void CbbaComm::drainRepair(double now)
   item_header.sender_id = id();
   item_header.session_id = session_;
   // 順序：進行中任務的定義與結束 → 進度快照（CB-4）→ TaskSpec 的段（版本 4）→ 已結束任務的
-  while (!repair_open_.empty() || !repair_progress_.empty() || !repair_spec_.empty() || !repair_closed_.empty()) {
+  while (!repair_open_.empty() || !repair_incident_.empty() || !repair_progress_.empty() || !repair_spec_.empty() ||
+    !repair_closed_.empty())
+  {
     std::vector<wire::SyncItem> items;
     std::vector<std::pair<std::map<TaskId, RepairNeed> *, TaskId>> taken;
     std::vector<std::pair<TaskId, std::uint8_t>> taken_spec;
     std::vector<TaskId> taken_progress;
+    std::vector<TaskId> taken_incident;
     std::size_t size = wire::kSyncBatchBaseSize;
     bool full = false;
     // 放得進去就放（第一筆一定放：單筆超過上限時照樣送，不會卡住佇列）
@@ -1229,10 +1234,30 @@ void CbbaComm::drainRepair(double now)
       }
       taken.emplace_back(&repair_open_, task_id);
     }
+    for (auto it = repair_incident_.begin(); !full && it != repair_incident_.end(); ++it) {
+      std::vector<wire::SyncItem> mine;
+      const auto st = incidents_.find(*it);
+      if (st != incidents_.end() && st->second.revision > 0 && st->second.origin.origin_id != 0) {
+        if (auto item = wire::toSyncItem(wire::encodeIncidentUpdate(item_header, incidentBody(*it, st->second)))) {
+          mine.push_back(std::move(*item));
+        }
+      }
+      if (!fits(mine)) {
+        full = true;
+        break;
+      }
+      for (wire::SyncItem & item : mine) {
+        items.push_back(std::move(item));
+      }
+      taken_incident.push_back(*it);
+    }
     for (auto it = repair_progress_.begin(); !full && it != repair_progress_.end(); ++it) {
       std::vector<wire::SyncItem> mine;
       const auto rec = progress_.find(*it);
-      if (rec != progress_.end() && isOpen(*it)) {
+      // 只有 Accepted 記上的定位、還沒有執行者回報過的紀錄（沒有 origin、指派版本）不補：incident state 的快照會帶
+      if (rec != progress_.end() && isOpen(*it) && rec->second.origin.origin_id != 0 && rec->second.assign_version != 0 &&
+        rec->second.progress_seq != 0)
+      {
         if (auto item = wire::toSyncItem(wire::encodeTaskProgress(item_header, progressBody(*it, rec->second)))) {
           mine.push_back(std::move(*item));
         }
@@ -1284,11 +1309,15 @@ void CbbaComm::drainRepair(double now)
         for (const TaskId task_id : taken_progress) {
           repair_progress_.erase(task_id);
         }
+        for (const TaskId group_id : taken_incident) {
+          repair_incident_.erase(group_id);
+        }
       };
     if (items.empty()) {   // 佇列裡的都已經沒有東西可送（例如結束紀錄、TaskSpec 不見了）
       drop_taken();
-      if (taken.empty() && taken_spec.empty() && taken_progress.empty()) {
+      if (taken.empty() && taken_spec.empty() && taken_progress.empty() && taken_incident.empty()) {
         repair_open_.clear();
+        repair_incident_.clear();
         repair_progress_.clear();
         repair_spec_.clear();
         repair_closed_.clear();
@@ -1353,6 +1382,19 @@ void CbbaComm::onSyncBatch(const wire::Header & h, const Bytes & bytes, double n
       }
       dedup_.firstSeen(PacketType::TASK_PROGRESS, b->relay, now);
       applyProgress(*b, now);
+    } else if (item.type == PacketType::INCIDENT_UPDATE) {
+      const auto b = wire::decodeIncidentUpdate(packet);
+      if (!b) {
+        ++stats_.malformed;
+        continue;
+      }
+      // 快照只放 Accepted；只收那個組的閘道（組的建立者）送的
+      if (b->kind != wire::IncidentKind::ACCEPTED || b->relay.origin_id != taskCreator(b->group_id)) {
+        ++stats_.incident_unauthorized;
+        continue;
+      }
+      dedup_.firstSeen(PacketType::INCIDENT_UPDATE, b->relay, now);
+      applyAccepted(*b, now);
     } else {
       const auto b = wire::decodeTaskClose(packet);
       if (!b) {
@@ -1612,6 +1654,7 @@ wire::TaskAnnounceBody CbbaComm::announceBody(TaskId task_id) const
   b.role_index = e.role_index;
   b.role_count = e.role_count;
   b.precedence = e.precedence;
+  b.distinct_agent_set = e.distinct_agent_set;
   b.sync_window_s = e.sync_window_s;
   b.optional_no_capable_s = e.optional_no_capable_s;
   b.optional_unassigned_s = e.optional_unassigned_s;
@@ -1747,6 +1790,7 @@ void CbbaComm::applyAnnounce(const wire::TaskAnnounceBody & b, double now)
   e.role_index = b.role_index;
   e.role_count = b.role_count;
   e.precedence = b.precedence;
+  e.distinct_agent_set = b.distinct_agent_set;
   e.sync_window_s = b.sync_window_s;
   e.optional_no_capable_s = b.optional_no_capable_s;
   e.optional_unassigned_s = b.optional_unassigned_s;
@@ -2563,12 +2607,13 @@ ReportCheck CbbaComm::reportProgress(TaskId task_id, ProgressPhase phase, std::u
   if (same_version) {
     bits = static_cast<MilestoneMask>(bits | it->second.executor_bits);
   }
-  if (has && it->second.revision == task.revision) {
+  const std::uint16_t incident_rev = incidentRevision(task.ext.group_id);
+  if (has && it->second.incident_revision == incident_rev) {
     bits = static_cast<MilestoneMask>(bits | it->second.event_bits);
   }
   // 和上一份一樣：不送（定期快照照常）
   if (same_version && it->second.phase == phase && it->second.step_index == step_index &&
-    (it->second.executor_bits | (it->second.revision == task.revision ? it->second.event_bits : 0)) == bits)
+    (it->second.executor_bits | (it->second.incident_revision == incident_rev ? it->second.event_bits : 0)) == bits)
   {
     return ReportCheck::ACCEPTED;
   }
@@ -2576,6 +2621,7 @@ ReportCheck CbbaComm::reportProgress(TaskId task_id, ProgressPhase phase, std::u
   b.relay = wire::RelayHeader{id(), session_, 0};   // 送出時換成那一份的 origin
   b.task_id = task_id;
   b.revision = task.revision;
+  b.incident_revision = incident_rev;
   b.assign_version = cur.version;
   b.executor = id();
   b.progress_seq = same_version ? static_cast<std::uint16_t>(std::min<int>(it->second.progress_seq + 1, 0xFFFF)) : 1;
@@ -2669,6 +2715,15 @@ bool CbbaComm::applyProgress(const wire::TaskProgressBody & b, double now)
 
 void CbbaComm::queueProgressSnapshot()
 {
+  for (const auto & [group_id, st] : incidents_) {
+    if (st.revision == 0) {
+      continue;
+    }
+    const auto tasks = groupTasks(group_id);
+    if (std::any_of(tasks.begin(), tasks.end(), [this](TaskId t) {return isOpen(t);})) {
+      repair_incident_.insert(group_id);   // 組還開著：incident state 也補（新鄰居才知道目前的 incident revision）
+    }
+  }
   for (const auto & [task_id, rec] : progress_) {
     const auto t = agent_.tasks().find(task_id);
     if (t == agent_.tasks().end() || t->second.ext.group_id == 0 || !isOpen(task_id)) {
@@ -2694,8 +2749,8 @@ MilestoneMask CbbaComm::milestones(TaskId task_id, double now) const
   }
   const Assignment cur = assignment(task_id);
   const bool completed = !isOpen(task_id) && closeReason(task_id) == wire::kCloseDone;
-  return effectiveMilestones(progress(task_id), cur.version, t->second.revision, isLocking(cur.state),
-    expired(task_id, now), completed);
+  return effectiveMilestones(progress(task_id), cur.version, incidentRevision(t->second.ext.group_id),
+    isLocking(cur.state), expired(task_id, now), completed);
 }
 
 std::vector<TaskId> CbbaComm::groupTasks(TaskId group_id) const
@@ -2752,6 +2807,53 @@ GateState CbbaComm::gateState(TaskId task_id, const WaitFor & wait, double now) 
   return (milestones(*pred, now) & milestoneBit(wait.milestone)) != 0 ? GateState::OPEN : GateState::WAITING;
 }
 
+CbbaComm::GroupStatus CbbaComm::groupStatus(TaskId group_id, std::uint8_t role_count) const
+{
+  GroupStatus out;
+  std::set<std::uint8_t> known;
+  for (const TaskId t : groupTasks(group_id)) {
+    const Task & task = agent_.tasks().at(t);
+    known.insert(task.ext.role_index);
+    if (task.ext.optional) {
+      continue;
+    }
+    if (!isOpen(t)) {
+      if (closeReason(t) != wire::kCloseDone) {
+        out.broken = true;   // 必要角色被取消、過期：不會湊齊
+        out.missing.push_back(task.ext.role_index);
+      }
+      continue;
+    }
+    if (agent_.winner(t) == kNoAgent && !isLocking(assignment(t).state)) {
+      out.missing.push_back(task.ext.role_index);
+    }
+  }
+  for (unsigned r = 0; r < role_count; ++r) {
+    if (known.count(static_cast<std::uint8_t>(r)) == 0) {
+      out.missing.push_back(static_cast<std::uint8_t>(r));   // 還不認得（任務定義還沒到）
+    }
+  }
+  // distinct_agent_set：Group Commit 再驗證一次（出價時已經是硬性限制，這裡防止通訊延遲、改版造成的重複）
+  std::map<AgentId, std::uint8_t> holder_of;   // 執行者 → 第一個 distinct 角色
+  for (const TaskId t : groupTasks(group_id)) {
+    const Task & task = agent_.tasks().at(t);
+    if ((task.ext.distinct_agent_set & (1u << task.ext.role_index)) == 0 || !isOpen(t)) {
+      continue;
+    }
+    const Assignment a = assignment(t);
+    const AgentId who = isLocking(a.state) ? a.assignee : agent_.winner(t);
+    if (who == kNoAgent) {
+      continue;
+    }
+    if (!holder_of.emplace(who, task.ext.role_index).second) {
+      out.duplicates.push_back(task.ext.role_index);
+    }
+  }
+  std::sort(out.missing.begin(), out.missing.end());
+  out.complete = group_id != 0 && out.missing.empty() && out.duplicates.empty();
+  return out;
+}
+
 std::optional<Vec3> CbbaComm::agentPosition(AgentId agent) const
 {
   if (agent == id()) {
@@ -2762,6 +2864,258 @@ std::optional<Vec3> CbbaComm::agentPosition(AgentId agent) const
     return std::nullopt;
   }
   return it->second.position;
+}
+
+// ===========================================================================
+// 組層級的 incident state（CB-4 第三批，2026-11-16，doc/cb4_design.md）
+// ===========================================================================
+std::uint16_t CbbaComm::incidentRevision(TaskId group_id) const
+{
+  const auto it = incidents_.find(group_id);
+  return it != incidents_.end() ? it->second.revision : 0;
+}
+
+const CbbaComm::IncidentState * CbbaComm::incident(TaskId group_id) const
+{
+  const auto it = incidents_.find(group_id);
+  return it != incidents_.end() && it->second.revision > 0 ? &it->second : nullptr;
+}
+
+std::vector<CbbaComm::IncidentResult> CbbaComm::takeIncidentResults()
+{
+  std::vector<IncidentResult> out;
+  out.swap(incident_results_);
+  return out;
+}
+
+std::vector<std::pair<TaskId, CbbaComm::IncidentState>> CbbaComm::takeAcceptedIncidents()
+{
+  std::vector<std::pair<TaskId, IncidentState>> out;
+  out.swap(accepted_incidents_);
+  return out;
+}
+
+ReportCheck CbbaComm::proposeIncident(const IncidentProposal & p, double /*now*/)
+{
+  if (!isOpen(p.task)) {
+    return ReportCheck::NOT_OPEN;
+  }
+  const Task & task = agent_.tasks().at(p.task);
+  const Assignment cur = assignment(p.task);
+  if (task.ext.group_id == 0 || cur.assignee != id() || !isLocking(cur.state)) {
+    return ReportCheck::STALE;
+  }
+  wire::IncidentUpdateBody b;
+  b.kind = wire::IncidentKind::PROPOSAL;
+  b.group_id = task.ext.group_id;
+  b.incident_revision = incidentRevision(task.ext.group_id);   // base：提案時知道的
+  b.proposer = id();
+  b.proposal_seq = ++next_proposal_seq_;
+  b.reporter_task = p.task;
+  b.assign_version = cur.version;
+  b.flags = static_cast<std::uint8_t>((p.position_valid ? wire::kIncidentPositionValid : 0) |
+    (p.declares_localized ? wire::kIncidentLocalized : 0));
+  b.x = static_cast<float>(p.position.x);
+  b.y = static_cast<float>(p.position.y);
+  b.z = static_cast<float>(p.position.z);
+  b.floor = p.floor;
+  b.radius = static_cast<float>(std::max(p.radius, 0.0));
+  b.track_id = p.track_id;
+  proposals_[b.group_id] = PendingProposal{b, -1e9};   // 同一組只留最新的提案
+  return ReportCheck::ACCEPTED;
+}
+
+wire::IncidentUpdateBody CbbaComm::incidentBody(TaskId group_id, const IncidentState & st) const
+{
+  wire::IncidentUpdateBody b;
+  b.relay = st.origin;
+  b.kind = wire::IncidentKind::ACCEPTED;
+  b.group_id = group_id;
+  b.incident_revision = st.revision;
+  b.proposer = st.proposer;
+  b.proposal_seq = st.proposal_seq;
+  b.reporter_task = st.localized_by;
+  b.flags = static_cast<std::uint8_t>((st.position_valid ? wire::kIncidentPositionValid : 0) |
+    (st.localized_by != 0 ? wire::kIncidentLocalized : 0));
+  b.x = static_cast<float>(st.position.x);
+  b.y = static_cast<float>(st.position.y);
+  b.z = static_cast<float>(st.position.z);
+  b.floor = st.floor;
+  b.radius = static_cast<float>(st.radius);
+  b.track_id = st.track_id;
+  return b;
+}
+
+void CbbaComm::sendIncidents(double now)
+{
+  // 機器人：閘道在線時送提案；沒有結果每 incident_retry 重送（同一個 proposal_seq，封包序號、origin 換新）
+  if (!proposals_.empty() && gatewayOnline(now)) {
+    for (auto & [group_id, pending] : proposals_) {
+      if (now - pending.last_sent < config_.incident_retry) {
+        continue;
+      }
+      const bool retry = pending.last_sent > -1e8;
+      pending.last_sent = now;
+      const wire::Header h = newHeader(PacketType::INCIDENT_UPDATE);
+      wire::IncidentUpdateBody b = pending.body;
+      b.relay = wire::originOf(h);
+      dedup_.firstSeen(PacketType::INCIDENT_UPDATE, b.relay, now);
+      ++stats_.incident_proposals;
+      send(wire::encodeIncidentUpdate(h, b), PacketType::INCIDENT_UPDATE, retry ? TxKind::RETRY : TxKind::BASE);
+    }
+  }
+  // 閘道：自己的、還開著的組，每 incident_period 重送目前的 Accepted
+  if (!config_.gateway || now < next_incident_period_) {
+    return;
+  }
+  next_incident_period_ = now + config_.incident_period;
+  for (auto & [group_id, st] : incidents_) {
+    if (st.revision == 0 || taskCreator(group_id) != id()) {
+      continue;
+    }
+    const auto tasks = groupTasks(group_id);
+    if (!std::any_of(tasks.begin(), tasks.end(), [this](TaskId t) {return isOpen(t);})) {
+      continue;
+    }
+    const wire::Header h = newHeader(PacketType::INCIDENT_UPDATE);
+    st.origin = wire::originOf(h);
+    dedup_.firstSeen(PacketType::INCIDENT_UPDATE, st.origin, now);
+    send(wire::encodeIncidentUpdate(h, incidentBody(group_id, st)), PacketType::INCIDENT_UPDATE, TxKind::RETRY);
+  }
+}
+
+void CbbaComm::onIncidentUpdate(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeIncidentUpdate(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::INCIDENT_UPDATE, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  // Accepted、Rejected 只收那個組的閘道（組的建立者）送的；提案只有建立者處理
+  if (b->kind != wire::IncidentKind::PROPOSAL && b->relay.origin_id != taskCreator(b->group_id)) {
+    ++stats_.incident_unauthorized;
+    return;
+  }
+  if (b->relay.origin_id != id()) {
+    relay(bytes);
+  }
+  switch (b->kind) {
+    case wire::IncidentKind::PROPOSAL:
+      if (config_.gateway && taskCreator(b->group_id) == id() && b->relay.origin_id == b->proposer) {
+        handleProposal(*b, now);
+      }
+      break;
+    case wire::IncidentKind::ACCEPTED:
+      applyAccepted(*b, now);
+      [[fallthrough]];
+    case wire::IncidentKind::REJECTED:
+      // 自己的提案有結果了
+      if (b->proposer == id()) {
+        const auto p = proposals_.find(b->group_id);
+        if (p != proposals_.end() && p->second.body.proposal_seq == b->proposal_seq) {
+          incident_results_.push_back(IncidentResult{b->group_id, b->proposal_seq,
+              b->kind == wire::IncidentKind::ACCEPTED, b->reason, b->incident_revision});
+          proposals_.erase(p);
+        }
+      }
+      break;
+  }
+}
+
+// 閘道：驗證提案 → 接受（incident revision + 1，廣播 Accepted）或拒絕（廣播 Rejected，提案者看）。
+// 同一個提案（提案者, session, seq）重送時回同一個結果（冪等）
+void CbbaComm::handleProposal(const wire::IncidentUpdateBody & b, double now)
+{
+  const auto key = std::make_tuple(b.proposer, b.relay.origin_session, b.proposal_seq);
+  const auto done = proposal_results_.find(key);
+  wire::IncidentUpdateBody out;
+  if (done != proposal_results_.end()) {
+    out = done->second;   // 已經回過：照原本的結果再送一次（上一次可能掉了）
+  } else {
+    out.kind = wire::IncidentKind::REJECTED;
+    out.group_id = b.group_id;
+    out.proposer = b.proposer;
+    out.proposal_seq = b.proposal_seq;
+    out.reporter_task = b.reporter_task;
+    out.incident_revision = incidentRevision(b.group_id);
+    const auto tasks = groupTasks(b.group_id);
+    const bool reporter_in_group = std::find(tasks.begin(), tasks.end(), b.reporter_task) != tasks.end();
+    const Assignment a = assignment(b.reporter_task);
+    if (tasks.empty()) {
+      out.reason = wire::IncidentReject::UNKNOWN_GROUP;
+    } else if (!std::any_of(tasks.begin(), tasks.end(), [this](TaskId t) {return isOpen(t);})) {
+      out.reason = wire::IncidentReject::GROUP_CLOSED;
+    } else if (b.incident_revision != incidentRevision(b.group_id)) {
+      out.reason = wire::IncidentReject::STALE;
+    } else if (!reporter_in_group || !isOpen(b.reporter_task) || a.assignee != b.proposer ||
+      a.version != b.assign_version || !isLocking(a.state))
+    {
+      out.reason = wire::IncidentReject::NOT_EXECUTOR;
+    } else if ((b.flags & wire::kIncidentPositionValid) == 0) {
+      out.reason = wire::IncidentReject::BAD_POSITION;
+    } else {
+      // 接受：新的 incident revision；宣告了定位（而且上面驗證過是那個角色目前的正式執行者）→ 在新 revision 記定位
+      out = b;
+      out.kind = wire::IncidentKind::ACCEPTED;
+      out.incident_revision = static_cast<std::uint16_t>(incidentRevision(b.group_id) + 1);
+      if ((b.flags & wire::kIncidentLocalized) == 0) {
+        out.reporter_task = 0;
+      }
+      out.flags = static_cast<std::uint8_t>(wire::kIncidentPositionValid |
+        (out.reporter_task != 0 ? wire::kIncidentLocalized : 0));
+      out.reason = wire::IncidentReject::NONE;
+    }
+    if (out.kind == wire::IncidentKind::ACCEPTED) {
+      ++stats_.incident_accepted;
+    } else {
+      ++stats_.incident_rejected;
+    }
+  }
+  const wire::Header h = newHeader(PacketType::INCIDENT_UPDATE);
+  out.relay = wire::originOf(h);
+  proposal_results_[key] = out;
+  dedup_.firstSeen(PacketType::INCIDENT_UPDATE, out.relay, now);
+  send(wire::encodeIncidentUpdate(h, out), PacketType::INCIDENT_UPDATE);
+  if (out.kind == wire::IncidentKind::ACCEPTED && applyAccepted(out, now)) {
+    accepted_incidents_.emplace_back(out.group_id, incidents_.at(out.group_id));
+  }
+}
+
+bool CbbaComm::applyAccepted(const wire::IncidentUpdateBody & b, double now)
+{
+  IncidentState & st = incidents_[b.group_id];
+  bool changed = false;
+  if (b.incident_revision > st.revision) {
+    st.revision = b.incident_revision;
+    st.position_valid = (b.flags & wire::kIncidentPositionValid) != 0;
+    st.position = Vec3{b.x, b.y, b.z};
+    st.floor = b.floor;
+    st.radius = b.radius;
+    st.track_id = b.track_id;
+    st.localized_by = (b.flags & wire::kIncidentLocalized) != 0 ? b.reporter_task : 0;
+    st.proposer = b.proposer;
+    st.proposal_seq = b.proposal_seq;
+    st.updated = now;
+    ++stats_.incident_applied;
+    changed = true;
+  }
+  if (b.incident_revision >= st.revision) {
+    st.origin = b.relay;
+  }
+  // 決議 C：宣告了定位而且通過閘道驗證的角色，在新 incident revision 記 target_localized（其他角色的事件結果型在新 revision 失效）
+  if (b.incident_revision == st.revision && st.localized_by != 0) {
+    const auto it = progress_.find(st.localized_by);
+    markLocalized(progress_[st.localized_by], it != progress_.end(), st.revision, now);
+  }
+  return changed;
 }
 
 }  // namespace cbba_core

@@ -24,6 +24,7 @@ wire::TaskProgressBody report(std::uint64_t version, std::uint16_t seq, Mileston
   b.relay = wire::RelayHeader{executor, 0xAB, seq};
   b.task_id = 7;
   b.revision = revision;
+  b.incident_revision = revision;   // 這些測試裡 task revision 和 incident revision 一起走
   b.assign_version = version;
   b.executor = executor;
   b.progress_seq = seq;
@@ -60,7 +61,7 @@ TEST(ProgressMerge, SeqAndVersion)
 
 TEST(ProgressMerge, EventMilestonesFollowRevision)
 {
-  // 事件結果型：換人後保留（同一個 revision）；revision 變新就清掉；舊的執行者晚到的定位也算（同 revision）
+  // 事件結果型：換人後保留（同一個 incident revision）；incident revision 變新就清掉；舊的執行者晚到的定位也算（同 revision）
   ProgressRecord rec;
   mergeProgress(rec, false, report(2, 1, kArrived | kLocalized), 0.0);
   mergeProgress(rec, true, report(3, 1, 0, 1, 2), 0.1);   // 換人
@@ -74,7 +75,7 @@ TEST(ProgressMerge, EventMilestonesFollowRevision)
   // revision 2 的回報（沒有定位）→ 事件結果清掉
   mergeProgress(rec, true, report(3, 2, 0, 2, 2), 0.2);
   EXPECT_EQ(rec.event_bits, 0);
-  EXPECT_EQ(rec.revision, 2);
+  EXPECT_EQ(rec.incident_revision, 2);
   // 舊 revision 晚到的定位不算
   EXPECT_FALSE(mergeProgress(rec, true, report(2, 5, kLocalized, 1), 0.3));
   EXPECT_EQ(rec.event_bits, 0);
@@ -100,7 +101,7 @@ struct Group
   TaskId ground{0};
 };
 
-Group makeGroup(bool optional_air, bool skip_satisfies, bool with_uav = true)
+Group makeGroup(bool optional_air, bool skip_satisfies, bool with_uav = true, bool all_or_nothing = false)
 {
   CommConfig cc;
   cc.epoch = 3;
@@ -126,6 +127,7 @@ Group makeGroup(bool optional_air, bool skip_satisfies, bool with_uav = true)
   air.task.ext.role_index = 0;
   air.task.ext.optional = optional_air;
   air.task.ext.skip_satisfies = skip_satisfies;
+  air.task.ext.all_or_nothing = all_or_nothing;
   InjectRequest ground = air;
   ground.role = "front";
   ground.task.platform = 2;
@@ -320,4 +322,99 @@ TEST(GroupProgress, BlockedDoesNotCountAsOverrun)
   g.swarm.run(1.0);
   EXPECT_FALSE(dog.blocked());
   EXPECT_TRUE(g.swarm.node(50).agent().execConstraints().queue_behind_active);
+}
+
+// ===========================================================================
+// 第二批：all-or-nothing 的暫定指派、group commit／timeout
+// ===========================================================================
+namespace
+{
+// 一台載具的指派流程（不握手），每個 tick 跑
+struct Runner
+{
+  AssignmentManager am;
+  std::vector<GroupTimeout> timeouts;
+  Runner(CbbaComm & comm, double hold, double timeout)
+  : am(comm, config(hold, timeout), [](int, const std::string &) {}) {}
+  static AssignmentConfig config(double hold, double timeout)
+  {
+    AssignmentConfig ac;
+    ac.require_accept = false;
+    ac.assign_hold = 0.0;
+    ac.group_commit_hold = hold;
+    ac.group_commit_timeout = timeout;
+    return ac;
+  }
+  void tick(double now)
+  {
+    am.setExec(ExecInput{}, now);
+    am.step(now);
+    am.takeRequests();
+    am.takeAssignedChanged();
+    for (const GroupTimeout & t : am.takeGroupTimeouts()) {
+      timeouts.push_back(t);
+    }
+  }
+};
+}  // namespace
+
+TEST(GroupCommit, CompleteGroupCommitsAfterHold)
+{
+  // 兩個必要角色都有得標者（UAV、狗）：穩定 1 s 後各自提交（建立正式指派）；提交前狗是 WAITING_GROUP、沒有鎖定
+  Group g = makeGroup(false, false, true, true);
+  Runner dog(g.swarm.node(50), 1.0, 30.0);
+  Runner uav(g.swarm.node(1), 1.0, 30.0);
+  bool saw_waiting = false;
+  g.swarm.onTick([&](double now) {
+      dog.tick(now);
+      uav.tick(now);
+      if (dog.am.waitingGroup()) {
+        saw_waiting = true;
+        EXPECT_FALSE(isLocking(g.swarm.node(50).assignment(g.ground).state));
+      }
+    });
+  g.swarm.run(3.0);
+  EXPECT_TRUE(saw_waiting);
+  ASSERT_TRUE(dog.am.active());
+  EXPECT_EQ(dog.am.active()->task, g.ground);
+  ASSERT_TRUE(uav.am.active());
+  EXPECT_EQ(uav.am.active()->task, g.air);
+  EXPECT_TRUE(dog.timeouts.empty());
+}
+
+TEST(GroupCommit, IncompleteGroupWaitsAndReportsOnce)
+{
+  // 必要的空中角色沒有載具能做：狗照常得標（暫定）但不提交、不鎖定；等 group_commit_timeout 通知一次（缺 role 0），繼續等
+  Group g = makeGroup(false, false, false, true);
+  Runner dog(g.swarm.node(50), 1.0, 10.0);
+  g.swarm.onTick([&](double now) {dog.tick(now);});
+  g.swarm.run(8.0);
+  EXPECT_EQ(g.swarm.node(50).agent().winner(g.ground), 50);
+  EXPECT_FALSE(dog.am.active());
+  ASSERT_TRUE(dog.am.waitingGroup());
+  EXPECT_EQ(dog.am.waitingGroup()->missing, std::vector<std::uint8_t>{0});
+  EXPECT_TRUE(dog.timeouts.empty());
+  g.swarm.run(10.0);
+  ASSERT_EQ(dog.timeouts.size(), 1u);
+  EXPECT_EQ(dog.timeouts[0].task, g.ground);
+  EXPECT_EQ(dog.timeouts[0].missing, std::vector<std::uint8_t>{0});
+  EXPECT_FALSE(dog.am.active());
+  EXPECT_FALSE(isLocking(g.swarm.node(50).assignment(g.ground).state));
+  // 必要角色被取消：groupStatus 標 broken（第三批由閘道處理），狗照舊不提交
+  ASSERT_EQ(g.swarm.node(kGateway).cancelTask(g.air, g.swarm.now()), ReportCheck::ACCEPTED);
+  g.swarm.run(1.0);
+  const auto st = g.swarm.node(50).groupStatus(g.swarm.node(50).agent().tasks().at(g.ground).ext.group_id, 2);
+  EXPECT_TRUE(st.broken);
+  EXPECT_FALSE(dog.am.active());
+}
+
+TEST(GroupCommit, NotAllOrNothingCommitsAtOnce)
+{
+  // 不是 all-or-nothing：缺角色也照常提交（第一批的行為不變）
+  Group g = makeGroup(false, false, false, false);
+  Runner dog(g.swarm.node(50), 1.0, 10.0);
+  g.swarm.onTick([&](double now) {dog.tick(now);});
+  g.swarm.run(1.0);
+  EXPECT_TRUE(dog.am.active());
+  EXPECT_FALSE(dog.am.waitingGroup());
 }

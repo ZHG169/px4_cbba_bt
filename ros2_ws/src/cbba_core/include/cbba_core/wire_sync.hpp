@@ -17,7 +17,7 @@
 // SYNC_BATCH（種類 8，分批回覆）：20 + 1 + Σ(3 + length) B，不超過 max_packet
 //   表頭 20 | item_count 1 | (type 1 + length 2 + 內容 length) × M
 //
-//   type      只能是 TASK_ANNOUNCE（3）、TASK_CLOSE（6）、TASK_SPEC（9，版本 4）或 TASK_PROGRESS（12，CB-4 的進度快照）
+//   type      只能是 TASK_ANNOUNCE（3）、TASK_CLOSE（6）、TASK_SPEC（9，版本 4）、TASK_PROGRESS（12，CB-4 的進度快照）或 INCIDENT_UPDATE（13，ACCEPTED 的快照）
 //   內容      那種封包表頭之後的全部（轉送區塊＋欄位，origin 是原本的）。解碼時補一個表頭，交給原本的解碼函式，
 //             驗證、權限檢查都和收到那種封包一樣
 //

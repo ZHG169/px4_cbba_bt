@@ -14,6 +14,7 @@ bool mergeProgress(ProgressRecord & rec, bool has, const wire::TaskProgressBody 
   if (!has || b.assign_version > rec.assign_version) {
     rec.origin = b.relay;
     rec.assign_version = b.assign_version;
+    rec.task_revision = b.revision;
     rec.executor = b.executor;
     rec.progress_seq = b.progress_seq;
     rec.phase = static_cast<ProgressPhase>(b.phase);
@@ -22,6 +23,7 @@ bool mergeProgress(ProgressRecord & rec, bool has, const wire::TaskProgressBody 
     changed = true;
   } else if (b.assign_version == rec.assign_version && b.progress_seq > rec.progress_seq) {
     rec.origin = b.relay;
+    rec.task_revision = b.revision;
     rec.progress_seq = b.progress_seq;
     rec.phase = static_cast<ProgressPhase>(b.phase);
     rec.step_index = b.step_index;
@@ -30,12 +32,12 @@ bool mergeProgress(ProgressRecord & rec, bool has, const wire::TaskProgressBody 
       rec.executor_bits != before.executor_bits;
   }
 
-  // 事件結果：跟著 revision（不跟指派版本，舊的執行者晚到的回報也算）
-  if (!has || b.revision > rec.revision) {
-    rec.revision = b.revision;
+  // 事件結果：跟著 incident revision（不跟指派版本，舊的執行者晚到的回報也算）
+  if (!has || b.incident_revision > rec.incident_revision) {
+    rec.incident_revision = b.incident_revision;
     rec.event_bits = event;
-    changed = changed || !has || event != before.event_bits || b.revision != before.revision;
-  } else if (b.revision == rec.revision && (rec.event_bits | event) != rec.event_bits) {
+    changed = changed || !has || event != before.event_bits || b.incident_revision != before.incident_revision;
+  } else if (b.incident_revision == rec.incident_revision && (rec.event_bits | event) != rec.event_bits) {
     rec.event_bits = static_cast<MilestoneMask>(rec.event_bits | event);
     changed = true;
   }
@@ -50,7 +52,8 @@ wire::TaskProgressBody progressBody(TaskId task, const ProgressRecord & rec)
   wire::TaskProgressBody b;
   b.relay = rec.origin;
   b.task_id = task;
-  b.revision = rec.revision;
+  b.revision = rec.task_revision;
+  b.incident_revision = rec.incident_revision;
   b.assign_version = rec.assign_version;
   b.executor = rec.executor;
   b.progress_seq = rec.progress_seq;
@@ -61,7 +64,7 @@ wire::TaskProgressBody progressBody(TaskId task, const ProgressRecord & rec)
 }
 
 MilestoneMask effectiveMilestones(const ProgressRecord * rec, std::uint64_t current_version,
-  std::uint16_t current_revision, bool accepted, bool expired, bool completed)
+  std::uint16_t current_incident_revision, bool accepted, bool expired, bool completed)
 {
   if (completed) {
     return kAllMilestones;
@@ -71,11 +74,24 @@ MilestoneMask effectiveMilestones(const ProgressRecord * rec, std::uint64_t curr
     if (rec->assign_version >= current_version) {
       out = static_cast<MilestoneMask>(out | rec->executor_bits);
     }
-    if (!expired && rec->revision == current_revision) {
+    if (!expired && rec->incident_revision == current_incident_revision) {
       out = static_cast<MilestoneMask>(out | rec->event_bits);
     }
   }
   return out;
+}
+
+void markLocalized(ProgressRecord & rec, bool has, std::uint16_t incident_revision, double now)
+{
+  if (!has || incident_revision > rec.incident_revision) {
+    rec.incident_revision = incident_revision;
+    rec.event_bits = milestoneBit(Milestone::TARGET_LOCALIZED);
+  } else if (incident_revision == rec.incident_revision) {
+    rec.event_bits = static_cast<MilestoneMask>(rec.event_bits | milestoneBit(Milestone::TARGET_LOCALIZED));
+  } else {
+    return;   // 比已知的舊
+  }
+  rec.updated = now;
 }
 
 const char * toString(GateState s)

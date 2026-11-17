@@ -18,7 +18,8 @@ constexpr std::uint8_t kSkipSatisfies = 1u << 3;
 
 bool validBody(const TaskAnnounceBody & b)
 {
-  const bool roles_ok = b.role_count <= kMaxRoles && (b.role_count == 0 || b.role_index < b.role_count);
+  const bool roles_ok = b.role_count <= kMaxRoles && (b.role_count == 0 || b.role_index < b.role_count) &&
+    (b.role_count == 8 || (b.distinct_agent_set >> b.role_count) == 0);
   return cbba_core::validTaskId(b.task_id) && (b.group_id == 0 || cbba_core::validTaskId(b.group_id)) &&
          b.task_type <= 3 && b.platform <= 2 && b.priority <= 3 && roles_ok &&
          std::isfinite(b.x) && std::isfinite(b.y) && std::isfinite(b.z) && std::isfinite(b.value) &&
@@ -64,6 +65,7 @@ std::vector<std::uint8_t> encodeTaskAnnounce(Header header, const TaskAnnounceBo
   w.u8(b.role_index);
   w.u8(b.role_count);
   w.u8(b.precedence);
+  w.u8(b.distinct_agent_set);
   w.u16(b.sync_window_s);
   w.u16(b.optional_no_capable_s);
   w.u16(b.optional_unassigned_s);
@@ -116,6 +118,7 @@ std::optional<TaskAnnounceBody> decodeTaskAnnounce(const std::uint8_t * data, st
   b.role_index = r.u8();
   b.role_count = r.u8();
   b.precedence = r.u8();
+  b.distinct_agent_set = r.u8();
   b.sync_window_s = r.u16();
   b.optional_no_capable_s = r.u16();
   b.optional_unassigned_s = r.u16();

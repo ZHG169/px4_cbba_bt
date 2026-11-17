@@ -62,6 +62,7 @@ TaskAnnounceBody fullSample()
   b.role_index = 1;
   b.role_count = 3;
   b.precedence = 0x01;
+  b.distinct_agent_set = 0x06;
   b.sync_window_s = 15;
   b.optional_no_capable_s = 10;
   b.optional_unassigned_s = 15;
@@ -74,9 +75,9 @@ TaskAnnounceBody fullSample()
 TEST(WireTaskAnnounce, SizeAndLayout)
 {
   const auto bytes = encodeTaskAnnounce(makeHeader(), fullSample());
-  ASSERT_EQ(bytes.size(), 123u);
-  EXPECT_EQ(kTaskAnnounceSize, 123u);
-  EXPECT_EQ(encodeTaskAnnounce(makeHeader(), sample()).size(), 123u);   // 固定大小
+  ASSERT_EQ(bytes.size(), 124u);
+  EXPECT_EQ(kTaskAnnounceSize, 124u);
+  EXPECT_EQ(encodeTaskAnnounce(makeHeader(), sample()).size(), 124u);   // 固定大小
   const std::vector<std::uint8_t> body(bytes.begin() + kHeaderSize + kRelaySize, bytes.end());
   const std::vector<std::uint8_t> expected = {
     0x00, 0xC8, 0x00, 0x03, 0x00, 0x00, 0x00, 0x11,  // task_id（建立者 200、世代 3、流水號 0x11）
@@ -104,6 +105,7 @@ TEST(WireTaskAnnounce, SizeAndLayout)
     0x00, 0xC8, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10,  // group_id
     0x01, 0x03,              // role_index、role_count
     0x01,                    // precedence
+    0x06,                    // distinct_agent_set（role 1、2；CB-4 第三批）
     0x00, 0x0F,              // sync_window_s
     0x00, 0x0A,              // optional_no_capable_s
     0x00, 0x0F,              // optional_unassigned_s
@@ -155,6 +157,7 @@ TEST(WireTaskAnnounce, RoundTripAllFields)
   EXPECT_EQ(d->role_index, 1);
   EXPECT_EQ(d->role_count, 3);
   EXPECT_EQ(d->precedence, 0x01);
+  EXPECT_EQ(d->distinct_agent_set, 0x06);
   EXPECT_EQ(d->sync_window_s, 15);
   EXPECT_EQ(d->optional_no_capable_s, 10);
   EXPECT_EQ(d->optional_unassigned_s, 15);

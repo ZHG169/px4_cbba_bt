@@ -240,6 +240,7 @@ void AssignmentManager::step(double now)
   const bool stable = head != 0 && now - candidate_since_ >= config_.assign_hold;
   const TaskId active_task = active_ ? active_->task : 0;
   TaskId waiting = 0;
+  TaskId waiting_group = 0;
   if (!pending_ && stable && head != active_task) {
     if (reserved_ && head == reserved_->task && !active_) {
       // 保留的排到第一：核心已經重新檢查過可行性（期限、電量），轉成執行中，不再問 BT
@@ -257,12 +258,15 @@ void AssignmentManager::step(double now)
       holdForRelease(head);   // release 之前：前往時間算好、剛好在 release 時到，才發（不建立正式指派、不鎖定）
     } else if (!comm_.specReady(head)) {
       waiting = head;   // WAITING_SPEC：TaskSpec 收齊前不建立正式指派、不發 current_task
+    } else if (!groupReady(head, now)) {
+      waiting_group = head;   // WAITING_GROUP：all-or-nothing 的組還沒湊齊（暫定，不鎖定）
     } else {
       // 新的、或搶占（核心只在可以安全中斷、優先級較高時才把它排到執行中任務的前面）
       startRequest(RequestKind::ACTIVATE, head, active_.has_value(), candidate_since_, now);
     }
   }
   setWaiting(waiting, now);
+  clearWaitingGroup(waiting_group);
 
   // 排隊：執行中任務之後的第一個火警（核心已檢查數量與期限），一樣經過接受，變成保留
   TaskId queued = 0;
@@ -336,6 +340,74 @@ void AssignmentManager::setWaiting(TaskId task, double now)
     info("排第一但還沒收齊 TaskSpec：" + taskName(task) + " 進入 WAITING_SPEC（不發 current_task）");
   }
   comm_.setWaitingSpec(task, now - waiting_spec_->since >= config_.spec_wait);
+}
+
+// all-or-nothing（CB-4 第二批，2026-11-16）：同組必要角色都有得標者（CbbaComm::groupStatus）而且穩定 group_commit_hold 秒
+// 才提交。各節點各自判斷（看到的得標者一樣，結果一樣），不另外交換「提交」的訊息
+bool AssignmentManager::groupReady(TaskId task, double now)
+{
+  const auto it = comm_.agent().tasks().find(task);
+  if (it == comm_.agent().tasks().end() || !it->second.ext.all_or_nothing || it->second.ext.group_id == 0) {
+    return true;
+  }
+  const CbbaComm::GroupStatus g = comm_.groupStatus(it->second.ext.group_id, it->second.ext.role_count);
+  if (!waiting_group_ || waiting_group_->task != task) {
+    waiting_group_ = WaitingGroup{task, now, std::nullopt, false, {}};
+    info("排第一但 all-or-nothing 的組還沒湊齊：" + taskName(task) + " 進入 WAITING_GROUP（暫定，不建立正式指派、不發 current_task）");
+  }
+  WaitingGroup & w = *waiting_group_;
+  // 還缺的角色＋同一台重複得標的 distinct 角色（第三批）都算沒湊齊
+  std::vector<std::uint8_t> pending = g.missing;
+  pending.insert(pending.end(), g.duplicates.begin(), g.duplicates.end());
+  if (pending != w.missing) {
+    const auto list = [](const std::vector<std::uint8_t> & roles) {
+        std::string text;
+        for (const std::uint8_t r : roles) {
+          text += (text.empty() ? "" : "、") + std::to_string(r);
+        }
+        return text;
+      };
+    info(taskName(task) + " 的組：" + (pending.empty() ? std::string("湊齊了") : "還缺 role " + list(pending)) +
+      (g.duplicates.empty() ? "" : "（role " + list(g.duplicates) + " 和別的 distinct 角色是同一台）") +
+      (g.broken ? "（有必要角色已取消或過期）" : ""));
+    w.missing = pending;
+  }
+  if (!g.complete) {
+    w.complete_since.reset();
+    if (!w.timeout_reported && now - w.since >= config_.group_commit_timeout) {
+      w.timeout_reported = true;
+      group_timeouts_.push_back(GroupTimeout{task, now - w.since, w.missing});
+      warn(taskName(task) + " 的組等了 " + std::to_string(static_cast<int>(now - w.since)) +
+        " s 還沒湊齊：通知閘道（GROUP_INCOMPLETE），繼續等");
+    }
+    return false;
+  }
+  if (!w.complete_since) {
+    w.complete_since = now;
+  }
+  if (now - *w.complete_since < config_.group_commit_hold) {
+    return false;
+  }
+  info(taskName(task) + " 的組湊齊 " + std::to_string(config_.group_commit_hold).substr(0, 3) + " s：提交（建立正式指派）");
+  waiting_group_.reset();
+  return true;
+}
+
+void AssignmentManager::clearWaitingGroup(TaskId keep)
+{
+  if (waiting_group_ && waiting_group_->task != keep) {
+    if (keep == 0) {
+      info("不再排第一（或換了任務）：結束 WAITING_GROUP " + taskName(waiting_group_->task));
+    }
+    waiting_group_.reset();
+  }
+}
+
+std::vector<GroupTimeout> AssignmentManager::takeGroupTimeouts()
+{
+  std::vector<GroupTimeout> out;
+  out.swap(group_timeouts_);
+  return out;
 }
 
 // 持有的指派還有效嗎：任務結束、回報完成、被更新的版本取代 → 不再持有

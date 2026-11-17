@@ -45,6 +45,40 @@ TEST(SpecGates, DefaultFirstStepWaitsCompleted)
   EXPECT_TRUE(parseSpecGates("", 0b010, 1).steps.empty());
 }
 
+TEST(SpecGates, SyncPoints)
+{
+  // 第二批：步驟的 sync 是會合點；只有會合點的步驟也列；sync 不是字串 → 警告
+  const std::string spec = R"({"steps": [{"action": "go_to"},
+    {"action": "inspect", "sync": "front_rear"},
+    {"action": "speak", "sync": 3, "wait_for": [{"role_index": 0, "milestone": "arrived"}]}]})";
+  const SpecGates g = parseSpecGates(spec, 0b001, 1);
+  ASSERT_EQ(g.steps.size(), 2u);
+  EXPECT_EQ(g.steps[0].step_index, 1);
+  EXPECT_EQ(g.steps[0].sync, "front_rear");
+  EXPECT_TRUE(g.steps[0].wait_for.empty());
+  EXPECT_EQ(g.steps[1].step_index, 2);
+  EXPECT_EQ(g.steps[1].sync, "3");   // 數字也當成名稱
+  EXPECT_TRUE(g.warnings.empty());
+  const SpecGates bad = parseSpecGates(R"({"steps": [{"action": "go_to", "sync": ["x"]}]})", 0, 0);
+  EXPECT_EQ(bad.warnings.size(), 1u);
+}
+
+TEST(SpecGates, EvaluateSync)
+{
+  // 都到了（或不用等）→ OPEN；還有沒到的：沒人到 → WAITING；第一個到之後過了時間窗 → OPEN＋timed_out；window 0 = 一直等
+  using M = SyncMember;
+  EXPECT_EQ(evaluateSync({{0, M::ARRIVED}, {2, M::EXCLUDED}}, 5.0, 6.0, 15.0).state, cbba_core::GateState::OPEN);
+  EXPECT_EQ(evaluateSync({}, std::nullopt, 0.0, 15.0).state, cbba_core::GateState::OPEN);
+  const SyncResult wait = evaluateSync({{0, M::MISSING}, {2, M::ARRIVED}}, 10.0, 20.0, 15.0);
+  EXPECT_EQ(wait.state, cbba_core::GateState::WAITING);
+  EXPECT_EQ(wait.missing, std::vector<std::uint8_t>{0});
+  EXPECT_EQ(evaluateSync({{0, M::MISSING}}, std::nullopt, 100.0, 15.0).state, cbba_core::GateState::WAITING);
+  const SyncResult late = evaluateSync({{0, M::MISSING}}, 10.0, 25.0, 15.0);
+  EXPECT_EQ(late.state, cbba_core::GateState::OPEN);
+  EXPECT_TRUE(late.timed_out);
+  EXPECT_EQ(evaluateSync({{0, M::MISSING}}, 10.0, 1000.0, 0.0).state, cbba_core::GateState::WAITING);
+}
+
 TEST(SpecGates, Warnings)
 {
   // 不認得的里程碑、不在 precedence 的角色（照樣等）、等自己、格式錯

@@ -181,6 +181,8 @@ private:
   bool buildBundle(double now);
   bool canPreempt(const Task & task) const;
   InsertionLimits limitsFor(const Task & task, const std::vector<TaskId> & path, double now) const;
+  // distinct_agent_set（CB-4 第三批）：bundle 或已接受（pinned）的任務裡有同組另一個 distinct 角色 → 不能再接這個
+  bool distinctConflict(const Task & task) const;
 
   AgentState state_;
   ScoringParams params_;

@@ -23,6 +23,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/StepGate.msg"
   "msg/Teammate.msg"
   "msg/Teammates.msg"
+  "msg/IncidentUpdate.msg"
+  "msg/IncidentState.msg"
+  "msg/FallbackRequest.msg"
   "srv/ManualOverride.srv"
   "srv/InjectTask.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs

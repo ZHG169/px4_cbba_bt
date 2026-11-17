@@ -68,6 +68,27 @@ struct AssignmentConfig
   // 執行中的任務超過「開始時估的前往＋停留時間」再加這麼多秒還沒完成：不再排隊接新任務（2026-10-13）
   double overrun_margin{10.0};
   double spec_wait{5.0};          // WAITING_SPEC 超過這麼久：加強補發、告警（不當成失敗）
+  // all-or-nothing（CB-4 第二批，2026-11-16）：同組必要角色都有得標者、穩定 group_commit_hold 秒才各自提交（建立正式指派）；
+  // 等超過 group_commit_timeout 通知一次（task_orphaned GROUP_INCOMPLETE），繼續等（取消或 fallback 由第三批的閘道決定）
+  double group_commit_hold{1.0};
+  double group_commit_timeout{30.0};
+};
+
+// WAITING_GROUP（CB-4 第二批）：all-or-nothing 的角色排第一，但同組必要角色還沒湊齊 → 像 WAITING_SPEC：
+// 不建立正式指派、不鎖定、不發 current_task（暫定，別台照 CBBA 規則仍可以贏走）
+struct WaitingGroup
+{
+  TaskId task{0};
+  double since{0.0};
+  std::optional<double> complete_since;   // 湊齊的時刻（要穩定 group_commit_hold）
+  bool timeout_reported{false};
+  std::vector<std::uint8_t> missing;
+};
+struct GroupTimeout
+{
+  TaskId task{0};
+  double waited{0.0};
+  std::vector<std::uint8_t> missing;
 };
 
 struct WaitingSpec
@@ -139,6 +160,9 @@ public:
   const std::optional<HeldAssignment> & reserved() const {return reserved_;}
   // 排第一、在等 TaskSpec 的任務（沒有時 nullopt）
   const std::optional<WaitingSpec> & waitingSpec() const {return waiting_spec_;}
+  const std::optional<WaitingGroup> & waitingGroup() const {return waiting_group_;}
+  // 上次呼叫之後等組湊齊超過 group_commit_timeout 的（每個任務一次，給節點發 task_orphaned）
+  std::vector<GroupTimeout> takeGroupTimeouts();
   std::optional<HeldAssignment> pending() const;
 
 private:
@@ -193,6 +217,11 @@ private:
   double queue_since_{0.0};
   std::optional<WaitingSpec> waiting_spec_;
   void setWaiting(TaskId task, double now);
+  // all-or-nothing：這個任務可以提交了嗎（不是 all-or-nothing 的一律可以）；不行時記在 waiting_group_
+  bool groupReady(TaskId task, double now);
+  void clearWaitingGroup(TaskId keep);
+  std::optional<WaitingGroup> waiting_group_;
+  std::vector<GroupTimeout> group_timeouts_;
 
   std::vector<AssignmentRequest> requests_;
   bool assigned_changed_{true};   // 一開始發一次「沒有任務」

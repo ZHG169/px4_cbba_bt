@@ -183,6 +183,9 @@ CbbaAgent::BidInfo CbbaAgent::bidFor(TaskId id, double now) const
   if (!exec_.accept_new) {
     return {0.0, "busy"};
   }
+  if (distinctConflict(it->second)) {
+    return {0.0, "distinct"};
+  }
   switch (fitness(state_, it->second)) {
     case Fitness::PLATFORM: return {0.0, "platform"};
     case Fitness::CAPABILITY: return {0.0, "capability"};
@@ -200,6 +203,24 @@ CbbaAgent::BidInfo CbbaAgent::bidFor(TaskId id, double now) const
   }
   const bool preempt = limits.preempt_drops_head && ins.position == 0;
   return {preempt ? ins.score : std::min(ins.score, bid_cap), "bid"};
+}
+
+bool CbbaAgent::distinctConflict(const Task & task) const
+{
+  const TaskExt & e = task.ext;
+  if (e.group_id == 0 || (e.distinct_agent_set & (1u << e.role_index)) == 0) {
+    return false;
+  }
+  const auto conflicts = [&](TaskId held) {
+      if (held == task.id) {
+        return false;
+      }
+      const auto it = tasks_.find(held);
+      return it != tasks_.end() && it->second.ext.group_id == e.group_id && it->second.ext.role_index != e.role_index &&
+             (e.distinct_agent_set & (1u << it->second.ext.role_index)) != 0;
+    };
+  return std::any_of(bundle_.begin(), bundle_.end(), conflicts) ||
+         std::any_of(exec_.pinned.begin(), exec_.pinned.end(), conflicts);
 }
 
 bool CbbaAgent::buildBundle(double now)
@@ -227,6 +248,7 @@ bool CbbaAgent::buildBundle(double now)
       if (suspended_.count(id) > 0) {continue;}  // BT 暫時拒絕
       if (locked_.count(id) > 0) {continue;}     // 別台已接受
       if (std::find(bundle_.begin(), bundle_.end(), id) != bundle_.end()) {continue;}
+      if (distinctConflict(task)) {continue;}    // 同組另一個 distinct 角色已經是自己的
 
       const InsertionLimits limits = limitsFor(task, path_, now);
       Insertion ins = bestInsertion(state_, current_path, task, now, params_, limits);

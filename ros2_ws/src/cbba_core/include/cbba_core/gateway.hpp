@@ -25,10 +25,25 @@
 //   開機同步完成，而且從連上（第一次聽到任何鄰居，或斷線後恢復）起過了 lost_timeout ＋ status_period，期間每個還聽得到的
 //   鄰居都收過 AGENT_STATE。聽不到任何鄰居 = 閘道斷線，重置
 // skip_satisfies（略過時 precedence 算不算滿足）只帶在任務定義裡：precedence 是 CB-4（M1～M2）
+//
+// 連鎖撤銷（CB-4 第三批，2026-11-16，doc/cb4_design.md）：stepGroups() 定期檢查自己建立的角色組裡的必要角色（不是 optional 的）：
+//   確定終止（立即）：合法取消、任務／事件過期
+//   暫時不完整（使用者 11/16）：目前沒有存活的、平台與能力符合的載具；沒有得標者也沒有正式指派（撤銷、重新競標中）
+//     → group_recovery_timeout（10 s）。期間恢復（有人得標或有正式指派）就繼續；
+//     逾時以 RECOVERY_TIMEOUT 收尾，保留最初的觸發原因（recovery trigger）。gateway_timeout（3 s）只用在存活判斷
+//   執行者失聯（做法 A，使用者 11/16）：超過 lost_timeout 先標記（holder_lost），不算恢復期限；照任務優先級等
+//     takeover_by_priority（P0 10、P1 15、P2／P3 30 s）讓原執行者恢復。時限到、撤銷舊指派並重新開放競標時，
+//     才開始算 group_recovery_timeout（觸發原因 HOLDER_LOST）。例 P1：1.5 s 判定失聯 → 再 15 s 撤銷、重新競標 →
+//     再 10 s 內沒有新的指派才 RECOVERY_TIMEOUT。避免接手還沒輪到，組就先被恢復期限取消
+//   有新的失效 → group_failure_version + 1；all_or_nothing 的組取消整組；不是的取消失效的角色和「依賴它的角色」
+//  （A 層 precedence 遞移），不依賴的照做。有取消角色而且組有 fallback_template → 發 FallbackRequest（冪等鍵
+//   (group_id, group_failure_version)）；組資料的 fallback_template 由規劃器在 InjectTask 明確帶入，閘道不猜
+//   閘道聽不到任何鄰居（membership 還沒好）時不判斷
 #pragma once
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,6 +65,10 @@ struct InjectRequest
   double release_sec{0.0};     // 從現在起多久之後才能開始；0 = 立即
   double expires_sec{0.0};     // 從現在起多久之後失效；0 = 不失效
   std::string spec;            // TaskSpec（JSON，B 層）；空 = 沒有
+  // CB-4 第三批：組資料。fallback_template 同一組的角色要一樣（第一個角色決定，之後不同 → 拒絕）；
+  // incident_revision 是規劃器展開時依據的 incident revision，不能比閘道目前的新
+  std::string fallback_template;
+  std::uint16_t incident_revision{0};
 };
 
 enum class InjectStatus { CREATED, DUPLICATE, REVISED, REJECTED };
@@ -65,6 +84,36 @@ struct DroppedOptional
 };
 const char * toString(InjectStatus status);
 
+// 連鎖撤銷（第三批）
+// 3 保留（11/16 初版的 NO_CAPABLE，改成暫時不完整的觸發原因）
+enum class GroupFailure : std::uint8_t { CANCELLED = 1, EXPIRED = 2, RECOVERY_TIMEOUT = 4 };
+const char * toString(GroupFailure f);
+// 暫時不完整的觸發原因（第一次進入暫時不完整時的，恢復前不改）
+enum class RecoveryTrigger : std::uint8_t { NONE = 0, NO_CAPABLE = 1, NO_WINNER = 2, HOLDER_LOST = 3 };
+const char * toString(RecoveryTrigger t);
+struct GroupEvent
+{
+  TaskId group_id{0};
+  std::string incident_id;
+  std::uint32_t failure_version{0};      // FallbackRequest 的冪等鍵（和 group_id 一起）
+  GroupFailure reason{GroupFailure::CANCELLED};
+  std::vector<std::uint8_t> failed_roles;       // 這次新失效的必要角色
+  std::vector<TaskId> failed_tasks;
+  std::vector<RecoveryTrigger> triggers;        // 和 failed_roles 對應：RECOVERY_TIMEOUT 的最初觸發原因（取消、過期是 NONE）
+  std::vector<std::uint8_t> cancelled_roles;    // 閘道因此取消的角色（含失效的、依賴它的；all_or_nothing 是整組）
+  bool all_or_nothing{false};
+  bool fallback{false};                 // 要發 FallbackRequest（有取消角色而且有 fallback_template）
+  std::string fallback_template;
+  std::uint16_t incident_revision{0};
+  bool position_valid{false};
+  Vec3 position{};
+};
+
+struct GatewayConfig
+{
+  double group_recovery_timeout{10.0};  // 暫時不完整等多久（使用者 11/16：group_recovery_timeout_s = 10）
+};
+
 struct InjectResult
 {
   InjectStatus status{InjectStatus::REJECTED};
@@ -77,7 +126,7 @@ struct InjectResult
 class Gateway
 {
 public:
-  explicit Gateway(CbbaComm & comm) : comm_(comm) {}
+  explicit Gateway(CbbaComm & comm, GatewayConfig config = GatewayConfig{}) : comm_(comm), config_(config) {}
 
   InjectResult inject(const InjectRequest & req, double now);
 
@@ -92,6 +141,26 @@ public:
   // optional 角色的自動關閉：每個 tick 呼叫（內部每 0.2 s 檢查一次），回傳這次關掉的
   std::vector<DroppedOptional> step(double now);
   bool membershipReady(double now);
+  // 連鎖撤銷：每個 tick 呼叫（內部每 0.2 s 檢查一次），回傳這次新的失效事件
+  std::vector<GroupEvent> stepGroups(double now);
+
+  struct GroupData
+  {
+    std::string incident_id;
+    std::string fallback_template;
+    std::uint32_t failure_version{0};
+    std::set<std::uint8_t> failed_roles;
+    bool terminated{false};             // all_or_nothing 已經整組取消
+    struct Recovery
+    {
+      double since{0.0};
+      RecoveryTrigger trigger{RecoveryTrigger::NONE};
+    };
+    std::map<TaskId, Recovery> recovering;   // 暫時不完整的角色：開始時刻、最初的觸發原因
+    // 執行者失聯、還在等失聯接手的角色（開始標記的時刻）：這段期間不算恢復期限（做法 A）
+    std::map<TaskId, double> holder_lost;
+  };
+  const std::map<TaskId, GroupData> & groups() const {return group_data_;}
 
 private:
   std::string check(const InjectRequest & req) const;   // 空字串 = 合法
@@ -100,6 +169,10 @@ private:
   InjectResult revise(const InjectRequest & req, Injected & known, double now);
 
   CbbaComm & comm_;
+  GatewayConfig config_;
+  std::map<TaskId, GroupData> group_data_;
+  std::set<TaskId> cascade_cancelled_;   // 連鎖撤銷取消的（之後看到它們被取消不再算成新的失效）
+  double next_group_check_{0.0};
   std::map<std::pair<std::string, std::string>, Injected> injected_;
   std::map<std::string, TaskId> groups_;   // incident_id → group_id
 

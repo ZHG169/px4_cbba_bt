@@ -738,7 +738,7 @@ TEST(CbbaComm, QuietWhenConverged)
   ASSERT_TRUE(swarm.consistent());
 
   // 收斂後每架每秒（協定版本 4）：CBBA_STATE 5 則（5 架 5 任務：37 + 6×5 + 27×5 = 202 B），其中 1 則帶摘要（5 個建立者 × 24 B）、
-  // AGENT_STATE 2 則（路徑 1、鄰居 4：90 + 8 + 8 = 106 B），加上每 5 s 一則保底重播（123 B）。沒有缺口請求、補發
+  // AGENT_STATE 2 則（路徑 1、鄰居 4：90 + 8 + 8 = 106 B），加上每 5 s 一則保底重播（124 B）。沒有缺口請求、補發
   // 缺口請求只看這 10 s（收斂之前五台同時建任務，摘要短暫不一致時有請求是正常的）
   std::vector<int> requests_before;
   for (AgentId a = 1; a <= 5; ++a) {
@@ -747,7 +747,7 @@ TEST(CbbaComm, QuietWhenConverged)
   const std::size_t before = swarm.bytes();
   swarm.run(10.0);
   const double per_agent_per_sec = (swarm.bytes() - before) / 10.0 / 5.0;
-  EXPECT_NEAR(per_agent_per_sec, 5 * 202.0 + 5 * 24.0 + 2 * 106.0 + 123.0 / 5.0, 30.0);
+  EXPECT_NEAR(per_agent_per_sec, 5 * 202.0 + 5 * 24.0 + 2 * 106.0 + 124.0 / 5.0, 30.0);
   for (AgentId a = 1; a <= 5; ++a) {
     EXPECT_EQ(swarm.node(a).stats().gap_requests, requests_before[a - 1]) << "agent " << a;
   }

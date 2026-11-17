@@ -28,9 +28,11 @@ wait_more() { local t=0; until [ "$(cnt "$2" "$1")" -gt "$3" ] || [ $t -ge $(( $
 check() { wait_more "$2" "$3" "${5:-0}" "$4" && ok "$1" || bad "$1（等不到「$2」，看 $3）"; }
 stop_all() { pkill -f "__node:=cb4t_[a-z0-9]+( |$)" 2>/dev/null; sleep 1; }
 trap stop_all EXIT
+# 這支只測第一、二批：閘道的連鎖撤銷（第三批：暫時不完整 10 s 就取消）時限拉長，不干擾
+GW_ISOLATE="-p group_recovery_timeout_s:=120.0"
 
 start_gcs() { ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/gcs -r __node:=cb4t_gcs \
-  --params-file $CFG/cbba_gateway.yaml "${COMMON[@]}" > $L/$1 2>&1 & }
+  --params-file $CFG/cbba_gateway.yaml "${COMMON[@]}" $GW_ISOLATE > $L/$1 2>&1 & }
 start_uav() { ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/uav1 -r __node:=cb4t_uav \
   --params-file $CFG/cbba_uav.yaml "${COMMON[@]}" -p agent_id:=1 -p participate:=always \
   -p initial_position:="[0.0, 0.0, 5.0]" -p battery:=100.0 > $L/$1 2>&1 & }

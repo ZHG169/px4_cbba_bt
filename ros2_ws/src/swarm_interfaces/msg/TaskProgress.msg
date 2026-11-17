@@ -10,7 +10,7 @@ uint8 PHASE_EN_ROUTE = 2
 uint8 PHASE_ARRIVED = 3
 uint8 PHASE_EXECUTING = 4
 uint8 PHASE_BLOCKED = 5          # 停在 wait_for 還沒滿足的 step：保持正式指派，不計入執行逾時
-uint8 PHASE_ARRIVED_WAITING = 6  # 第二批（sync_window）
+uint8 PHASE_ARRIVED_WAITING = 6  # 到了 sync 的會合點、等同伴（cbba_node 自動加 sync_reached；一樣不計入執行逾時）
 uint8 PHASE_DONE = 7
 uint8 phase
 

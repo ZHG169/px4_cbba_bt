@@ -148,8 +148,8 @@ TEST(Registry, RepoRegistryLoadsAndMatchesCode)
   EXPECT_EQ(uav->extra_preconditions, std::vector<std::string>{"airborne"});
   EXPECT_EQ(inspect->implementation("quadruped")->interface, "/ptz_inspect");
   EXPECT_EQ(reg.common_failure_codes.size(), 5u);
-  // 角色的里程碑（CB-4）：8 個，bit 和 cbba_core/milestones.hpp 一樣（checkRegistry 檢查）
-  ASSERT_EQ(reg.milestones.size(), 8u);
+  // 角色的里程碑（CB-4）：9 個（第二批加 sync_reached），bit 和 cbba_core/milestones.hpp 一樣（checkRegistry 檢查）
+  ASSERT_EQ(reg.milestones.size(), 9u);
   EXPECT_EQ(reg.milestones[4].name, "target_localized");
   EXPECT_EQ(reg.milestones[4].kind, "event");
 

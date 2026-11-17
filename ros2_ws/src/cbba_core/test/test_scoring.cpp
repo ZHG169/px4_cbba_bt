@@ -500,3 +500,113 @@ TEST(Scoring, NotWorthItGivesNoBid)
   EXPECT_LT(ins.gain, 0.0);
   EXPECT_DOUBLE_EQ(ins.score, 0.0);
 }
+
+// ===========================================================================
+// TDR 參數實驗的公式檢查（docs/tdr_experiment_plan.md 階段 B）：調 w_E、half_life 時出價的方向要對
+// ===========================================================================
+namespace
+{
+// 隨機的平台不限任務（新型，優先級 P0～P3）
+Task randomTask(TaskId id, std::mt19937 & rng)
+{
+  std::uniform_real_distribution<double> xy(-60.0, 60.0);
+  std::uniform_int_distribution<int> priority(0, 3);
+  std::uniform_real_distribution<double> duration(0.0, 20.0);
+  Task t = makeTask(id, TaskType::NONE, xy(rng), xy(rng), 60.0, 100.0, duration(rng));
+  t.explicit_deadline = false;
+  t.priority = static_cast<std::uint8_t>(priority(rng));
+  return t;
+}
+
+ScoringParams scaledHalfLife(double energy_weight, double gamma)
+{
+  ScoringParams p = makeParams(energy_weight);
+  const double base[4] = {60.0, 120.0, 300.0, 600.0};
+  for (std::size_t k = 0; k < 4; ++k) {
+    p.half_life_by_priority[k] = base[k] * gamma;
+  }
+  return p;
+}
+}  // namespace
+
+TEST(Scoring, HigherEnergyWeightNeverRaisesBid)
+{
+  // 其他條件不變、w_E 變大：插入多花的電 ≥ 0，所以出價不會變高（取最好的插入位置也一樣）
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> battery(40.0, 100.0);
+  std::uniform_int_distribution<int> length(0, 3);
+  const double weights[] = {0.0, 25.0, 50.0, 100.0, 200.0};
+  for (int k = 0; k < 400; ++k) {
+    AgentState uav = makeUav(0, 0, battery(rng));
+    uav.energy_per_meter = 0.1;   // 0.5 %/m 時大部分的路徑都不可行，測不到東西
+    std::vector<Task> path;
+    const int n = length(rng);
+    for (int i = 0; i < n; ++i) {
+      path.push_back(randomTask(static_cast<TaskId>(i + 1), rng));
+    }
+    const Task candidate = randomTask(99, rng);
+    double previous = kInf;
+    for (double w : weights) {
+      const double score = bestInsertion(uav, path, candidate, 0.0, scaledHalfLife(w, 1.0)).score;
+      EXPECT_LE(score, previous + 1e-9) << "case " << k << " w_E " << w;
+      previous = score;
+    }
+  }
+}
+
+TEST(Scoring, ShorterHalfLifeNeverRaisesLateReward)
+{
+  // half_life 變短：同樣晚到的報酬不會變高；單一任務的出價（能量項和 half_life 無關）也不會變高
+  std::mt19937 rng(12);
+  std::uniform_real_distribution<double> arrival(0.1, 600.0);
+  const double gammas[] = {2.0, 1.0, 0.5};
+  for (int k = 0; k < 400; ++k) {
+    const Task t = randomTask(1, rng);
+    const double tau = arrival(rng);
+    const AgentState uav = makeUav(0, 0);
+    double previous_value = kInf;
+    double previous_bid = kInf;
+    for (double g : gammas) {
+      const ScoringParams p = scaledHalfLife(50.0, g);
+      const double value = decayedValue(t, tau, p);
+      const double bid = bestInsertion(uav, {}, t, 0.0, p).score;
+      EXPECT_LE(value, previous_value + 1e-9) << "case " << k << " gamma " << g;
+      EXPECT_LE(bid, previous_bid + 1e-9) << "case " << k << " gamma " << g;
+      previous_value = value;
+      previous_bid = bid;
+    }
+  }
+  // 兩台一近一遠：half_life 變短時，遠的那台（晚到）報酬下降得比較多
+  Task fire = makeTask(1, TaskType::NONE, 0, 0, 600, 100);
+  fire.priority = 0;
+  const double near_long = decayedValue(fire, 20.0, scaledHalfLife(50.0, 2.0));
+  const double far_long = decayedValue(fire, 80.0, scaledHalfLife(50.0, 2.0));
+  const double near_short = decayedValue(fire, 20.0, scaledHalfLife(50.0, 0.5));
+  const double far_short = decayedValue(fire, 80.0, scaledHalfLife(50.0, 0.5));
+  EXPECT_GT(far_long - far_short, near_long - near_short);
+}
+
+TEST(Scoring, InfeasibleBidIsZeroForEveryParamSet)
+{
+  // 平台不符、電量不夠返航、硬期限來不及：不管 w_E、half_life 怎麼調，出價都是 0（不可行是條件，不是分數）
+  const AgentState uav = makeUav(0, 0);
+  const AgentState low = makeUav(0, 0, 21.0);
+  Task ground = makeTask(1, TaskType::NONE, 10, 0);
+  ground.platform = 2;
+  Task far = makeTask(2, TaskType::NONE, 60, 0);
+  far.explicit_deadline = false;
+  Task hard = makeTask(3, TaskType::NONE, 40, 0, 5.0);
+  hard.ext.deadline_hard = true;
+  for (double w : {0.0, 25.0, 50.0, 100.0, 200.0}) {
+    for (double g : {0.5, 1.0, 2.0}) {
+      const ScoringParams p = scaledHalfLife(w, g);
+      for (const auto & [agent, task] : {std::make_pair(uav, ground), std::make_pair(low, far),
+          std::make_pair(uav, hard)})
+      {
+        const Insertion ins = bestInsertion(agent, {}, task, 0.0, p);
+        EXPECT_FALSE(ins.feasible) << "task " << task.id << " w_E " << w << " gamma " << g;
+        EXPECT_EQ(ins.score, 0.0) << "task " << task.id << " w_E " << w << " gamma " << g;
+      }
+    }
+  }
+}

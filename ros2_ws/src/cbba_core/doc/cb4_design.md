@@ -156,25 +156,102 @@ BT 的用法：ExecuteSteps 每一步開始前看 `gates` 裡有沒有這一步�
 
 ---
 
-## 第二批：同步與整組提交（概要，第一批做完再細化）
+## 第二批：同步與整組提交（2026-11-16 實作，照 11/16 提出的 4 點建議；使用者之後要改再調）
 
-| 項 | 做法（草案） |
+| 項 | 做法 |
 |---|---|
-| ⑧ sync_window | 要同步的角色寫在 spec：步驟的 `sync: {group: "front_rear"}`（同一個 sync 名稱的步驟一起開始）；A 層 `sync_window_s` 是時間窗。gate 種類加 SYNC：同名的步驟的角色都 ARRIVED_WAITING → OPEN；第一個到的開始計時，超過 sync_window_s 還沒到齊 → **待決定**：照樣開始（建議，原文沒說失敗）或 UNSATISFIABLE |
-| ⑨ ARRIVED_WAITING | phase 6：已經到 sync 的那一步、等同伴；BT 回報。teammates 顯示各角色是不是已到 |
-| ⑩ all-or-nothing 暫定指派 | `all_or_nothing` 的組：角色排第一、assign_hold 已過，但同組必要角色還沒都有得標者 → `WAITING_GROUP`（像 WAITING_SPEC：不建立正式指派、不鎖定、不發 current_task），可以被別台搶走 |
-| ⑪ group commit／timeout | 各節點本機判斷：同組每個必要角色都有得標者、穩定 `group_commit_hold`（1 s）→ 各自 commit（建立正式指派）。超過 `group_commit_timeout`（暫定 30 s）湊不齊 → `task_orphaned`（GROUP_INCOMPLETE）通知閘道；閘道在第三批決定取消或 fallback。commit 之後有角色失敗 → 第三批的連鎖撤銷 |
+| ⑧ sync_window | spec 步驟的 `"sync": "名稱"` 是會合點；同組裡 spec 有同名會合點的其他角色（還沒收到 TaskSpec 的，有 `sync_window_s` 就當成要等）都到了才 OPEN。第一個到的（自己或別人，這台第一次看到的時刻）開始算，超過自己任務的 A 層 `sync_window_s` 還沒到齊 → **照樣 OPEN**、`StepGate.timed_out = true`、`waiting_for` 列沒到的、log 警告一次（已到的先開始）。`sync_window_s` 0 = 一直等。被略過、取消、過期的角色不等；已完成的算到了。判斷在 cbba_node（`swarm_cbba::evaluateSync`，`syncGate`） |
+| ⑨ ARRIVED_WAITING | BT 到了會合點回報 phase 6；cbba_node 自動加里程碑 **`sync_reached`（bit 8，執行者相關）**；和 BLOCKED 一樣保持正式指派、不計入執行逾時 |
+| ⑩ all-or-nothing 暫定指派 | `all_or_nothing` 的角色排第一、assign_hold 已過、TaskSpec 收齊，但同組必要角色（不是 optional）還沒都有得標者（`CbbaComm::groupStatus`：每個必要角色有得標者或正式指派、或已完成；role_count 個都認得）→ **WAITING_GROUP**：不建立正式指派、不鎖定、不發 current_task（CBBA 的得標照常，別台仍可以贏走） |
+| ⑪ group commit／timeout | 湊齊而且穩定 `group_commit_hold`（1 s）→ 各節點各自提交（建立正式指派；看到的得標者一樣，不另外交換訊息）。等超過 `group_commit_timeout`（30 s）→ `task_orphaned` **GROUP_INCOMPLETE**（每個任務一次，detail 寫缺哪幾個 role），繼續等；必要角色被取消、過期時 `groupStatus.broken`，取消或 fallback 由第三批的閘道決定 |
 
-## 第三批：閘道管理（概要）
+實作：`milestones.hpp`（`SYNC_REACHED`）、`CbbaComm::groupStatus`、`AssignmentManager`（`WaitingGroup`、`groupReady`、`takeGroupTimeouts`、
+`group_commit_hold`／`group_commit_timeout`）、`swarm_interfaces` 2.2.0（`StepGate.sync`、`timed_out`；`TaskOrphaned.GROUP_INCOMPLETE`）、
+`swarm_cbba/spec_gates`（`sync`、`evaluateSync`）、cbba_node（參數 `group_commit_hold`、`group_commit_timeout`）、註冊表 `milestones` 加 `sync_reached`。
+測試：`test_group_progress` 的 `GroupCommit`（3 項）、`test_spec_gates`（+2）、`test_registry`（9 個里程碑）、節點 `swarm_cbba/test/cb4b_iface.sh`（S0～S4）。
 
-| 項 | 做法（草案） |
+## 第三批：閘道管理（使用者 11/16 定案）
+
+| 項目 | 定案 |
 |---|---|
-| ⑫ IncidentUpdate | 執行者（例如 UAV）回報新的目標位置：`incident_update` 話題（BT → CBBA，incident_id／group_id、位置、不確定半徑、track_id）→ 新封包送閘道（轉送、ACK、斷線暫存，照 DETECTION 的做法）→ 閘道發 `incident_updates` 給事件流程 |
-| ⑬ 同組 revision 更新 | 閘道收到 IncidentUpdate → incident revision + 1 → 對同組**還沒完成**、位置參照 incident 的角色做 `inject_task` 改版（只改位置 → 指派保留，4b 已有）→ 執行中的角色收到新的 current_task（同 task_id、新 revision）。BT 端「同 task_id 新 revision 更新目標、不重做」要和伯宇對 |
-| ⑭ 連鎖撤銷 | 閘道依範本：必要角色的 gate UNSATISFIABLE（取消、過期、永久沒人能做）時，`all_or_nothing` 的組 → 取消整組（TASK_CLOSE reason 2）；不是 → 只通知。閘道斷線時各節點不自己撤銷（照 4e 的 O3 規則） |
-| ⑮ FallbackRequest | 閘道判定要降級時（非 optional 角色沒人可用、整組取消）發 `fallback_request`（group_id、incident_id、原因、`fallback_template`）給外部 task manager，由它重新 `inject_task`（範本展開是 PLN-1，閘道不自己展開） |
+| 1 IncidentUpdate 傳送方式 | 新增獨立的 **INCIDENT_UPDATE** 封包，不借用 DETECTION。執行中的角色向閘道回報 incident 的位置與追蹤更新 |
+| 2 同組角色改版 | 閘道接受更新後 **incident_revision 統一加 1**，重新展開同組未完成的角色；**只有 TaskSpec 實際改變的角色才增加 task revision** |
+| 3 連鎖撤銷 | 必要角色**永久不可恢復 → 立即處理**；**暫時不完整 → 等 `group_recovery_timeout_s` = 10 s**，期間讓 CBBA 重新分配；是否取消整組由 `all_or_nothing` 決定 |
+| 4 fallback_template | 由規劃器透過 **InjectTask 明確帶入**、保存在組資料；閘道不依事件類型猜測。需要降級時只發布**冪等的 FallbackRequest**，由外部 task manager 展開新範本、注入新的角色組 |
 
----
+### 細節的決議（使用者 11/16）
+
+| 細節 | 決議 |
+|---|---|
+| A incident_revision 的傳送 | **組層級的 incident state**，INCIDENT_UPDATE 分 **Proposal／Accepted 兩階段**。TASK_PROGRESS **同時保留 task_revision 與 incident_revision** |
+| B 重新展開 | **不採用閘道字串代換**：Planner 訂閱 `incident_updates`，自己重新展開範本，用 `inject_task` 改版（只有 TaskSpec 改了的角色） |
+| C 回報者自己的定位 | 採用，但 update 要**明確宣告**（例如 `declares_localized`），**閘道驗證通過**後，才在新的 incident revision 建立那個角色的里程碑 |
+| 連鎖撤銷 | 採用上面的表；**非 all-or-nothing 也要處理依賴失效**；FallbackRequest 用 **`group_failure_version`** 保證冪等 |
+
+### 實作的設計（照決議展開，2026-11-16）
+
+**INCIDENT_UPDATE（新種類 13，轉送）**
+- Proposal（機器人 → 閘道）：group_id、base_incident_revision（提案時知道的）、proposal_seq、回報者的 task_id 與指派版本、位置（map＋樓層＋不確定半徑）、
+  track_id、`declares_localized`。沒收到結果每 1 s 重送（同一個 proposal_seq），閘道斷線時暫存（照 DETECTION）。
+- 閘道驗證：組還開著；回報者是那個角色**目前的正式執行者**（指派版本一致）；base_incident_revision = 目前的（較舊 → 拒絕，回報者重新看最新的再提）；
+  位置有效。通過 → incident_revision + 1，廣播 **Accepted**；不通過 → 廣播 **Rejected**（原因），只給回報者看。
+- Accepted（閘道 → 全隊）：group_id、incident_revision、位置、track_id、`localized_by`（宣告了而且通過驗證的回報者 task_id，沒有 = 0）、
+  回應的 (提案者, proposal_seq)。開著的組每 2 s 重送、新鄰居時 SYNC_BATCH 補。各節點記 group → incident state；
+  `localized_by` 的任務在新 incident revision 記 target_localized（C）；其他角色的事件結果型里程碑在新 revision 失效。
+- 閘道發 ROS 話題 `incident_updates`（給 Planner）；Planner 重新展開，對 TaskSpec 改了的角色 `inject_task` 改版（B）。
+
+**TASK_PROGRESS**：加 `incident_revision`（2 B，61 → 63 B）；原本的 `revision` 是 task_revision。事件結果型里程碑看 incident_revision
+（沒有角色組的任務 incident_revision = 0）。第一批「用前置任務的 revision 代表」的暫時做法拿掉。
+
+**連鎖撤銷（閘道）**
+- 永久不可恢復：必要角色取消、過期、全隊沒有能做的、PERMANENT 失敗而且沒有別台能做 → 立即處理；暫時不完整（沒人得標、撤銷、重新競標）
+  → 等 `group_recovery_timeout_s` 10 s，還沒恢復就當成永久。
+- all-or-nothing：取消整組其他還開著的角色＋ FallbackRequest。
+- 非 all-or-nothing（**依賴失效**）：找出依賴失效角色的角色（A 層 precedence 遮罩，遞移），它們的 gate 永遠不會開 → 一起取消；
+  不依賴的角色照做。有被取消的角色時發 FallbackRequest；都不依賴時只發 `task_orphaned`（GROUP_BROKEN）。
+- `group_failure_version`：每個組的失效事件計數，每次新的失效（新的角色、新的原因）+ 1；FallbackRequest 的冪等鍵 = (group_id, group_failure_version)，
+  重送用同一個。組沒有 fallback_template 時不發。
+
+**InjectTask**：加 `fallback_template`（組資料，同一組的角色要一樣；不一樣時拒絕）、`incident_revision`（Planner 改版時帶，閘道檢查不比目前的新）。
+
+**distinct_agent_set（使用者 11/16 一併凍結）**：同組角色是否必須由不同 agent 執行，由 `distinct_agent_set`（位元 = role_index，
+同組一樣）定義；**出價時是硬性可行性限制**（bundle 或已接受的任務裡有同組另一個 distinct 角色 → 不出價，出價表原因 `distinct`），
+**Group Commit 再驗證一次**（`groupStatus.duplicates`：同一台得標兩個 distinct 角色 → 不算湊齊）。同一 agent 要依序做幾件事 →
+同一個角色的多個 steps。TASK_ANNOUNCE 加 1 B（123 → 124 B）。
+
+### 第三批的實作（2026-11-16）
+
+| 部分 | 檔案 |
+|---|---|
+| 封包 | `wire_incident_update.hpp/.cpp`（種類 13，90 B，PROPOSAL／ACCEPTED／REJECTED）；`wire_task_progress`（加 incident_revision，63 B）；`wire_task_announce`（distinct_agent_set，124 B）；`wire_sync`（SYNC_BATCH 可以裝 13） |
+| 協定層 | `CbbaComm::proposeIncident`、`handleProposal`（閘道驗證：組開著、base 最新、提案者是那個角色目前的正式執行者、位置有效；冪等）、`applyAccepted`（只收組的建立者送的；宣告定位通過 → `markLocalized`）、`sendIncidents`（提案重送、閘道每 2 s 重送 Accepted）、新鄰居的快照、`incidentRevision`、`incident`、`takeIncidentResults`、`takeAcceptedIncidents`；`groupStatus.duplicates` |
+| 核心 | `CbbaAgent::distinctConflict`（buildBundle、bidFor） |
+| 閘道 | `Gateway::stepGroups`（永久：取消、過期、NO_CAPABLE 3 s；暫時：沒人接 `group_recovery_timeout` 10 s；all_or_nothing 整組取消，否則失效＋依賴的角色；`group_failure_version`）、組資料（fallback_template、incident_id）、InjectTask 的 incident_revision、fallback_template、distinct 檢查 |
+| ROS | swarm_interfaces 2.3.0：`IncidentUpdate`（BT → CBBA `incident_update`）、`IncidentState`（閘道 `incident_updates`）、`FallbackRequest`（閘道 `fallback_request`，transient_local）、`TaskOrphaned.GROUP_BROKEN`、`InjectTask`（distinct_agent_set、fallback_template、incident_revision）、`Teammates`（incident revision、位置）；cbba_node 參數 `group_recovery_timeout_s`、`group_no_capable_s` |
+| 測試 | `test_wire_incident_update`（3）、`test_incident`（Incident 4、Distinct 3〔使用者的三個案例〕、Cascade 4）、`test_wire_task_progress`、`test_wire_task_announce`、`test_wire_header` 更新；節點 `swarm_cbba/test/cb4c_iface.sh`（I1、D1、D2、C1） |
+
+**修訂（使用者 11/16）**：「目前沒有存活的、平台與能力符合的載具」**不是永久不可恢復**，和沒人得標、執行者失聯、重新競標一樣標成
+**暫時不完整**，共用 `group_recovery_timeout_s`（10 s）；gateway_timeout（3 s）只用在存活判斷。恢復期限內恢復（有人得標或重新形成
+正式指派、執行者還在）就繼續執行；逾時以 **RECOVERY_TIMEOUT** 收尾，並**保留最初的觸發原因**（`recovery_triggers`：NO_CAPABLE、
+NO_WINNER、HOLDER_LOST；中途換成別的原因不改、不重新計時）。只有**合法取消、任務／事件過期**這種確定終止事件立即連鎖撤銷。
+初版的 NO_CAPABLE 3 s（`group_no_capable_s`）拿掉；`GroupFailure` 的 3 保留不用。
+同時成立時的觸發原因順序：執行者失聯 → 沒有能做的載具 → 沒人得標。
+
+已知限制：「PERMANENT 失敗而且沒有別台能做」閘道看不到各台的排除，會表現成「沒人得標」走 10 s 的恢復等待。
+
+**執行者失聯 vs 失聯接手（做法 A，使用者 11/16）**：原本兩個計時都從「判定失聯」起算，P0 的失聯接手（10 s）和恢復期限（10 s）
+同時到，接手後還要重新競標，所以幾乎一定先 RECOVERY_TIMEOUT；P1（15 s）、P2／P3（30 s）更是輪不到接手。改成：
+
+1. 執行者超過 `lost_timeout`（1.5 s）→ 只**標記失聯**（`GroupData::holder_lost`），**不**開始算 `group_recovery_timeout_s`。
+2. 各優先級照 `takeover_by_priority`（P0 10、P1 15、P2／P3 30 s）等原執行者恢復；恢復了就取消標記、繼續執行。
+3. 接手時限到、`CbbaComm::takeOverLost` 撤銷舊指派並重新開放競標時，**才開始算 10 s**（觸發原因 HOLDER_LOST）。
+4. 10 s 內有新的得標者或正式指派 → 組繼續；逾時仍沒人接 → RECOVERY_TIMEOUT，依 all_or_nothing 取消整組，或只取消失效角色＋依賴它的
+   角色，再發 FallbackRequest。
+
+例 P1：1.5 s 判定失聯 → 再 15 s 撤銷、重新競標 → 再 10 s 內沒有新指派才 fallback（失聯後最多約 26.5 s）。
+測試：`test_incident` 的 `Takeover.SuccessfulTakeoverDoesNotCancel`（接手時限 12 s ＞ 恢復期限 10 s 仍由別台接手、不取消）、
+`Takeover.TakeoverTimeoutTriggersFallback`（撤銷後 10 s 才失效、取消依賴角色、發 fallback）、`Takeover.WaitFollowsTaskPriority`
+（P0、P1 各用自己的接手時限）；`Cascade.HolderLost*` 照新時序更新。
 
 ## 使用者 11/16 的決定（第一批照這些實作）
 

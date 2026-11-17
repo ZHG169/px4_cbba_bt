@@ -3,8 +3,8 @@
 // 每個任務留一筆最新的進度（ProgressRecord）。合併規則（使用者 11/16 定）：
 //   執行者相關的部分（phase、step、accepted…target_locked）：指派版本較新的取代；同一個版本用 progress_seq 取大的，
 //     里程碑只增不減。較舊的指派版本不影響（換人後清掉執行者相關的里程碑）
-//   事件結果的部分（target_localized、has_observation）：跟著 revision，不跟指派版本：revision 較新的取代、相同的 OR、
-//     較舊的不算。換人後保留，但只在「同一個 revision、任務沒過期」時算數
+//   事件結果的部分（target_localized、has_observation）：跟著 incident revision（組層級，第三批），不跟指派版本：
+//     較新的取代、相同的 OR、較舊的不算。換人後保留，但只在「同一個 incident revision、任務沒過期」時算數
 //   completed：任務完成（TASK_CLOSE reason 1）時成立，視為全部里程碑都達成
 #pragma once
 
@@ -26,8 +26,9 @@ struct ProgressRecord
   ProgressPhase phase{ProgressPhase::UNKNOWN};
   std::uint8_t step_index{wire::kUnknownStep};
   MilestoneMask executor_bits{0};    // 這個指派版本的執行者相關里程碑
-  MilestoneMask event_bits{0};       // 事件結果型（revision 那一個 revision）
-  std::uint16_t revision{0};         // event_bits 屬於哪個 revision
+  MilestoneMask event_bits{0};       // 事件結果型（incident_revision 那一個）
+  std::uint16_t incident_revision{0};   // event_bits 屬於哪個 incident revision
+  std::uint16_t task_revision{0};    // 最新那份回報時的任務 revision（只記著、送快照用）
   double updated{0.0};               // 最後一次有變化的時刻
 };
 
@@ -41,12 +42,15 @@ wire::TaskProgressBody progressBody(TaskId task, const ProgressRecord & rec);
 //   rec               這個任務的進度（沒有時 nullptr）
 //   current_version   目前已知的正式指派版本：執行者相關的里程碑只在 rec.assign_version ≥ 它時算
 //                    （換人之後、新的執行者還沒回報前，舊的不算）
-//   current_revision  任務目前的 revision：事件結果型只在相同時算
+//   current_incident_revision  組目前的 incident revision：事件結果型只在相同時算
 //   accepted          目前的正式指派是保留或執行中（accepted 由 cbba_node 判定，不用 BT 回報）
 //   expired           任務已過期：事件結果型不算
 //   completed         TASK_CLOSE reason 1：全部
 MilestoneMask effectiveMilestones(const ProgressRecord * rec, std::uint64_t current_version,
-  std::uint16_t current_revision, bool accepted, bool expired, bool completed);
+  std::uint16_t current_incident_revision, bool accepted, bool expired, bool completed);
+
+// 閘道接受的 IncidentUpdate 宣告了定位、而且通過驗證（第三批 C）：這個任務的 target_localized 記在新的 incident revision
+void markLocalized(ProgressRecord & rec, bool has, std::uint16_t incident_revision, double now);
 
 // step-level gate（第一批）：每個 wait_for 一個
 struct WaitFor

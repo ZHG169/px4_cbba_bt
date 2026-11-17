@@ -80,6 +80,7 @@
 #include "cbba_core/wire_completion.hpp"
 #include "cbba_core/wire_detection.hpp"
 #include "cbba_core/wire_header.hpp"
+#include "cbba_core/wire_incident_update.hpp"
 #include "cbba_core/wire_sync.hpp"
 #include "cbba_core/wire_task_announce.hpp"
 #include "cbba_core/wire_task_progress.hpp"
@@ -141,6 +142,9 @@ struct CommConfig
   //（錯開，補掉包）；執行中每 progress_period 重送最新的快照
   double progress_period{2.0};
   std::array<double, 2> progress_repeat{{0.2, 0.6}};
+  // 組層級的 incident state（CB-4 第三批）：提案沒收到結果每 incident_retry 重送；閘道把開著的組的 Accepted 每 incident_period 重送
+  double incident_retry{1.0};
+  double incident_period{2.0};
 };
 
 // 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
@@ -323,6 +327,12 @@ struct CommStats
   int progress_applied{0};      // 收到、合併後有變化的
   int progress_rejected{0};     // 不是正式執行者的回報（同一個指派版本、執行者不同）
   int progress_snapshots{0};    // 發現新鄰居時排進補發的進度筆數
+  // 組層級的 incident state（CB-4 第三批，2026-11-16）
+  int incident_proposals{0};    // 自己送出的提案（含重送）
+  int incident_accepted{0};     // 閘道：接受的提案
+  int incident_rejected{0};     // 閘道：拒絕的提案
+  int incident_applied{0};      // 套用的 Accepted（incident revision 變新）
+  int incident_unauthorized{0}; // Accepted／Rejected 不是那個組的閘道送的（丟掉）
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -452,7 +462,8 @@ public:
   std::map<DigestKey, wire::DigestEntry> digestMap() const;
   std::size_t repairQueued() const
   {
-    return repair_open_.size() + repair_spec_.size() + repair_closed_.size() + repair_progress_.size();
+    return repair_open_.size() + repair_spec_.size() + repair_closed_.size() + repair_progress_.size() +
+           repair_incident_.size();
   }
 
   // ---------- 偵測（2-1b M0 第 5 步，2026-11-14） ----------
@@ -479,8 +490,63 @@ public:
   // task 這個角色的一個 wait_for 現在的狀態（前面的角色：完成 → OPEN；略過 → 看它的 skip_satisfies；取消、過期 →
   // UNSATISFIABLE；還開著 → 有沒有達成那個里程碑；還不認得 → WAITING）
   GateState gateState(TaskId task, const WaitFor & wait, double now) const;
+  // all-or-nothing 的組（CB-4 第二批）：role_count 個角色都認得、每個必要角色（不是 optional）都有得標者（或已完成）
+  // → complete；必要角色被取消、過期 → broken（不會湊齊，第三批由閘道處理）；missing 是還缺的 role_index
+  struct GroupStatus
+  {
+    bool complete{false};
+    bool broken{false};
+    std::vector<std::uint8_t> missing;
+    // distinct_agent_set（第三批）：同一台得標了同組兩個以上 distinct 角色 → 那些角色（除了第一個）列在這裡，不算湊齊
+    std::vector<std::uint8_t> duplicates;
+  };
+  GroupStatus groupStatus(TaskId group_id, std::uint8_t role_count) const;
   // 某台的位置（自己、或收過 AGENT_STATE 的鄰居）
   std::optional<Vec3> agentPosition(AgentId agent) const;
+
+  // ---------- 組層級的 incident state（CB-4 第三批，2026-11-16，doc/cb4_design.md） ----------
+  // 每個組一份，由建立那個組的閘道（taskCreator(group_id)）決定：執行中的角色送 Proposal → 閘道驗證 → 廣播 Accepted
+  //（incident revision + 1）或 Rejected。事件結果型里程碑只在同一個 incident revision 算數
+  struct IncidentState
+  {
+    std::uint16_t revision{0};   // 0 = 還沒有任何更新
+    bool position_valid{false};
+    Vec3 position{};
+    std::uint8_t floor{0};
+    double radius{0.0};
+    std::uint32_t track_id{0};
+    TaskId localized_by{0};      // 這個 revision 宣告了定位而且通過驗證的角色任務（0 = 沒有）
+    AgentId proposer{kNoAgent};
+    std::uint32_t proposal_seq{0};
+    wire::RelayHeader origin;    // 最近一次送出（閘道）或收到的 Accepted 的轉送區塊：快照沿用
+    double updated{0.0};
+  };
+  struct IncidentProposal
+  {
+    TaskId task{0};              // 自己目前持有（保留或執行中）的角色任務
+    bool position_valid{true};
+    Vec3 position{};
+    std::uint8_t floor{0};
+    double radius{0.0};
+    std::uint32_t track_id{0};
+    bool declares_localized{false};   // 明確宣告已定位目標（通過驗證才在新 revision 記 target_localized）
+  };
+  struct IncidentResult
+  {
+    TaskId group_id{0};
+    std::uint32_t proposal_seq{0};
+    bool accepted{false};
+    wire::IncidentReject reason{wire::IncidentReject::NONE};
+    std::uint16_t incident_revision{0};
+  };
+  // 機器人：提案。task 要是自己保留或執行中的正式指派、屬於角色組（否則 STALE／NOT_OPEN）；每個組只留最新的一個提案，
+  // 閘道在線時送、沒有結果每 incident_retry 重送（同一個 proposal_seq）
+  ReportCheck proposeIncident(const IncidentProposal & p, double now);
+  std::uint16_t incidentRevision(TaskId group_id) const;
+  const IncidentState * incident(TaskId group_id) const;
+  std::vector<IncidentResult> takeIncidentResults();   // 機器人：自己提案的結果（取走）
+  // 閘道：這次接受的（group → 新的 state；取走，給節點發 incident_updates）
+  std::vector<std::pair<TaskId, IncidentState>> takeAcceptedIncidents();
 
 private:
   struct PendingTask
@@ -609,6 +675,27 @@ private:
   std::map<TaskId, ProgressTx> progress_tx_;   // 自己是執行者、要送的
   std::set<TaskId> repair_progress_;           // 補發佇列：進度快照（發現新鄰居時）
   bool progress_snapshot_due_{false};
+
+  // 組層級的 incident state（CB-4 第三批）
+  void onIncidentUpdate(const Bytes & bytes, double now);
+  void handleProposal(const wire::IncidentUpdateBody & b, double now);   // 閘道（組的建立者）
+  bool applyAccepted(const wire::IncidentUpdateBody & b, double now);
+  void sendIncidents(double now);
+  wire::IncidentUpdateBody incidentBody(TaskId group_id, const IncidentState & s) const;
+  struct PendingProposal
+  {
+    wire::IncidentUpdateBody body;
+    double last_sent{-1e9};
+  };
+  std::map<TaskId, PendingProposal> proposals_;   // 組 → 自己還沒有結果的提案
+  std::uint32_t next_proposal_seq_{0};
+  std::map<TaskId, IncidentState> incidents_;
+  // 閘道：(提案者, 提案者的 session, proposal_seq) → 給過的結果（同一個提案重送時回同一個結果，冪等）
+  std::map<std::tuple<AgentId, std::uint64_t, std::uint32_t>, wire::IncidentUpdateBody> proposal_results_;
+  std::vector<IncidentResult> incident_results_;
+  std::vector<std::pair<TaskId, IncidentState>> accepted_incidents_;
+  std::set<TaskId> repair_incident_;              // 補發佇列：incident state 的快照（發現新鄰居時）
+  double next_incident_period_{0.0};
 
   // 狀態
   std::set<AgentId> aliveSet(double now) const;   // 自己 + 直接鄰居 + 鄰居的鄰居

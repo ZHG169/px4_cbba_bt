@@ -88,6 +88,9 @@
 #include <std_msgs/msg/u_int16.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <swarm_interfaces/msg/detection.hpp>
+#include <swarm_interfaces/msg/fallback_request.hpp>
+#include <swarm_interfaces/msg/incident_state.hpp>
+#include <swarm_interfaces/msg/incident_update.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_assignments.hpp>
@@ -123,6 +126,9 @@ using TaskProgressMsg = swarm_interfaces::msg::TaskProgress;
 using TeammatesMsg = swarm_interfaces::msg::Teammates;
 using TeammateMsg = swarm_interfaces::msg::Teammate;
 using StepGateMsg = swarm_interfaces::msg::StepGate;
+using IncidentUpdateMsg = swarm_interfaces::msg::IncidentUpdate;
+using IncidentStateMsg = swarm_interfaces::msg::IncidentState;
+using FallbackRequestMsg = swarm_interfaces::msg::FallbackRequest;
 
 std::string envOr(const char * name, const std::string & fallback)
 {
@@ -215,6 +221,8 @@ const char * orphanReasonName(std::uint8_t r)
     case TaskOrphanedMsg::OPTIONAL_NO_CAPABLE: return "OPTIONAL_NO_CAPABLE";
     case TaskOrphanedMsg::OPTIONAL_UNASSIGNED: return "OPTIONAL_UNASSIGNED";
     case TaskOrphanedMsg::OPTIONAL_GROUP_DONE: return "OPTIONAL_GROUP_DONE";
+    case TaskOrphanedMsg::GROUP_INCOMPLETE: return "GROUP_INCOMPLETE";
+    case TaskOrphanedMsg::GROUP_BROKEN: return "GROUP_BROKEN";
   }
   return "?";
 }
@@ -510,6 +518,9 @@ public:
     assign.overrun_margin = declare_parameter<double>("overrun_margin", assign.overrun_margin);
     // WAITING_SPEC（協定版本 4）：排第一但 TaskSpec 還沒收齊超過這麼久 → 向每個鄰居要、告警（task_spec_missing），不算失敗
     assign.spec_wait = declare_parameter<double>("spec_wait", assign.spec_wait);
+    // all-or-nothing（CB-4 第二批）：湊齊後穩定多久才提交、等多久通知一次（task_orphaned GROUP_INCOMPLETE）
+    assign.group_commit_hold = declare_parameter<double>("group_commit_hold", assign.group_commit_hold);
+    assign.group_commit_timeout = declare_parameter<double>("group_commit_timeout", assign.group_commit_timeout);
     spec_wait_ = assign.spec_wait;
     const int tick_ms = declare_parameter<int>("tick_ms", 10);
 
@@ -558,7 +569,13 @@ public:
           rclcpp::QoS(1).reliable().transient_local());
     }
     if (gateway) {
-      gateway_ = std::make_unique<Gateway>(*comm_);
+      // 連鎖撤銷（CB-4 第三批）：暫時不完整（沒有能做的載具、沒人得標、執行者失聯）等多久
+      GatewayConfig gc;
+      gc.group_recovery_timeout = declare_parameter<double>("group_recovery_timeout_s", gc.group_recovery_timeout);
+      gateway_ = std::make_unique<Gateway>(*comm_, gc);
+      incident_states_pub_ = create_publisher<IncidentStateMsg>(topic("incident_updates"), rclcpp::QoS(50).reliable());
+      fallback_pub_ = create_publisher<FallbackRequestMsg>(topic("fallback_request"),
+          rclcpp::QoS(20).reliable().transient_local());
       inject_srv_ = create_service<InjectTaskSrv>(topic("inject_task"),
           [this](const std::shared_ptr<InjectTaskSrv::Request> req,
           std::shared_ptr<InjectTaskSrv::Response> res) {onInject(*req, *res);});
@@ -595,6 +612,10 @@ public:
       topic("task_progress"), rclcpp::QoS(10).reliable(),
       [this](TaskProgressMsg::ConstSharedPtr msg) {onTaskProgress(*msg);});
     teammates_pub_ = create_publisher<TeammatesMsg>(topic("teammates"), rclcpp::QoS(1).reliable().transient_local());
+    // 執行中的角色回報 incident 的位置與追蹤更新（第三批）：送 Proposal 給組的閘道
+    incident_sub_ = create_subscription<IncidentUpdateMsg>(
+      topic("incident_update"), rclcpp::QoS(10).reliable(),
+      [this](IncidentUpdateMsg::ConstSharedPtr msg) {onIncidentUpdate(*msg);});
 
     timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms), [this]() {step();});
 
@@ -985,9 +1006,24 @@ private:
     assignments_->setExec(ExecInput{}, now);   // 不握手、沒有 BT 的執行狀態
     assignments_->step(now);
     assignments_->takeRequests();              // 不握手：沒有要送給 BT 的請求
+    // all-or-nothing 的組等太久（CB-4 第二批）：通知一次，繼續等
+    for (const GroupTimeout & g : assignments_->takeGroupTimeouts()) {
+      const auto it = comm_->agent().tasks().find(g.task);
+      if (it == comm_->agent().tasks().end()) {
+        continue;
+      }
+      std::string missing;
+      for (const std::uint8_t r : g.missing) {
+        missing += (missing.empty() ? "" : "、") + std::to_string(r);
+      }
+      publishOrphan(it->second, TaskOrphanedMsg::GROUP_INCOMPLETE, g.waited,
+        "all-or-nothing 的組還缺 role " + missing + "，繼續等（不建立正式指派）");
+    }
     publishOutputs(now);
     publishAssignments(now);
     dropOptionals(now);
+    handleIncidents(now);
+    handleGroupFailures(now);
     checkSpecWait(now);
     handleDetections(now);
     publishTeammates(now);
@@ -1059,12 +1095,16 @@ private:
       reached = static_cast<MilestoneMask>(reached & ~by_node);
     }
     const auto phase = static_cast<ProgressPhase>(msg.phase);
+    if (phase == ProgressPhase::ARRIVED_WAITING) {
+      reached = static_cast<MilestoneMask>(reached | milestoneBit(Milestone::SYNC_REACHED));   // 到了會合點（第二批）
+    }
     const ReportCheck check = comm_->reportProgress(msg.task_id, phase, msg.step_index, reached, now);
     if (check != ReportCheck::ACCEPTED) {
       RCLCPP_WARN(get_logger(), "task_progress %s 拒絕（%s）", name.c_str(), toString(check));
       return;
     }
-    assignments_->setBlocked(msg.task_id, phase == ProgressPhase::BLOCKED, now);
+    // 停在 gate（BLOCKED）或在會合點等同伴（ARRIVED_WAITING）：保持正式指派，不計入執行逾時
+    assignments_->setBlocked(msg.task_id, phase == ProgressPhase::BLOCKED || phase == ProgressPhase::ARRIVED_WAITING, now);
     std::string names;
     for (const std::string & n : milestoneNames(reached)) {
       names += (names.empty() ? "" : "、") + n;
@@ -1107,6 +1147,15 @@ private:
       msg.task_id = tid;
       msg.group_id = me.ext.group_id;
       msg.role_index = me.ext.role_index;
+      msg.incident_revision = comm_->incidentRevision(me.ext.group_id);
+      if (const auto * inc = comm_->incident(me.ext.group_id)) {
+        msg.incident_valid = inc->position_valid;
+        msg.incident_position.x = inc->position.x;
+        msg.incident_position.y = inc->position.y;
+        msg.incident_position.z = inc->position.z;
+        msg.incident_track_id = inc->track_id;
+      }
+      sig += "i" + std::to_string(msg.incident_revision) + ";";
       for (const TaskId t : comm_->groupTasks(me.ext.group_id)) {
         msg.roles.push_back(teammate(t, now));
         const TeammateMsg & r = msg.roles.back();
@@ -1131,6 +1180,21 @@ private:
             worst = st;
           }
         }
+        if (!g.sync.empty()) {
+          sg.sync = g.sync;
+          const swarm_cbba::SyncResult sr = syncGate(me, g, now);
+          for (const std::uint8_t r : sr.missing) {
+            sg.waiting_for.push_back("sync " + g.sync + ": role " + std::to_string(r));
+          }
+          sg.timed_out = sr.timed_out;
+          if (sr.timed_out && gates_->sync_timeout_logged.insert(g.step_index).second) {
+            RCLCPP_WARN(get_logger(), "gate %s step %u：會合點 %s 等了 %u s 還沒到齊，照樣開始（已到的先開始）",
+              taskName(tid).c_str(), g.step_index, g.sync.c_str(), static_cast<unsigned>(me.ext.sync_window_s));
+          }
+          if (static_cast<int>(sr.state) > static_cast<int>(worst)) {
+            worst = sr.state;
+          }
+        }
         sg.state = static_cast<std::uint8_t>(worst);
         const auto prev = gates_->last_state.find(g.step_index);
         if (prev == gates_->last_state.end() || prev->second != sg.state) {
@@ -1139,7 +1203,7 @@ private:
             " → ").c_str(), toString(worst), sg.waiting_for.empty() ? "" : ("（等 " + sg.waiting_for.front() + "）").c_str());
           gates_->last_state[g.step_index] = sg.state;
         }
-        sig += "g" + std::to_string(sg.step_index) + ":" + std::to_string(sg.state) + ";";
+        sig += "g" + std::to_string(sg.step_index) + ":" + std::to_string(sg.state) + (sg.timed_out ? "t" : "") + ";";
         msg.gates.push_back(std::move(sg));
       }
     } else {
@@ -1151,6 +1215,179 @@ private:
       next_teammates_ = now + 1.0;
       teammates_pub_->publish(msg);
     }
+  }
+
+  // 執行中的角色回報 incident 更新（第三批）：要是目前 current_task 上、屬於角色組的任務
+  void onIncidentUpdate(const IncidentUpdateMsg & msg)
+  {
+    const double now = wallNow();
+    const std::string name = taskName(msg.task_id);
+    const auto & active = assignments_->active();
+    if (!active || active->task != msg.task_id) {
+      RCLCPP_WARN(get_logger(), "incident_update %s 忽略：不是目前 current_task 上的任務", name.c_str());
+      return;
+    }
+    CbbaComm::IncidentProposal p;
+    p.task = msg.task_id;
+    p.position_valid = msg.position_valid;
+    p.position = {msg.position.x, msg.position.y, msg.position.z};
+    p.floor = msg.floor;
+    p.radius = msg.radius;
+    p.track_id = msg.track_id;
+    p.declares_localized = msg.declares_localized;
+    const ReportCheck check = comm_->proposeIncident(p, now);
+    if (check != ReportCheck::ACCEPTED) {
+      RCLCPP_WARN(get_logger(), "incident_update %s 拒絕（%s：不是自己保留或執行中的角色組任務）", name.c_str(), toString(check));
+      return;
+    }
+    RCLCPP_INFO(get_logger(), "incident_update %s：提案 (%.1f, %.1f, %.1f)、track %u%s，送閘道驗證%s", name.c_str(),
+      msg.position.x, msg.position.y, msg.position.z, msg.track_id, msg.declares_localized ? "、宣告定位" : "",
+      msg.detail.empty() ? "" : ("（" + msg.detail + "）").c_str());
+  }
+
+  // 提案的結果（機器人）、閘道接受的更新（發 incident_updates 給 Planner）
+  void handleIncidents(double now)
+  {
+    for (const auto & r : comm_->takeIncidentResults()) {
+      if (r.accepted) {
+        RCLCPP_INFO(get_logger(), "incident 提案 %u 接受：組 %s 的 incident revision %u", r.proposal_seq,
+          taskName(r.group_id).c_str(), r.incident_revision);
+      } else {
+        RCLCPP_WARN(get_logger(), "incident 提案 %u 拒絕（%s）：組 %s 目前 incident revision %u", r.proposal_seq,
+          wire::toString(r.reason), taskName(r.group_id).c_str(), r.incident_revision);
+      }
+    }
+    if (!incident_states_pub_) {
+      return;
+    }
+    for (const auto & [group_id, st] : comm_->takeAcceptedIncidents()) {
+      IncidentStateMsg m;
+      m.group_id = group_id;
+      const auto data = gateway_->groups().find(group_id);
+      m.incident_id = data != gateway_->groups().end() ? data->second.incident_id : std::string();
+      m.incident_revision = st.revision;
+      m.position_valid = st.position_valid;
+      m.position.x = st.position.x;
+      m.position.y = st.position.y;
+      m.position.z = st.position.z;
+      m.floor = st.floor;
+      m.radius = static_cast<float>(st.radius);
+      m.track_id = st.track_id;
+      m.localized_by = st.localized_by;
+      m.proposer = st.proposer;
+      m.stamp = toRosTime(now);
+      incident_states_pub_->publish(m);
+      RCLCPP_INFO(get_logger(), "incident 接受：組 %s（%s）revision %u、(%.1f, %.1f, %.1f)、track %u、提案 %u%s", taskName(group_id).c_str(),
+        m.incident_id.c_str(), st.revision, st.position.x, st.position.y, st.position.z, st.track_id, st.proposer,
+        st.localized_by != 0 ? "、定位已驗證" : "");
+    }
+  }
+
+  // 連鎖撤銷（閘道，第三批）：task_orphaned GROUP_BROKEN、有取消角色＋fallback_template 時 FallbackRequest
+  void handleGroupFailures(double now)
+  {
+    if (!gateway_) {
+      return;
+    }
+    for (const GroupEvent & e : gateway_->stepGroups(now)) {
+      const auto list = [](const std::vector<std::uint8_t> & roles) {
+          std::string text;
+          for (const std::uint8_t r : roles) {
+            text += (text.empty() ? "" : "、") + std::to_string(r);
+          }
+          return text.empty() ? std::string("無") : text;
+        };
+      std::string triggers;
+      for (const RecoveryTrigger t : e.triggers) {
+        if (t != RecoveryTrigger::NONE) {
+          triggers += (triggers.empty() ? "（最初：" : "、") + std::string(toString(t));
+        }
+      }
+      if (!triggers.empty()) {
+        triggers += "）";
+      }
+      const std::string detail = std::string(toString(e.reason)) + triggers + "：role " + list(e.failed_roles) + "；取消 role " +
+        list(e.cancelled_roles) + (e.all_or_nothing ? "（all_or_nothing 整組）" : "（依賴失效的角色）") +
+        (e.fallback ? "；FallbackRequest " + e.fallback_template : "");
+      RCLCPP_WARN(get_logger(), "角色組 %s（%s）失效 #%u：%s", taskName(e.group_id).c_str(), e.incident_id.c_str(),
+        e.failure_version, detail.c_str());
+      if (!e.failed_tasks.empty()) {
+        const auto it = comm_->agent().tasks().find(e.failed_tasks.front());
+        if (it != comm_->agent().tasks().end()) {
+          publishOrphan(it->second, TaskOrphanedMsg::GROUP_BROKEN, 0.0, detail);
+        }
+      }
+      if (e.fallback) {
+        FallbackRequestMsg m;
+        m.group_id = e.group_id;
+        m.incident_id = e.incident_id;
+        m.failure_version = e.failure_version;
+        m.fallback_template = e.fallback_template;
+        m.reason = static_cast<std::uint8_t>(e.reason);
+        m.reason_text = toString(e.reason);
+        m.failed_roles = e.failed_roles;
+        for (const RecoveryTrigger t : e.triggers) {
+          m.recovery_triggers.push_back(static_cast<std::uint8_t>(t));
+        }
+        m.cancelled_roles = e.cancelled_roles;
+        m.all_or_nothing = e.all_or_nothing;
+        m.incident_revision = e.incident_revision;
+        m.position_valid = e.position_valid;
+        m.position.x = e.position.x;
+        m.position.y = e.position.y;
+        m.position.z = e.position.z;
+        m.stamp = toRosTime(now);
+        fallback_pub_->publish(m);
+        RCLCPP_WARN(get_logger(), "FallbackRequest：組 %s failure_version %u、範本 %s", taskName(e.group_id).c_str(),
+          e.failure_version, e.fallback_template.c_str());
+      }
+    }
+  }
+
+  // 會合點（第二批）：同一組裡 spec 有同名會合點的其他角色（還沒收到 TaskSpec 的，有 sync_window_s 就當成要等）
+  // 到了沒有；第一個到的時刻（自己或別人，這台第一次看到的時刻）開始算時間窗
+  swarm_cbba::SyncResult syncGate(const Task & me, const swarm_cbba::StepGateDef & g, double now)
+  {
+    std::vector<std::pair<std::uint8_t, swarm_cbba::SyncMember>> others;
+    bool someone_arrived = (comm_->milestones(me.id, now) & milestoneBit(Milestone::SYNC_REACHED)) != 0;
+    for (const TaskId t : comm_->groupTasks(me.ext.group_id)) {
+      if (t == me.id) {
+        continue;
+      }
+      const Task & other = comm_->agent().tasks().at(t);
+      bool member = other.ext.sync_window_s > 0;
+      if (const auto spec = comm_->taskSpec(t)) {
+        SiblingSync & cached = gates_->sibling_syncs[t];
+        if (!cached.parsed || cached.revision != other.revision) {   // 每個 revision 解析一次
+          cached = SiblingSync{true, other.revision, {}};
+          for (const auto & sg : swarm_cbba::parseSpecGates(*spec, 0, other.ext.role_index).steps) {
+            if (!sg.sync.empty()) {
+              cached.names.insert(sg.sync);
+            }
+          }
+        }
+        member = cached.names.count(g.sync) > 0;
+      }
+      if (!member) {
+        continue;
+      }
+      swarm_cbba::SyncMember m = swarm_cbba::SyncMember::MISSING;
+      if (!comm_->taskOpen(t)) {
+        m = comm_->closeReason(t) == wire::kCloseDone ? swarm_cbba::SyncMember::ARRIVED : swarm_cbba::SyncMember::EXCLUDED;
+      } else if ((comm_->milestones(t, now) & (milestoneBit(Milestone::SYNC_REACHED) |
+        milestoneBit(Milestone::COMPLETED))) != 0)
+      {
+        m = swarm_cbba::SyncMember::ARRIVED;
+        someone_arrived = true;
+      }
+      others.emplace_back(other.ext.role_index, m);
+    }
+    auto first = gates_->sync_first.find(g.step_index);
+    if (someone_arrived && first == gates_->sync_first.end()) {
+      first = gates_->sync_first.emplace(g.step_index, now).first;
+    }
+    return swarm_cbba::evaluateSync(others, first != gates_->sync_first.end() ? std::optional<double>(first->second) :
+      std::nullopt, now, me.ext.sync_window_s);
   }
 
   TeammateMsg teammate(TaskId t, double now) const
@@ -1318,6 +1555,9 @@ private:
       in.release_sec = req.release_sec;
       in.expires_sec = req.expires_sec;
       in.spec = req.spec;
+      e.distinct_agent_set = req.distinct_agent_set;
+      in.fallback_template = req.fallback_template;
+      in.incident_revision = req.incident_revision;
       r = gateway_->inject(in, now);
     }
     res.accepted = r.status != InjectStatus::REJECTED;
@@ -1731,14 +1971,28 @@ private:
   // 角色協同（CB-4 第一批）
   rclcpp::Subscription<TaskProgressMsg>::SharedPtr progress_sub_;
   rclcpp::Publisher<TeammatesMsg>::SharedPtr teammates_pub_;
+  struct SiblingSync
+  {
+    bool parsed{false};
+    std::uint16_t revision{0};
+    std::set<std::string> names;
+  };
   struct GateCache
   {
     TaskId task{0};
     std::uint16_t revision{0};
     swarm_cbba::SpecGates gates;
     std::map<std::uint8_t, std::uint8_t> last_state;   // step → 上次的 gate 狀態（印變化）
+    // 會合點（第二批）：第一個到的時刻（這台第一次看到）、已經印過逾時的步驟、同組其他角色的會合點名稱（task → (revision, 名稱)）
+    std::map<std::uint8_t, double> sync_first;
+    std::set<std::uint8_t> sync_timeout_logged;
+    std::map<TaskId, SiblingSync> sibling_syncs;
   };
   std::optional<GateCache> gates_;
+  // 第三批
+  rclcpp::Subscription<IncidentUpdateMsg>::SharedPtr incident_sub_;
+  rclcpp::Publisher<IncidentStateMsg>::SharedPtr incident_states_pub_;   // 閘道才有
+  rclcpp::Publisher<FallbackRequestMsg>::SharedPtr fallback_pub_;        // 閘道才有
   std::string teammates_sig_;
   double next_teammates_{0.0};
   rclcpp::Publisher<DetectionMsg>::SharedPtr detections_pub_;   // 閘道才有

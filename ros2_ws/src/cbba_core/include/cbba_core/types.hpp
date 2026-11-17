@@ -57,6 +57,10 @@ struct TaskExt
   bool all_or_nothing{false};         // 湊不齊就全部不做
   bool skip_satisfies{false};         // 這個 optional 角色被略過時，等它的角色視為條件已滿足
   std::uint8_t precedence{0};         // 要等哪幾個角色（位元 = role_index）
+  // 要由不同載具執行的角色（位元 = role_index；同組的每個角色要一樣，CB-4 第三批，2026-11-16）：出價時是硬性可行性限制
+  //（已持有或路徑上有同組另一個 distinct 角色的那台不出價），all-or-nothing 的 Group Commit 再驗證一次。
+  // 同一台要依序做幾件事時，寫成同一個角色的多個 steps
+  std::uint8_t distinct_agent_set{0};
   std::uint16_t sync_window_s{0};     // 要同時到位的時間窗；0 = 不用
   std::uint16_t optional_no_capable_s{0};   // optional 關閉 O1 的等待；0 = 預設
   std::uint16_t optional_unassigned_s{0};   // optional 關閉 O2 的等待；0 = 預設

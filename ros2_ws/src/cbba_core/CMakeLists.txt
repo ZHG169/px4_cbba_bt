@@ -24,6 +24,7 @@ add_library(${PROJECT_NAME}_core
   src/wire_task_spec.cpp
   src/wire_detection.cpp
   src/wire_task_progress.cpp
+  src/wire_incident_update.cpp
   src/milestones.cpp
   src/group_progress.cpp
   src/cbba_comm.cpp
@@ -37,11 +38,12 @@ target_include_directories(${PROJECT_NAME}_core PUBLIC
 )
 
 # 離線模擬（測試與 cbba_sim 工具共用）
-add_library(${PROJECT_NAME}_sim src/network_sim.cpp src/mission_sim.cpp)
+add_library(${PROJECT_NAME}_sim src/network_sim.cpp src/mission_sim.cpp src/tdr_experiment.cpp)
 target_link_libraries(${PROJECT_NAME}_sim PUBLIC ${PROJECT_NAME}_core)
 
+find_package(Threads REQUIRED)
 add_executable(cbba_sim tools/cbba_sim.cpp)
-target_link_libraries(cbba_sim ${PROJECT_NAME}_sim)
+target_link_libraries(cbba_sim ${PROJECT_NAME}_sim Threads::Threads)
 
 set(CBBA_CORE_TESTS
   test_capabilities
@@ -61,12 +63,15 @@ set(CBBA_CORE_TESTS
   test_wire_detection
   test_wire_task_progress
   test_group_progress
+  test_wire_incident_update
+  test_incident
   test_comm
   test_exec_constraints
   test_assignment
   test_gateway
   test_detection
   test_mission_sim
+  test_tdr_experiment
 )
 
 find_package(ament_cmake QUIET)
@@ -84,7 +89,7 @@ if(ament_cmake_FOUND)
   install(TARGETS cbba_sim DESTINATION lib/${PROJECT_NAME})
 
   # CBBA 的 ROS 節點在 swarm_cbba 套件（2026-10-12，照機器狗端的套件結構）；這裡只有核心、協定層、離線模擬
-  install(PROGRAMS scripts/plot_results.py DESTINATION lib/${PROJECT_NAME})
+  install(PROGRAMS scripts/plot_results.py scripts/tdr_report.py DESTINATION lib/${PROJECT_NAME})
   install(DIRECTORY scenarios DESTINATION share/${PROJECT_NAME})
   ament_export_include_directories(include)
   ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
