@@ -64,6 +64,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -177,6 +178,14 @@ struct CommConfig
   // 組層級的 incident state（CB-4 第三批）：提案沒收到結果每 incident_retry 重送；閘道把開著的組的 Accepted 每 incident_period 重送
   double incident_retry{1.0};
   double incident_period{2.0};
+  // 協同出價（任務欄位補齊 09，2026-11-18）：依賴的角色等前置角色的里程碑、會合的角色等隊友，出價時當成等待（Task::coop）。
+  // 別台的預估到達 = 距離 / (platform_speed[它的平台] × speed_margin)。false = 第一階段（出價不看協同，只在執行端 gate）
+  bool coop_bidding{true};
+  std::array<double, 3> platform_speed{{0.0, 0.5, 1.0}};   // 依平台（1 uav、2 quadruped），和 platforms.yaml 一樣；0 = 不估
+  double coop_eta_tolerance{2.0};   // 預估時刻變動超過這麼多（秒）才更新：不讓出價跟著位置小幅抖動
+  // 時鐘偏差（任務欄位補齊 06，doc/protocol.md 第九節）：鄰居 CBBA_STATE 帶的自己的時刻 − 本機收到的時刻（含網路延遲）
+  // 的絕對值超過這個值 → 告警（takeSkewWarnings）；降到一半以下才解除。0 = 不檢查
+  double clock_skew_warn{0.5};
 };
 
 // 同機號衝突（版本 4）：兩台用了同一個機號。留下較早出現的 session，較晚的 session 的封包、它建立的任務都拒收
@@ -277,6 +286,10 @@ struct NeighborInfo
   bool gateway{false};               // 它是閘道（AGENT_STATE 的 vehicle_type = 0）：不是載具，不算進能力統計
   bool waiting_spec{false};          // 它排第一的任務在等 TaskSpec（版本 4 的 AGENT_STATE）
   bool committed{false};             // 它執行中的任務已接近目標（commit_radius 內），不可再被搶占
+  // 時鐘偏差（06）：最近一次 CBBA_STATE 裡它自己的時刻 − 本機收到的時刻（秒，含網路延遲，所以略偏負）
+  bool has_skew{false};
+  double clock_skew{0.0};
+  bool skew_flagged{false};          // 已經告警過、還沒降回 clock_skew_warn / 2 以下
   std::uint32_t status_seq{0};
   wire::StateFlags flags;
   AgentType vehicle_type{AgentType::UAV};   // 載具的平台（閘道時沒有意義）
@@ -336,8 +349,8 @@ struct CommStats
   // 改版（revision，2026-11-13）
   int revisions{0};             // 套用的改版（含自己建立的）
   int reauctions{0};            // 其中改了平台、能力、優先級，重新競標的
-  int retargets{0};
-  int zone_warnings{0};         // 區域註冊表的版本不同、不認得的 zone_policy_id（任務欄位補齊 05，只告警）             // 其中只動了位置、位移 < retarget_threshold，不重新評估的（任務欄位補齊 04）
+  int retargets{0};             // 其中只動了位置、位移 < retarget_threshold，不重新評估的（任務欄位補齊 04）
+  int zone_warnings{0};         // 區域註冊表的版本不同、不認得的 zone_policy_id（任務欄位補齊 05，只告警）
   int rejected_revisions{0};    // 不是建立者送的改版（不套用、不轉送）
   int revision_pulls{0};        // 看到鄰居的紀錄是較新的 revision，向它要任務定義的次數
   // 過期（2026-11-13）
@@ -383,6 +396,9 @@ struct CommStats
   int incident_rejected{0};     // 閘道：拒絕的提案
   int incident_applied{0};      // 套用的 Accepted（incident revision 變新）
   int incident_unauthorized{0}; // Accepted／Rejected 不是那個組的閘道送的（丟掉）
+  // 時間與協同出價（任務欄位補齊 06、09，2026-11-18）
+  int clock_skew_warnings{0};   // 鄰居的時鐘偏差超過 clock_skew_warn（每次超過算一次）
+  int coop_updates{0};          // 更新了任務的協同預估時刻（Task::coop）
 };
 
 // task_id 的顯示用名稱（8 位十六進位），例如 "00030005"
@@ -561,6 +577,20 @@ public:
   // 某台的位置（自己、或收過 AGENT_STATE 的鄰居）
   std::optional<Vec3> agentPosition(AgentId agent) const;
 
+  // ---------- 協同出價（任務欄位補齊 09，2026-11-18，doc/cb4_design.md「協同出價」） ----------
+  // 依賴的角色要等哪些里程碑：cbba_core 不解析 TaskSpec，由節點層從 spec 讀出 wait_for（swarm_cbba::parseSpecGates）。
+  // 沒設定、或這個任務沒有 TaskSpec 時，A 層 precedence 的每個角色當成等 completed（和執行端的預設一樣）
+  using WaitResolver = std::function<std::vector<WaitFor>(const Task & task, const std::string & spec)>;
+  void setWaitResolver(WaitResolver resolver) {wait_resolver_ = std::move(resolver); wait_cache_.clear();}
+  // agent 從現在的位置到 position 的預估時間（秒；自己用自己的速度，鄰居用 platform_speed；不知道位置、速度時 nullopt）
+  std::optional<double> travelTime(AgentId agent, const Vec3 & position) const;
+
+  // ---------- 時鐘偏差（任務欄位補齊 06） ----------
+  // 鄰居的時鐘 − 本機（最近一次 CBBA_STATE 估的，含網路延遲；沒收過時 nullopt）
+  std::optional<double> clockSkew(AgentId agent) const;
+  // 剛超過 clock_skew_warn 的鄰居與偏差（取走；每次超過列一次）
+  std::vector<std::pair<AgentId, double>> takeSkewWarnings();
+
   // ---------- 組層級的 incident state（CB-4 第三批，2026-11-16，doc/cb4_design.md） ----------
   // 每個組一份，由建立那個組的閘道（taskCreator(group_id)）決定：執行中的角色送 Proposal → 閘道驗證 → 廣播 Accepted
   //（incident revision + 1）或 Rejected。事件結果型里程碑只在同一個 incident revision 算數
@@ -713,6 +743,20 @@ private:
   void queueSpecRepair(TaskId id);
   wire::TaskSpecBody specPartBody(TaskId id, std::uint8_t part) const;
   std::map<TaskId, SpecStore> specs_;
+  // 協同出價（09）：每次 reevaluate 前更新 Task::coop；wait_for 照（任務, revision）快取（resolver 解析 spec 不便宜）
+  void updateCoopEta(double now);
+  std::vector<WaitFor> waitsOf(const Task & task);
+  WaitResolver wait_resolver_;
+  struct WaitCache
+  {
+    std::uint16_t revision{0};
+    bool from_spec{false};
+    std::vector<WaitFor> waits;
+  };
+  std::map<TaskId, WaitCache> wait_cache_;
+  std::optional<double> milestoneEta(TaskId pred, Milestone milestone, double now) const;
+  std::optional<double> arrivalEta(TaskId task, double now) const;
+  std::vector<std::pair<AgentId, double>> skew_warnings_;
   std::set<std::pair<TaskId, std::uint8_t>> repair_spec_;   // 補發佇列：TaskSpec 的段（進行中任務的定義之後送）
   std::map<TaskId, double> last_spec_pull_;
   std::size_t spec_pull_cursor_{0};

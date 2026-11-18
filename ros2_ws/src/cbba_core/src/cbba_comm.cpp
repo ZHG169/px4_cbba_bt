@@ -697,6 +697,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
   // 依目前位置、電量重新評估
   if (now >= next_reevaluate_) {
     next_reevaluate_ = now + config_.reevaluate_period;
+    updateCoopEta(now);
     markChanged(agent_.reevaluate(now));
   }
 
@@ -950,7 +951,7 @@ wire::CbbaStateBody CbbaComm::cbbaStateBody(double now) const
   b.participating = agent_.active();
   b.stable_steps = static_cast<std::uint8_t>(stable_steps_);
   b.snapshot_id = snapshot_id_;
-  // 不參與出價時不送 s（收的那端不會把它的紀錄交給 CBBA 規則），但紀錄照送：
+  // 不參與出價時不送別台的 s（收的那端不會把它的紀錄交給 CBBA 規則），但紀錄照送：
   // 停止參與（PX4 斷線、降落）時自己撤銷的正式指派只有自己知道，不送的話別台一直以為它還在執行、鎖著不出價
   // （2026-10-11 SITL 測試發現：飛行中關掉 PX4，任務卡住沒人接手）。收的那端只從紀錄合併正式指派
   if (agent_.active()) {
@@ -959,8 +960,10 @@ wire::CbbaStateBody CbbaComm::cbbaStateBody(double now) const
         b.stamps.push_back(wire::Stamp{agent, toStampMs(stamp)});
       }
     }
-    b.stamps.push_back(wire::Stamp{id(), toStampMs(now)});
   }
+  // 自己的時刻：不參與出價的（閘道、還在地上的）也帶（任務欄位補齊 06：收的那端用它估時鐘偏差；閘道的時鐘決定
+  // 任務的 release、deadline、expires，最需要量）。收的那端對不參與的只估偏差，不交給規則
+  b.stamps.push_back(wire::Stamp{id(), toStampMs(now)});
   for (const auto & [task_id, winner] : winnerMap()) {
     const Assignment a = assignment(task_id);
     b.records.push_back(wire::Record{task_id, agent_.tasks().at(task_id).revision, winner,
@@ -1007,6 +1010,22 @@ void CbbaComm::onCbbaState(const wire::Header & h, const Bytes & bytes, double n
   }
   n.has_snapshot = true;
   n.snapshot = b->snapshot_id;
+  // 時鐘偏差（06）：s 裡它自己的時刻 − 現在（含網路延遲）。超過 clock_skew_warn 告警一次，降到一半以下才解除
+  for (const wire::Stamp & s : b->stamps) {
+    if (s.agent_id != h.sender_id || s.stamp_ms == 0) {
+      continue;
+    }
+    n.has_skew = true;
+    n.clock_skew = static_cast<std::int32_t>(s.stamp_ms - toStampMs(now)) / 1e3;
+    const double warn = config_.clock_skew_warn;
+    if (warn > 0.0 && !n.skew_flagged && std::fabs(n.clock_skew) > warn) {
+      n.skew_flagged = true;
+      ++stats_.clock_skew_warnings;
+      skew_warnings_.emplace_back(h.sender_id, n.clock_skew);
+    } else if (n.skew_flagged && std::fabs(n.clock_skew) < warn / 2.0) {
+      n.skew_flagged = false;
+    }
+  }
   const bool was_participating = n.participating;
   n.participating = b->participating;
   n.round_key = b->round_key;
@@ -2677,7 +2696,11 @@ void CbbaComm::sendDetections(double now)
       ack.target_id = target.first;
       ack.target_session = target.second;
       const std::size_t end = std::min(pos + wire::kMaxAckSeqs, seqs.size());
-      ack.seqs.assign(seqs.begin() + static_cast<std::ptrdiff_t>(pos), seqs.begin() + static_cast<std::ptrdiff_t>(end));
+      // 逐筆放（vector::assign 在 GCC 13 -O2 會誤報 -Wnonnull）
+      ack.seqs.reserve(end - pos);
+      for (std::size_t k = pos; k < end; ++k) {
+        ack.seqs.push_back(seqs[k]);
+      }
       dedup_.firstSeen(PacketType::DETECTION_ACK, ack.relay, now);
       send(wire::encodeDetectionAck(h, ack), PacketType::DETECTION_ACK);
     }
@@ -2820,7 +2843,11 @@ void CbbaComm::sendReports(double now)
       ack.target_id = target.first;
       ack.target_session = target.second;
       const std::size_t end = std::min(pos + wire::kMaxReportAckSeqs, seqs.size());
-      ack.seqs.assign(seqs.begin() + static_cast<std::ptrdiff_t>(pos), seqs.begin() + static_cast<std::ptrdiff_t>(end));
+      // 逐筆放（vector::assign 在 GCC 13 -O2 會誤報 -Wnonnull）
+      ack.seqs.reserve(end - pos);
+      for (std::size_t k = pos; k < end; ++k) {
+        ack.seqs.push_back(seqs[k]);
+      }
       dedup_.firstSeen(PacketType::TASK_REPORT_ACK, ack.relay, now);
       send(wire::encodeTaskReportAck(h, ack), PacketType::TASK_REPORT_ACK);
     }
@@ -3221,6 +3248,186 @@ std::optional<Vec3> CbbaComm::agentPosition(AgentId agent) const
     return std::nullopt;
   }
   return it->second.position;
+}
+
+// ===========================================================================
+// 協同出價（任務欄位補齊 09，2026-11-18，doc/cb4_design.md「協同出價」）
+// ===========================================================================
+// 有效到達 = max(自身到達、前置角色達成里程碑、會合隊友到齊〔最多等 sync_window_s〕)。這裡只估別台的時刻，
+// 寫進 Task::coop；自身到達與等待在 scoring 的 evaluatePath 算（像 release）。估法刻意簡單：
+//   別台到某個任務 = 直線距離 / (平台速度 × speed_margin)，不看它路徑上排在前面的任務（AGENT_STATE 的 path 有，之後需要再加）
+//   里程碑：accepted、en_route ≈ 現在；arrived、started、target_*、sync_reached ≈ 到達；has_observation、completed ≈ 到達 + 執行時間
+//   還沒有得標者、得標者是自己（自己的路徑順序在出價裡算）、不知道位置：不加限制（樂觀）
+std::optional<double> CbbaComm::travelTime(AgentId agent, const Vec3 & position) const
+{
+  const auto pos = agentPosition(agent);
+  if (!pos) {
+    return std::nullopt;
+  }
+  double speed = 0.0;
+  if (agent == id()) {
+    speed = agent_.state().cruise_speed > 0.0 ? agent_.state().cruise_speed : agent_.params().cruise_speed;
+  } else {
+    const NeighborInfo & n = neighbors_.at(agent);
+    const auto platform = static_cast<std::size_t>(n.vehicle_type);
+    if (n.gateway || platform >= config_.platform_speed.size()) {
+      return std::nullopt;
+    }
+    speed = config_.platform_speed[platform];
+  }
+  speed *= agent_.params().speed_margin;
+  if (!(speed > 0.0)) {
+    return std::nullopt;
+  }
+  return distance(*pos, position) / speed;
+}
+
+std::optional<double> CbbaComm::milestoneEta(TaskId pred, Milestone milestone, double now) const
+{
+  const Task & p = agent_.tasks().at(pred);
+  const Assignment a = assignment(pred);
+  const AgentId holder = isLocking(a.state) ? a.assignee : agent_.winner(pred);
+  if (holder == kNoAgent || holder == id()) {
+    return std::nullopt;
+  }
+  const auto travel = travelTime(holder, p.position);
+  if (!travel) {
+    return std::nullopt;
+  }
+  const bool arrived = (milestones(pred, now) & milestoneBit(Milestone::ARRIVED)) != 0;
+  double t = arrived ? 0.0 : *travel;
+  switch (milestone) {
+    case Milestone::ACCEPTED:
+    case Milestone::EN_ROUTE:
+      t = 0.0;
+      break;
+    case Milestone::HAS_OBSERVATION:
+    case Milestone::COMPLETED:
+      t += p.duration_sec;
+      break;
+    default:
+      break;
+  }
+  return now + t;
+}
+
+std::optional<double> CbbaComm::arrivalEta(TaskId task, double now) const
+{
+  const MilestoneMask have = milestones(task, now);
+  if ((have & (milestoneBit(Milestone::SYNC_REACHED) | milestoneBit(Milestone::ARRIVED))) != 0) {
+    return now;   // 已經到了（等同伴中）
+  }
+  const Assignment a = assignment(task);
+  const AgentId holder = isLocking(a.state) ? a.assignee : agent_.winner(task);
+  if (holder == kNoAgent || holder == id()) {
+    return std::nullopt;
+  }
+  const auto travel = travelTime(holder, agent_.tasks().at(task).position);
+  if (!travel) {
+    return std::nullopt;
+  }
+  return now + *travel;
+}
+
+std::vector<WaitFor> CbbaComm::waitsOf(const Task & task)
+{
+  const auto spec = taskSpec(task.id);
+  const bool from_spec = wait_resolver_ && spec && !spec->empty();
+  const auto it = wait_cache_.find(task.id);
+  if (it != wait_cache_.end() && it->second.revision == task.revision && it->second.from_spec == from_spec) {
+    return it->second.waits;
+  }
+  WaitCache c;
+  c.revision = task.revision;
+  c.from_spec = from_spec;
+  if (from_spec) {
+    c.waits = wait_resolver_(task, *spec);
+  } else {
+    for (unsigned r = 0; r < 8; ++r) {
+      if ((task.ext.precedence >> r) & 1u) {
+        c.waits.push_back(WaitFor{static_cast<std::uint8_t>(r), Milestone::COMPLETED});
+      }
+    }
+  }
+  wait_cache_[task.id] = c;
+  return c.waits;
+}
+
+void CbbaComm::updateCoopEta(double now)
+{
+  if (!config_.coop_bidding || config_.gateway) {
+    return;
+  }
+  const double tol = config_.coop_eta_tolerance;
+  const auto differs = [tol](double a, double b) {
+      return (a > 0.0) != (b > 0.0) || std::fabs(a - b) > tol;
+    };
+  std::vector<std::pair<TaskId, CoopEta>> updates;
+  for (const auto & [tid, task] : agent_.tasks()) {
+    const TaskExt & e = task.ext;
+    if (task.status != TaskStatus::OPEN || e.group_id == 0) {
+      wait_cache_.erase(tid);
+      continue;
+    }
+    if (e.precedence == 0 && e.sync_window_s == 0) {
+      continue;
+    }
+    CoopEta eta;
+    for (const WaitFor & w : waitsOf(task)) {
+      if (gateState(tid, w, now) != GateState::WAITING) {
+        continue;   // 已滿足；或不會滿足（取消、過期：閘道的連鎖撤銷處理）
+      }
+      const auto pred = roleTask(e.group_id, w.role_index);
+      if (!pred) {
+        continue;   // 前面的角色還不認得
+      }
+      if (const auto t = milestoneEta(*pred, w.milestone, now)) {
+        eta.ready = std::max(eta.ready, *t);
+      }
+    }
+    if (e.sync_window_s > 0) {
+      for (const TaskId other : groupTasks(e.group_id)) {
+        const Task & o = agent_.tasks().at(other);
+        if (other == tid || o.ext.sync_window_s == 0 || !isOpen(other) || expired(other, now)) {
+          continue;   // 完成的早就到了、取消或略過的不等（同 evaluateSync）
+        }
+        if (const auto t = arrivalEta(other, now)) {
+          eta.sync_first = eta.sync_first > 0.0 ? std::min(eta.sync_first, *t) : *t;
+          eta.sync_last = std::max(eta.sync_last, *t);
+        }
+      }
+    }
+    const CoopEta & old = task.coop;
+    if (differs(eta.ready, old.ready) || differs(eta.sync_first, old.sync_first) ||
+      differs(eta.sync_last, old.sync_last))
+    {
+      updates.emplace_back(tid, eta);
+    }
+  }
+  for (const auto & [tid, eta] : updates) {
+    if (agent_.setCoopEta(tid, eta)) {
+      ++stats_.coop_updates;
+    }
+  }
+}
+
+// ===========================================================================
+// 時鐘偏差（任務欄位補齊 06，doc/protocol.md 第九節）
+// ===========================================================================
+std::optional<double> CbbaComm::clockSkew(AgentId agent) const
+{
+  const auto it = neighbors_.find(agent);
+  if (it == neighbors_.end() || !it->second.has_skew) {
+    return std::nullopt;
+  }
+  return it->second.clock_skew;
+}
+
+std::vector<std::pair<AgentId, double>> CbbaComm::takeSkewWarnings()
+{
+  std::vector<std::pair<AgentId, double>> out;
+  out.swap(skew_warnings_);
+  return out;
 }
 
 // ===========================================================================

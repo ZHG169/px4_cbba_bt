@@ -72,10 +72,12 @@ set(CBBA_CORE_TESTS
   test_group_progress
   test_wire_incident_update
   test_incident
+  test_coop_bidding
   test_comm
   test_exec_constraints
   test_assignment
   test_gateway
+  test_time_contract
   test_task_meta
   test_zones
   test_approval

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <memory>
 #include <random>
 #include <set>
@@ -89,6 +90,13 @@ public:
       block_.erase({from, to, type});
     }
   }
+  // 這個節點的時鐘比模擬時間快 offset 秒（任務欄位補齊 06：時鐘偏差測試；收、送都用它自己的時鐘）
+  void setClockOffset(AgentId id, double offset) {offset_[id] = offset;}
+  double clockOf(AgentId id) const
+  {
+    const auto it = offset_.find(id);
+    return now_ + (it == offset_.end() ? 0.0 : it->second);
+  }
   // 錄下 from 送出的封包（之後可以拿來重放）
   void record(AgentId from) {record_from_ = from;}
   // 每個模擬步驟最後呼叫（節點層的事：指派流程、假的 BT）
@@ -106,7 +114,8 @@ public:
       std::size_t k = 0;
       for (; k < flight_.size() && flight_[k].at <= now_; ++k) {
         if (online_[flight_[k].to]) {
-          nodes_[flight_[k].to]->receive(flight_[k].bytes, now_);
+          CbbaComm & to = *nodes_[flight_[k].to];
+          to.receive(flight_[k].bytes, clockOf(to.id()));
         }
       }
       flight_.erase(flight_.begin(), flight_.begin() + static_cast<std::ptrdiff_t>(k));
@@ -115,7 +124,7 @@ public:
         if (!online_[a]) {
           continue;
         }
-        for (Bytes & bytes : nodes_[a]->poll(now_)) {
+        for (Bytes & bytes : nodes_[a]->poll(clockOf(nodes_[a]->id()))) {
           bytes_ += bytes.size();
           const PacketType type = wire::parseHeader(bytes)->type;
           const AgentId from = nodes_[a]->id();
@@ -223,6 +232,7 @@ private:
   AgentId record_from_{0};
   std::function<void(double)> tick_;
   std::vector<Bytes> recorded_;
+  std::map<AgentId, double> offset_;
 };
 
 // BT 送來的新任務：task_id = 機號 × 65536 + 流水號

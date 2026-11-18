@@ -141,6 +141,10 @@ public:
   bool countFailure(TaskId id, double now);
   int failures(TaskId id) const;
 
+  // 協同出價（任務欄位補齊 09，2026-11-18）：這個任務要等的前置角色里程碑、會合隊友的預估時刻（CbbaComm::updateCoopEta 算）。
+  // 只在本機；值變了不馬上重算，下一次 reevaluate、出價時照新的值算。回傳 true 表示有改變
+  bool setCoopEta(TaskId id, const CoopEta & eta);
+
   // 執行狀態的限制。回傳 true 表示有改變（例如已接受的任務改了、不能再排隊的任務被釋放）
   bool setExecConstraints(const ExecConstraints & c, double now);
   const ExecConstraints & execConstraints() const {return exec_;}

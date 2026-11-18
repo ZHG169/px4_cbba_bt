@@ -72,6 +72,16 @@ struct TaskExt
   std::uint16_t zone_registry_version{0};
 };
 
+// 協同出價（任務欄位補齊 09，2026-11-18，doc/cb4_design.md「協同出價」）：同組其他角色的預估時刻（絕對時間，秒；0 = 沒有）。
+// 只在本機：CbbaComm::updateCoopEta 依前置角色、會合隊友的得標者位置與平台速度估算，封包不帶。全隊的估算來源相同
+//（得標者、AGENT_STATE 的位置），所以同一個任務各台看到的大致一樣，像 release 一樣只影響「什麼時候能開始」
+struct CoopEta
+{
+  double ready{0.0};        // 前置角色預估達成要等的里程碑（wait_for；沒寫是 completed）的時刻
+  double sync_first{0.0};   // 會合隊友最早、最晚的預估到達時刻（自己的 sync_window_s > 0 才有）
+  double sync_last{0.0};
+};
+
 // 任務（時間一律用秒，節點層負責和 ROS 的 Time 互轉）
 struct Task
 {
@@ -88,6 +98,7 @@ struct Task
   // 本機估計的成功率 p_ij = 1 / (1 + 這台 TRANSIENT 失敗的次數)（2026-10-17）。只在本機（CbbaAgent::countFailure 設定），
   // 不上網路：封包格式不帶、收到的任務一律是 1
   double success_prob{1.0};
+  CoopEta coop{};   // 協同出價（09）：只在本機，不上網路；收到的任務一律是 0
   // 2-1b（2026-11-11）：只有 type == NONE 的新型任務看這三個；舊型由 TaskType 決定（capabilities.hpp 的 effective*）
   std::uint8_t platform{0};           // 0 = 不限、1 = uav、2 = quadruped（和 AgentType 同值）
   Capabilities required_caps{0};      // 需要的能力（全部都要有）

@@ -299,3 +299,19 @@ AGENT_STATE 多了 BT 的執行狀態。任務多時版本 2 每個任務 21 B�
 | 機密性 | 不加密：交給 mesh／VPN（一般的 TLS 不能直接用在 UDP multicast） |
 | 流量 | 簽的封包每則多 31 B（TASK_ANNOUNCE 128 → 159 B）；狀態類不變 |
 
+
+## 九、時間的合約（任務欄位補齊 06，2026-11-18）
+
+| 項目 | 合約 |
+|---|---|
+| 時鐘 | **wall time**（系統時鐘，`CLOCK_REALTIME`），全隊用 chrony 對時（毫秒級）。不用 monotonic offset：offset 要知道對方的開機時刻，重開機、補發、轉送時對不上；wall time 的時刻轉送、補發原封不動，期限不會往後推 |
+| 單位與格式 | 程式內一律是秒（double）；封包是 ms 的低 32 位元（約 49.7 天循環），還原成離現在最近的那一個（`fromDeadlineMs`：±24.8 天；時間戳 s 用 `fromStampMs`：不晚於現在，對方稍快的當成現在）。0 = 沒有（`toDeadlineMs` 不會產生 0） |
+| 欄位 | `created_ms`（建立時刻）、`release_ms`（可以開始）、`deadline_ms`＋`deadline_hard`（期限）、`expires_ms`（失效），都是建立者時鐘的**絕對時刻**；`duration_sec`（service_time）、`half_life_s` 是長度（秒）。InjectTask 的 `release_sec`、`deadline_sec`、`expires_sec` 是「從注入起算」，閘道換成絕對時刻；改版時相對時間沒變就沿用原本的絕對時刻 |
+| 先後 | `release < 硬期限 ≤ expires`（閘道注入時檢查，不合拒絕）；軟期限只影響排隊（沒有期限的任務用 `created + max_queue_wait`），不檢查先後，過了也照做 |
+| 出價時怎麼用 | 能開始 = max(到達、release、前置角色的里程碑、會合，09)；硬期限：開始晚於期限 → 不可行；**expires：完成晚於 expires → 不可行（一律是硬限制，不看 deadline_hard**：失效時執行中的也撤銷，做不完的白做）；執行中的任務不檢查這兩項（由 expireTasks、BT 處理）。價值衰減 `reward_decay` 只有 EXPONENTIAL（`half_life_s`，TDR），沒有其他型別的欄位 |
+| 到了之後 | release 前不發 current_task（`AssignmentManager::dispatchTime`：release − 前往時間）；expires 到了各節點本機停止出價、撤銷自己的指派，建立者送 TASK_CLOSE reason 3 |
+| 時鐘偏差 | 每則 CBBA_STATE 的 s 帶傳送者自己的送出時刻（**不參與出價的閘道也帶**，2026-11-18 起，多 6 B）；收的那端算「它的時刻 − 收到的時刻」（含網路延遲），絕對值超過 `clock_skew_warn`（0.5 s）告警一次（log），降到一半以下才解除。**只告警、不修正**：偏差直接平移那台定的時刻（閘道快 0.3 s → 全隊看到的 expires 晚 0.3 s；不會累積）；超過 `lost_timeout`（1.5 s）時多跳的失聯判定會錯 |
+| 亂序 | 狀態類看新舊（CBBA_STATE 的 snapshot_id、AGENT_STATE 的 sequence），舊的丟掉；事件類用（種類, origin, session, seq）去重複；任務定義只收較大的 revision；TASK_CLOSE 比任務定義先到時先暫存。都不靠時間 |
+
+測試：`test_time_contract`（expires 是硬限制、先後檢查、ms 循環、晚到的絕對時刻、偏差告警、偏差平移、±0.3 s 不誤判失聯、舊 revision／舊 CBBA_STATE 晚到）；
+PDF 的四個驗收項目對照在 `test_time_contract.cpp` 開頭。

@@ -262,6 +262,9 @@ struct Revisable
       });
     req.spec = "{\"steps\":[{\"action\":\"inspect\"}]}";
     req.expires_sec = expires_sec;
+    if (expires_sec > 0.0) {
+      req.task.duration_sec = 0.0;   // expires 前要做得完才出價（任務欄位補齊 06）：過期測試要狗先接下
+    }
     req.task.ext.commit_radius = commit_radius;
     req.release_sec = release_sec;
     if (optional) {   // 兩個角色的組裡的 optional 角色（另一個角色沒建：這一組不會被判成「必要角色都結束」）

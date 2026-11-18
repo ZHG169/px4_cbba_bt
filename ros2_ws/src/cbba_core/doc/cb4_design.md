@@ -5,7 +5,7 @@ M0 已經有：角色組的注入（`inject_task` 的 `role_index`／`role_count
 `precedence`／`sync_window_s`）、TASK_ANNOUNCE 轉送這些欄位、各角色各自競標、optional 角色自動關閉（4e）。
 **CB-4 要讓這些約束真的有作用**。原則（使用者 11/15、2-1b 第八節）：
 
-- **CBBA 照現在各自分配**（出價、17 條規則、TDR 都不動）；協同在**執行端**做。
+- **CBBA 照現在各自分配**（出價、17 條規則、TDR 都不動）；協同在**執行端**做。（2026-11-18 第二階段：出價也看協同等待，見最後一節「協同出價」；17 條規則、協定不變）
 - precedence 照原文：後面的角色**可以先出發**，只有「要等的那一步」等前面的角色到某個里程碑；前面的角色是 optional、沒有也不阻塞。
 - 判斷寫在 cbba_node（狗和無人機的 BT 共用同一套判斷），BT 只看「這一步可不可以開始」。
 
@@ -279,3 +279,24 @@ NO_WINNER、HOLDER_LOST；中途換成別的原因不改、不重新計時）。
 | ROS 訊息 | `swarm_interfaces` 2.1.0：`TaskProgress.msg`、`Teammates.msg`、`Teammate.msg`、`StepGate.msg` |
 | cbba_node | 訂 `task_progress`（要是目前 current_task）、發 `teammates`（有變化時＋每 1 s）；`swarm_cbba/spec_gates.hpp/.cpp`（spec 的 wait_for → step gate，預設第一步等 completed）；log「gate <任務> step N：WAITING → OPEN」 |
 | 測試 | `test_wire_task_progress`（4）、`test_group_progress`（9）、`test_wire_header`（種類 12）、`swarm_cbba/test_spec_gates`（3）、`test_registry`（+1）；節點 `swarm_cbba/test/cb4_iface.sh`（P0～P7） |
+
+## 協同出價（第二階段，任務欄位補齊 09，2026-11-18）
+
+第一階段（上面三批）出價不看協同：依賴的角色當成「到了就能開始」，實際上要在執行端等。PDF：「這是最佳化精度問題，不代表第一階段不成立」；
+第二階段把等待算進 TDR：**有效到達 = max(自身到達、前置角色達成里程碑、會合隊友到齊)**。執行端的 gate、Group Commit、連鎖撤銷都不變。
+
+| 項目 | 做法 |
+|---|---|
+| 放哪裡 | `CbbaComm::updateCoopEta`（每次 reevaluate 前，`reevaluate_period` 1 s）估別台的時刻，寫進 `Task::coop`（只在本機，封包不帶）；`scoring` 的 `evaluatePath` 把它當成像 release 一樣的等待（`LegEval::wait`），TDR 照開始時刻衰減 |
+| 前置角色 | 要等的里程碑：TaskSpec 的 `wait_for`（cbba_node 的 resolver 用 `parseSpecGates` 解析，和 teammates 的 gate 同一套）；沒有 spec 時 A 層 precedence 的每個角色等 completed。gate 已經 OPEN（或不會滿足，交給閘道）的不等 |
+| 估別台的時刻 | 前置角色的持有者（正式指派，沒有就用得標者）到它的任務：直線距離 / (`platform_speed`[平台] × speed_margin)；accepted、en_route ≈ 現在，arrived、started、target_*、sync_reached ≈ 到達（已回報 arrived 就是現在），has_observation、completed ≈ 到達 + 執行時間。**不看它路徑上排在前面的任務**（AGENT_STATE 的 path 有，之後需要再加） |
+| 會合 | 自己和同組其他 `sync_window_s` > 0 的角色（A 層的近似：spec 的會合點名稱只在執行端分）：隊友最早、最晚的預估到達；開始 = max(自己, min(最晚, 第一個到的 + sync_window_s))，和執行端的 `evaluateSync` 一樣逾時照樣開始。已回報 sync_reached／arrived 的算現在到；已結束、取消、過期的不等 |
+| 不知道時 | 還沒有得標者、得標者是自己（自己的路徑順序在出價裡算）、不知道位置或平台速度：不加限制（樂觀，和第一階段一樣） |
+| 抖動 | 預估變動超過 `coop_eta_tolerance`（2 s）才更新；各台用同樣的來源（得標者、AGENT_STATE 的位置），同一個任務看到的大致一樣：等待對所有出價者一樣，近的還是比較省電（同分時照舊），主要的差別是**等待期間先做別的任務**、出價不再高估 |
+| 收斂 | 等待只依賴「別的角色」的得標者，前置角色自己的出價不受影響；會合的角色互相依賴，但每台只用隊友的位置估，不用隊友的出價；`coop_bidding: false` 退回第一階段 |
+| 參數 | cbba_node：`coop_bidding`（true）、`coop_eta_tolerance`（2 s）、`platform_speed`（[uav, quadruped]，預設 [0.5, 1.0]；有註冊表時用 platforms.yaml 的 cruise_speed）。全隊要一樣 |
+| 單獨任務的 fallback | 由閘道管理（任務欄位補齊 07 的 P0 看門狗 → `FallbackRequest`），各台不自己展開 |
+
+PDF 的四個驗收項目（第一階段，已經有測試）對照在 `test_coop_bidding.cpp` 開頭。第二階段的測試：`test_coop_bidding`
+（`CoopScoring` 2 項：等待時先做別的任務、會合最多等 window；`CoopBidding` 5 項：前置角色的預估、spec 的 wait_for、沒有得標者不加限制、
+前置完成後清掉、會合看到隊友的預估到達）。

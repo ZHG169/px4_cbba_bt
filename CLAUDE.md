@@ -431,7 +431,7 @@ CBBA 照現在各自分配（不動 TDR、17 條規則），協同在執行端�
 閘道 `incident_updates`、`fallback_request`。swarm_interfaces 2.3.0。測試：`test_group_progress`、`test_incident`、`test_wire_task_progress`、
 `test_wire_incident_update`、`test_spec_gates`；節點 `swarm_cbba/test/cb4_iface.sh`（P0～P7）、`cb4b_iface.sh`（S0～S4）、`cb4c_iface.sh`（I1、D1、D2、C1）。
 
-### 任務欄位補齊（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉，2026-11-17 規劃；**第一～五批 11/18 完成、測過**，剩整理：06 時間、09 協同出價）
+### 任務欄位補齊（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉，2026-11-17 規劃；**第一～五批 11/18 完成、測過**；整理批〔06 時間、09 協同出價〕11/18 完成、測過）——**任務欄位補齊全部完成**
 
 全文 `docs/planner_task_definition_plan.md`（欄位總表＋欠缺項目、TaskCore 最終定義、13 列規劃）。三層：TaskCore＝A 層 TASK_ANNOUNCE、
 TaskSpec＝B 層、IncidentRecord＝C 層（閘道／控制中心）。原則：CBBA 只管能不能做、誰適合、誰得標、團隊一致；Planner 把事件轉成合法角色
@@ -460,6 +460,13 @@ schema_version、event／task／role、target_kind、uncertainty、standoff、st
 | 整理 | 06 時間（現有絕對時刻寫成合約、補測試）、09 協同出價第二階段（有效到達 = max(自身、前置里程碑、同步)） |
 
 每列完成定義：合約 → 程式（不留只傳不用的欄位）→ 單元＋節點介面＋失敗情境 → itest group G0～G15 不退化 → 文件。
+
+**整理批（11/18 完成、測過；細節見 `planner_task_definition_plan.md`「整理批的實作」）**：06 時間的合約寫進 `cbba_core/doc/protocol.md`
+第九節（wall time、ms 循環、release < 硬期限 ≤ expires 由閘道檢查、**expires 一律是硬限制：做不完不出價**）；時鐘偏差偵測（CBBA_STATE 的 s
+帶自己的送出時刻，**不參與出價的閘道也帶 1 筆**；`clock_skew_warn` 0.5 s，只告警）。09 協同出價第二階段（`cb4_design.md`「協同出價」）：
+有效到達 = max(自身、前置角色的里程碑、會合隊友)，`CbbaComm::updateCoopEta` → `Task::coop`（只在本機）→ `evaluatePath` 當成等待；
+參數 `coop_bidding`、`platform_speed`、`coop_eta_tolerance`。封包格式、swarm_interfaces 不變。測試：`test_time_contract`（9）、`test_coop_bidding`（7）；
+改了 `test_comm`（不參與節點帶 1 筆 s）、`test_gateway`（過期夾具執行時間 0）。
 
 **第一批（11/17 寫好、11/18 單元＋`meta_iface.sh`＋回歸＋itest group、comm 全過，細節見 `planner_task_definition_plan.md`「第一批的實作」）**：識別、語意、空間寫進角色 TaskSpec 最上層
 （`cbba_core/task_meta.*`、`swarm_cbba/spec_compose.*`，schema `"1.1"`）；`InjectTask` 加 source、event_type、task_type、description、
@@ -608,7 +615,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 `c1f7c17`（通用 steps、`inspect` 改名）、`e52f159`（4e＋inspect 拍 1 張）、`70ad844`（4f 第一批）；之前 `2edd074`（第 5 週收尾＋M0 合約）。
 **push**：GitHub 的 `origin/hetero-tasking` 停在 11/14 的 `beb06c1`（使用者 11/16：先 commit、不要 push）；GitHub 的 main 停在 `2553ca8`，約好一起換時再合進 main（PR：`https://github.com/ZHG169/px4_cbba_bt/pull/new/hetero-tasking`）。
 11/17～18（任務欄位補齊）：`1889b71`（第一批）、`dc39cc5`（第二批，協定版本 5）、`c64791e`（第三、四批：改到的檔案重疊，合成一個）、
-第五批（簽章）見 `git log`。
+第五批（簽章）`653953b`；整理批還沒 commit。
 **push 由使用者自己做**（11/18 起）；GitHub 上的狀態以使用者為準。
 使用者說要 commit 時才 commit（一步一個或合併，問使用者）；只 commit 到 `hetero-tasking`，不推 main。
 不要進 repo：`graphify-out/`、repo 根目錄的 `build/`、`install/`、`log/`（在根目錄跑 colcon 留下的，正確的在 `ros2_ws/` 底下）、`ros2_ws/src/uav_px4_bt.zip`、`docs/reports/2-1b_*.pdf`、`docs/reports/82fd836a-…實驗規劃.pdf`（使用者的檔案，要不要收先問）、`swarm_zenoh` 的 `__pycache__`、`ros2_ws/src/world/`（伯宇的原檔）、
@@ -623,8 +630,8 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 測過、commit `1889b71`（11/18）；**第二批 05、08、07 11/18 commit**（協定版本 5、TASK_ANNOUNCE 128 B、swarm_interfaces 2.5.0；`zone_iface.sh`）；**第三批 10、12 11/18 測過、commit**（TaskSpec 檢查、任務 timeout_s、核准；swarm_interfaces 2.6.0；`exec_iface.sh`）；
    **第四批 11、03 11/18 測過、commit**（TASK_REPORT 14／15＋結果 outbox、report_policy、證據紀錄；swarm_interfaces 2.7.0；
    `report_iface.sh`；TaskResult 改了，狗的 BT 要重編）；**第五批 13 簽章 11/18 測過、commit**
-   （HMAC PoC、`security_mode`、`sec_iface.sh`）；**最後一批是整理：06 時間（現有絕對時刻寫成合約、補時鐘偏差與亂序的測試）、
-   09 協同出價第二階段（有效到達 = max(自身、前置里程碑、同步)）**
+   （HMAC PoC、`security_mode`、`sec_iface.sh`）；**整理批 06 時間、09 協同出價 11/18 完成、測過**（單元：`test_time_contract`、
+   `test_coop_bidding`，回歸：cbba_core 全部、節點腳本、itest）——**任務欄位補齊全部完成**
 3. ~~**TDR 參數實驗**~~（`docs/tdr_experiment_plan.md`，11/16 照使用者的〈TDR 參數設定與測試計畫〉PDF 重新規劃）：階段 A、B 的程式寫好
    （`mission_sim` 的量測、`tdr_experiment`〔S1～S6〕、`cbba_sim tdr`、`scripts/tdr_report.py`、`test_scoring` +3、`test_tdr_experiment` 9 項），
    ✅ 11/16 階段 A～D 跑完：**`energy_weight` 50 → 25**（程式預設已改），`half_life_by_priority` 維持 60/120/300/600 s；

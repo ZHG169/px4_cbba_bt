@@ -552,6 +552,29 @@ public:
     comm.gateway_timeout = declare_parameter<double>("gateway_timeout", comm.gateway_timeout);
     // 移動目標的改版（任務欄位補齊 04，2026-11-17）：只動位置、位移 < 這個值（m）不重新評估（得標者照舊）；0 = 一律重新評估。全隊要一樣
     comm.retarget_threshold = declare_parameter<double>("retarget_threshold_m", comm.retarget_threshold);
+    // 協同出價（任務欄位補齊 09，2026-11-18，cbba_core/doc/cb4_design.md「協同出價」）：依賴的角色等前置角色的里程碑、
+    // 會合的角色等隊友，出價時當成等待。別台的預估到達用它平台的速度（platform_speed：[uav, quadruped] m/s；
+    // 有註冊表時用 platforms.yaml 的 cruise_speed）。全隊要一樣
+    comm.coop_bidding = declare_parameter<bool>("coop_bidding", comm.coop_bidding);
+    comm.coop_eta_tolerance = declare_parameter<double>("coop_eta_tolerance", comm.coop_eta_tolerance);
+    if (registry) {
+      for (const auto & p : registry->platforms) {
+        if (p.code < comm.platform_speed.size() && p.cruise_speed > 0.0) {
+          comm.platform_speed[p.code] = p.cruise_speed;
+        }
+      }
+    }
+    {
+      const auto speeds = declare_parameter<std::vector<double>>("platform_speed",
+          std::vector<double>{comm.platform_speed[1], comm.platform_speed[2]});
+      if (speeds.size() != 2) {
+        throw std::invalid_argument("platform_speed needs 2 values (uav, quadruped)");
+      }
+      comm.platform_speed[1] = speeds[0];
+      comm.platform_speed[2] = speeds[1];
+    }
+    // 時鐘偏差（任務欄位補齊 06，cbba_core/doc/protocol.md 第九節）：鄰居的時鐘和本機差超過這個值（秒）就告警；0 = 不檢查
+    comm.clock_skew_warn = declare_parameter<double>("clock_skew_warn", comm.clock_skew_warn);
     // 簽章（任務欄位補齊 13，2026-11-18；cbba_core/wire_signature.hpp）：none（= off，預設；命令列寫 off 會被 YAML 當成
     // false，所以用 none 或 'off'）／sign（過渡：自己的簽、沒簽章的照收）／
     // require（沒簽章、驗不過的丟掉、不轉送）。金鑰檔一行一把「機號 key_id 十六進位金鑰」（# 開頭是註解；全隊同一份，
@@ -617,11 +640,21 @@ public:
     assign.group_commit_hold = declare_parameter<double>("group_commit_hold", assign.group_commit_hold);
     assign.group_commit_timeout = declare_parameter<double>("group_commit_timeout", assign.group_commit_timeout);
     spec_wait_ = assign.spec_wait;
+    clock_skew_warn_ = comm.clock_skew_warn;
     const int tick_ms = declare_parameter<int>("tick_ms", 10);
 
     state_ = s;
     comm_ = std::make_unique<CbbaComm>(s, scoring, comm);   // 每次啟動新的 session
     comm_->setParticipating(false, wallNow());   // 第一個 tick 依 participate 決定
+    // 協同出價（09）：依賴的角色要等哪些里程碑，從 TaskSpec 的 wait_for 讀（和 teammates 的 gate 同一個解析）
+    comm_->setWaitResolver([](const Task & task, const std::string & spec) {
+        std::vector<WaitFor> waits;
+        const auto gates = swarm_cbba::parseSpecGates(spec, task.ext.precedence, task.ext.role_index);
+        for (const auto & g : gates.steps) {
+          waits.insert(waits.end(), g.wait_for.begin(), g.wait_for.end());
+        }
+        return waits;
+      });
     udp_ = std::make_unique<UdpLink>(udp);
     assignments_ = std::make_unique<AssignmentManager>(*comm_, assign,
         [this](int level, const std::string & text) {
@@ -1221,6 +1254,7 @@ private:
       handleReports(now);
     }
     handleZoneWarnings();
+    handleClockSkew();
     saveGatewayState();
     handleIncidents(now);
     handleGroupFailures(now);
@@ -2336,6 +2370,17 @@ private:
     }
   }
 
+  // 時鐘偏差（任務欄位補齊 06，cbba_core/doc/protocol.md 第九節）：絕對時刻（release、deadline、expires、建立時刻、
+  // 時間戳 s）都照建立者或傳送者的時鐘，偏差會直接平移這些時刻。只告警（log），不改行為；要靠 chrony 對時
+  void handleClockSkew()
+  {
+    for (const auto & [agent, skew] : comm_->takeSkewWarnings()) {
+      RCLCPP_WARN(get_logger(), "時鐘：機號 %u 的時鐘比本機%s %.2f s（含網路延遲；告警值 %.2f s）。"
+        "release、期限、expires、失聯判定都會跟著偏，請檢查 chrony", static_cast<unsigned>(agent),
+        skew > 0.0 ? "快" : "慢", std::fabs(skew), clock_skew_warn_);
+    }
+  }
+
   // 能力恢復（任務欄位補齊 08，2026-11-18）：E_HW 拿掉的能力，BT／維修確認好了發 capability_restored（能力名稱）放回來
   void onCapabilityRestored(const std_msgs::msg::String & msg)
   {
@@ -2762,6 +2807,7 @@ private:
   bool assignments_sent_{false};
   AssignmentsMsg last_assignments_;
   double spec_wait_{5.0};
+  double clock_skew_warn_{0.5};   // log 用（告警值）
   TaskId spec_warned_task_{0};
   double spec_warned_at_{-1e9};
   rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr path_pub_;

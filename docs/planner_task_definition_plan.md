@@ -84,7 +84,7 @@ uncertainty_m、standoff_m、steps、success／abort 條件、timeout、report_p
 | 4 外部整合 | 11 回報要求 | TaskSpec 的 report_policy；TaskResult 加 completed_steps、attachments、final_position；結果 outbox | swarm_interfaces、BT、閘道 |
 | | 03 證據 | 證據存放與 URI；TaskSpec 只帶 evidence_uri＋confidence | 閘道／控制中心 |
 | 5 部署 | 13 簽章與資安 | 簽章信封（issuer、key_id、nonce、payload_hash、signature），PoC HMAC、正式 Ed25519；只簽有權限意義的封包（TASK_ANNOUNCE、TASK_SPEC、TASK_CLOSE、取消、INCIDENT_UPDATE），轉送時簽章只涵蓋原始 payload；nonce 沿用 (session, seq) | cbba_core |
-| 整理 | 06 時間 | 把現有的絕對時刻（ms，chrony 對時）寫成合約；補時鐘偏差、亂序測試 | 文件、測試 |
+| 整理（✅ 11/18） | 06 時間 | 把現有的絕對時刻（ms，chrony 對時）寫成合約；補時鐘偏差、亂序測試 | 文件、測試 |
 | | 09 協同出價（第二階段） | 有效到達時間 = max(自身、前置里程碑、同步)；單獨任務的 fallback 由閘道管理 | cbba_core、閘道 |
 
 每列的完成定義（照 PDF）：合約（型別、單位、預設、版本相容、負責模組）→ 程式（不留只傳不用的欄位）→ 單元、節點介面、至少一個失敗情境
@@ -144,6 +144,19 @@ swarm_interfaces 2.7.0：**TaskResult 加欄位，狗的 BT 要 `dog_bt.sh build
 | 做法 | 程式 | 測試 |
 |---|---|---|
 | 簽 TASK_ANNOUNCE、TASK_SPEC、TASK_CLOSE、INCIDENT_UPDATE：封包最後 31 B 的簽章（HMAC-SHA256 的 PoC；alg 留給 Ed25519），簽轉送區塊＋內容（nonce ＝ origin_session、origin_seq），不簽表頭；驗過的存起來，非 issuer 的轉送、補發原樣帶上；`task_issuers` 白名單；`security_mode` none（off）／sign／require；金鑰檔與輪換、撤銷；細節在 `cbba_core/doc/protocol.md` 第八節 | `crypto.*`、`wire_signature.*`、`cbba_comm`（`signOutgoing`、`verifyIncoming`）、`cbba_node`（參數、金鑰檔） | `test_crypto` 3 項（FIPS、RFC 4231 向量）、`test_security` 7 項（4 個驗收：改位置簽章失效、未授權 issuer 拒收不轉送、同 nonce 判定重放、未授權取消 P0）、`sec_iface.sh` S1～S4 |
+
+### 整理批的實作（2026-11-18，06 時間、09 協同出價第二階段；單元、節點腳本、itest 回歸全過）
+
+| 列 | 做法 | 程式 | 測試 |
+|---|---|---|---|
+| 06 時間 | 合約寫進 `cbba_core/doc/protocol.md` 第九節：wall time（chrony）而不是 monotonic offset、ms 低 32 位元循環、各欄位的意義與單位、`reward_decay` 只有 EXPONENTIAL。**先後**：release < 硬期限 ≤ expires（閘道注入時檢查；軟期限不檢查）。**expires 一律是硬限制**：完成晚於 expires 不出價（失效時執行中的也撤銷；執行中的不檢查）。**時鐘偏差**：CBBA_STATE 的 s 帶傳送者自己的送出時刻，**不參與出價的閘道也帶**（多 6 B）；收的那端超過 `clock_skew_warn`（0.5 s）告警（log），只告警、不修正 | `scoring.cpp`、`gateway.cpp`（check）、`cbba_comm`（`cbbaStateBody`、`clockSkew`、`takeSkewWarnings`）、`cbba_node`（`handleClockSkew`） | `test_time_contract` 9 項（PDF 驗收 1～4 已有的測試對照在檔案開頭）；`test_comm` 的不參與節點改成帶 1 筆 s；`test_gateway` 的過期夾具執行時間改 0 |
+| 09 協同出價 | 有效到達 = max(自身到達、前置角色達成里程碑、會合隊友到齊〔最多等 sync_window_s〕)。`CbbaComm::updateCoopEta`（每次 reevaluate 前）用前置角色、隊友的持有者（或得標者）位置與平台速度估時刻 → `Task::coop`（只在本機）；`evaluatePath` 當成像 release 的等待。里程碑照 spec 的 `wait_for`（cbba_node 的 resolver 用 `parseSpecGates`），沒有 spec 時 precedence 等 completed。不知道時不加限制。單獨任務的 fallback 由閘道管理（07 的 P0 看門狗，已有） | `types.hpp`（`CoopEta`）、`scoring`（`LegEval::wait`）、`cbba_agent`（`setCoopEta`）、`cbba_comm`（`travelTime`、`milestoneEta`、`arrivalEta`、`waitsOf`）、`cbba_node`（參數 `coop_bidding`、`platform_speed`、`coop_eta_tolerance`；resolver） | `test_coop_bidding` 7 項（PDF 驗收 1～4 是第一階段，已有的測試對照在檔案開頭）；設計 `cbba_core/doc/cb4_design.md`「協同出價」 |
+
+和原本規劃不同的地方：
+- 時鐘偏差只告警、不修正（不估各台的 offset 去改時刻）：chrony 本來就要開，修正會讓同一個時刻在各台算出不同的值。
+- 會合用 A 層的近似：同組 `sync_window_s` > 0 的角色都算同一個會合點（spec 的會合點名稱只在執行端分）。
+- 別台的預估不看它路徑上排在前面的任務（直線距離 / 平台速度）；之後需要時用 AGENT_STATE 的 path 加。
+- 封包格式沒改（還是協定版本 5）；只有不參與出價的節點 CBBA_STATE 多帶自己的 1 筆 s。swarm_interfaces 不變（狗的 BT 不用重編）。
 
 > 下面第 0～6 節是 11/17 稍早的分析（使用者提供 PDF 之前），以上一節為準：路徑繞行估算（F6、N3）不做（路徑交給 Nav2）；
 > 檢查器與核准放在閘道；第 4 節的實作順序由上表取代。

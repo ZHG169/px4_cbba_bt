@@ -61,8 +61,17 @@ std::string Gateway::check(const InjectRequest & req) const
       return "deadline_sec、release_sec、expires_sec 要在 0～20 天（0 = 沒有）";
     }
   }
+  // 時間的先後（任務欄位補齊 06，doc/protocol.md 第九節）：release < 硬期限 ≤ expires；軟期限只影響排隊，不檢查先後
   if (req.expires_sec > 0.0 && req.release_sec >= req.expires_sec) {
     return "release_sec 要早於 expires_sec";
+  }
+  if (e.deadline_hard && req.deadline_sec > 0.0) {
+    if (req.release_sec >= req.deadline_sec) {
+      return "release_sec 要早於硬期限 deadline_sec（release 之後才能開始，永遠來不及）";
+    }
+    if (req.expires_sec > 0.0 && req.deadline_sec > req.expires_sec) {
+      return "硬期限 deadline_sec 不能晚於 expires_sec（expires 時任務已失效）";
+    }
   }
   if (!std::isfinite(e.commit_radius) || e.commit_radius < 0.0 || e.commit_radius * 10.0 > kMaxU16) {
     return "commit_radius 要在 0～6553 m";

@@ -61,11 +61,24 @@ PathEval evaluatePath(
       leg.arrival += wasted;
       leg.completion += wasted;
     }
-    // release：還不能開始就等（執行中、用 BT 剩餘時間的第一個任務不用）
-    if (!head_running && task.ext.release > 0.0 && task.ext.release - now > leg.arrival) {
-      const double wait = task.ext.release - now - leg.arrival;
-      leg.arrival += wait;
-      leg.completion += wait;
+    // 能開始的時刻（執行中、用 BT 剩餘時間的第一個任務不用等）：
+    //   release 之前不能開始；依賴的角色等前置角色的里程碑（09）；會合的角色等隊友，最多等到「第一個到的 + sync_window_s」
+    //  （逾時照樣開始，和執行端的 evaluateSync 一樣）
+    if (!head_running) {
+      double start = leg.arrival;
+      if (task.ext.release > 0.0) {
+        start = std::max(start, task.ext.release - now);
+      }
+      if (task.coop.ready > 0.0) {
+        start = std::max(start, task.coop.ready - now);
+      }
+      if (task.ext.sync_window_s > 0 && task.coop.sync_last > 0.0) {
+        const double first = std::min(start, task.coop.sync_first - now);
+        start = std::max(start, std::min(task.coop.sync_last - now, first + task.ext.sync_window_s));
+      }
+      leg.wait = start - leg.arrival;
+      leg.arrival = start;
+      leg.completion += leg.wait;
     }
     // 期限只用在硬期限的可行性；軟期限不影響分數（「急」由 half_life 表達）
     if (task.explicit_deadline) {
@@ -73,6 +86,10 @@ PathEval evaluatePath(
       if (leg.overdue && task.ext.deadline_hard && task.id != exempt) {
         hard_late = true;   // 硬期限來不及：這條路徑不可行
       }
+    }
+    // expires（06）：到了任務自動失效、執行中的也撤銷，做不完的白做 → 一律是硬限制（不看 deadline_hard）
+    if (task.ext.expires > 0.0 && leg.completion > task.ext.expires - now && task.id != exempt) {
+      hard_late = true;
     }
     reserve = std::max(reserve, static_cast<double>(task.ext.min_battery_reserve));
     leg.half_life = halfLifeOf(task, params);

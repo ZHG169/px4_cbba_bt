@@ -135,6 +135,9 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 | `energy_weight` | 25 | **時間折扣報酬（TDR，2026-11-15，`doc/formula/tdr_design.md`）**的耗電權重 w_E：路徑報酬 = Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量。用掉全部可用電量相當於少 25 分（2026-11-16 從 50 改成 25，`docs/tdr_experiment_plan.md`）。全隊要一樣 |
 | `half_life_by_priority` | [60, 120, 300, 600] s | 任務沒帶 `half_life_s` 時依優先級 P0～P3 的預設：晚到 half_life 秒價值剩一半。0 = 不打折。全隊要一樣 |
 | `max_bundle` | 5 | 一台最多同時排幾個任務。限制計算量（約 O(任務數 × n³)）和規劃視野 |
+| `coop_bidding` | true | 協同出價（任務欄位補齊 09，2026-11-18，`doc/cb4_design.md`「協同出價」）：依賴的角色等前置角色的里程碑、會合的角色等隊友，出價時當成等待（有效到達 = max(自身、前置里程碑、同步)）。false = 第一階段（只在執行端 gate）。全隊要一樣 |
+| `platform_speed` | [0.5, 1.0] m/s | 估別台到達用的平台速度 [uav, quadruped]（再乘 `speed_margin`）；有 `registry_dir` 時預設用 `platforms.yaml` 的 cruise_speed。**要和各平台的 `cruise_speed` 一致** |
+| `coop_eta_tolerance` | 2 s | 前置、會合的預估時刻變動超過這麼多才更新（不讓出價跟著位置小幅抖動） |
 
 公式與實驗見 `cbba_parameters.md`。
 
@@ -149,6 +152,7 @@ SITL 的值是從模擬電池換算的：PX4 的模擬電池依時間線性耗�
 | `resend_gap` | 1.0 s | 同一個任務直接推送（最近新增、結束的）、保底重播的最短間隔（協定版本 3；`repair_rate`、`push_recent_sec`、`gap_request_gap`、`digest_period` 也是參數，見第二節「補發」） |
 | `completion_retry`、`completion_max` | 1.0 s、10 次 | 完成宣告沒收齊確認時的重送間隔、次數；超過次數就以收到的確認送出 TASK_CLOSE（2026-11-04 開成參數）。高掉包時「完成 → 全隊確認」大約是 `completion_retry × completion_max`：2026-11-03 量到 70% 掉包 11.1 s |
 | `cancel_authorities` | `[]` | 除了任務的建立者，可以取消任何任務的機號（授權的管理端）。**全隊要一樣**：收到取消的 TASK_CLOSE 時也用它檢查，不一樣的話有的節點會拒絕取消 |
+| `clock_skew_warn` | 0.5 s | 時鐘偏差告警（任務欄位補齊 06，`doc/protocol.md` 第九節）：鄰居（含閘道）CBBA_STATE 帶的送出時刻和本機差超過這麼多就印警告一次，降到一半以下才解除。只告警；0 = 不檢查 |
 
 ---
 
@@ -277,7 +281,8 @@ BT（或 `cbba_task.sh`）建立任務時給的值，也是出價的一部分：
 | 每台的轉接節點與執行者 | 轉接節點 `spawn_enu` ↔ PX4 出生點 ↔ 執行者 `spawn_enu` | 位置差一個出生點的偏移，飛到錯的地方 |
 | 每台的轉接節點與 CBBA | `agent_id`、`px4_ns` ↔ `agent_id`、`ns` | 收不到 robot_state（或機號不對被略過），永遠不參與出價 |
 | CBBA 與電池 | `energy_per_meter`、`hover_energy_per_sec` ↔ 實際耗電 | 接了做不完，或做得完卻不接 |
-| 全隊 | 系統時鐘（chrony） | 時間戳 s 判斷錯誤：誤判失聯或不失聯 |
+| 全隊 | 系統時鐘（chrony） | 時間戳 s 判斷錯誤：誤判失聯或不失聯；閘道的時鐘偏了，全隊看到的 release、期限、expires 跟著平移（`clock_skew_warn` 告警，`doc/protocol.md` 第九節） |
+| 全隊 | `coop_bidding`、`platform_speed` ↔ 各平台的 `cruise_speed` | 同一個依賴角色各台估的等待不同，出價基準不一致 |
 
 ---
 

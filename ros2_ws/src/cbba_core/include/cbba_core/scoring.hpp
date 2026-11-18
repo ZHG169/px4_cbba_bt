@@ -4,7 +4,8 @@
 //   路徑報酬   S(p) = Σ_j  p_j × v_j × 2^(−τ_j / h_j)  −  w_E × E(p) / (電量 − 存量)
 //   出價       c_j  = max_n [ S(p ⊕_n j) − S(p) ]；≤ 0 不出價（做這個任務不划算）
 //     v_j   任務的價值
-//     τ_j   照這條路徑到達 j 的時間（從現在起算）：距離 / (速度 × speed_margin)，加上 release 的等待、失敗過的期望重試時間
+//     τ_j   照這條路徑能開始 j 的時間（從現在起算）：距離 / (速度 × speed_margin)，加上失敗過的期望重試時間，
+//           再等到 max(release、前置角色的里程碑、會合)（任務欄位補齊 09：有效到達 = max(自身、前置里程碑、同步)，Task::coop）
 //     h_j   half_life：任務的 ext.half_life_s，沒帶用 half_life_by_priority[P]（P0～P3）；0 = 不打折
 //     p_j   這台做 j 的估計成功率 1 / (1 + TRANSIENT 失敗次數)（2026-10-17；只在本機）
 //     E(p)  路徑耗電（含返航，energy_model.hpp）；存量 = max(載具的 safety_reserve, 路徑上各任務的 min_battery_reserve)
@@ -12,7 +13,8 @@
 //   插入的任務讓路徑上其他任務晚到，它們少掉的報酬直接算在出價裡（舊公式只算時間成本的變化）。
 //
 // 可行性（不可行 = 出價 0）：平台與能力（capabilities.hpp 的 fitness）、做完返航後電量 ≥ 存量、
-//   硬期限（ext.deadline_hard 且有期限）來不及；執行中的任務（exempt）不檢查硬期限。軟期限不影響分數（「急」由 half_life 表達）。
+//   硬期限（ext.deadline_hard 且有期限）來不及開始、expires 之前做不完（expires 一律是硬限制，06）；
+//   執行中的任務（exempt）不檢查這兩項。軟期限不影響分數（「急」由 half_life 表達）。時間的合約見 doc/protocol.md 第九節
 //
 // 失敗過的任務（2026-10-17，宜臻的實作說明需求 1）：期望價值 p × v；期望到達時間多 (1 − p)/p ×（前往＋執行），
 //   路徑後面的任務一起延後；執行中、有 BT 剩餘時間（head_remaining）的第一個任務不加。
@@ -54,6 +56,7 @@ struct LegEval
   double distance{0.0};
   double arrival{0.0};             // 到達時間（從現在起算，秒）
   double completion{0.0};          // 完成時間（從現在起算，秒）
+  double wait{0.0};                // 到了之後等多久才能開始（release、前置角色、會合；秒）
   double half_life{0.0};           // 用的 half_life（秒；0 = 不打折）
   double reward{0.0};              // p × v × 2^(−到達 / half_life)
   bool overdue{false};             // 有期限、到達時已超過（硬期限時不可行）

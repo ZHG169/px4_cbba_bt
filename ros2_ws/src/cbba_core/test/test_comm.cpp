@@ -301,10 +301,12 @@ TEST(CbbaComm, NonParticipantDoesNotBid)
   EXPECT_FALSE(swarm.node(3).currentTask());
   const auto b = swarm.node(3).cbbaStateBody(swarm.now());
   EXPECT_FALSE(b.participating);
-  EXPECT_TRUE(b.stamps.empty());                     // 沒有 s
+  // 沒有別台的 s，只有自己的時刻（任務欄位補齊 06：收的那端估時鐘偏差用，不交給規則）
+  ASSERT_EQ(b.stamps.size(), 1u);
+  EXPECT_EQ(b.stamps[0].agent_id, 3);
   ASSERT_EQ(b.records.size(), 1u);                   // 紀錄照送（正式指派要傳得出去），收的那端不交給規則
   EXPECT_EQ(wire::encodeCbbaState(wire::Header{PacketType::CBBA_STATE, 3, 1, 1, 0}, b).size(),
-    wire::cbbaStateSize(0, 1));                      // 37 + 27（協定版本 4 的紀錄 27 B）
+    wire::cbbaStateSize(1, 1));                      // 37 + 6 + 27（協定版本 4 的紀錄 27 B）
   EXPECT_TRUE(swarm.node(1).converged(swarm.now()));   // 不參與的鄰居不影響收斂判定
 
   swarm.node(3).setParticipating(true, swarm.now());  // 起飛

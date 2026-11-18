@@ -327,6 +327,7 @@ bool CbbaAgent::updateTask(const Task & task, bool reauction, double now, bool r
   Task updated = task;
   updated.status = TaskStatus::OPEN;
   updated.success_prob = it->second.success_prob;   // 本機的失敗打折不因改版重來
+  updated.coop = it->second.coop;                   // 協同的預估時刻（09）：下一次 updateCoopEta 再更新
   it->second = updated;
   if (reauction) {
     releaseIf({task.id});
@@ -738,6 +739,20 @@ bool CbbaAgent::countFailure(TaskId id, double now)
     return excludeTask(id, now, kInf);
   }
   return false;
+}
+
+bool CbbaAgent::setCoopEta(TaskId id, const CoopEta & eta)
+{
+  const auto it = tasks_.find(id);
+  if (it == tasks_.end()) {
+    return false;
+  }
+  CoopEta & c = it->second.coop;
+  if (c.ready == eta.ready && c.sync_first == eta.sync_first && c.sync_last == eta.sync_last) {
+    return false;
+  }
+  c = eta;
+  return true;
 }
 
 int CbbaAgent::failures(TaskId id) const
