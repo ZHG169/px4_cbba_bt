@@ -32,6 +32,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ManualOverride.srv"
   "srv/InjectTask.srv"
   "srv/ApproveTask.srv"
+  "action/ExecuteStep.action"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
 )
 

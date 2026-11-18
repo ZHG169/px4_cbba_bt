@@ -639,7 +639,11 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 4. ~~決定「執行者失聯 vs 失聯接手」的時限~~（11/16 採做法 A，`Gateway::stepGroups`＋`test_incident` 的 Takeover 3 項，測試通過；itest G9、G10 也過）。
 5. **`ExecuteStep.action` 草案＋假 adapter**（使用者 11/16 確認：要讓狗、無人機、Node-RED 互相使用，執行端一定要有同一個 Action 介面；
    狗 BT 也要接 `teammates`、`task_progress`、`incident_update`，同 task_id 新 revision 更新目標不重做）：照 `registry/api.md` 第 5 節寫進
-   `swarm_interfaces`，假 adapter 照 `actions.yaml` 檢查參數、模擬進度／取消／失敗碼，給伯宇、羅凡對欄位。使用者還沒說要不要現在做
+   `swarm_interfaces`，假 adapter 照 `actions.yaml` 檢查參數、模擬進度／取消／失敗碼，給伯宇、羅凡對欄位。
+   **11/19 完成、測過**（單元＋`exec_step_iface.sh` A1～A7）：`swarm_interfaces/action/ExecuteStep.action`（2.8.0，Result 加 detail、Feedback 加 platform_state）、
+   `swarm_cbba` 的 `fake_adapter`（`fake_executor.*`：和閘道同一套檢查、UAV 平台狀態機與自動起飛／降落、取消、逾時、故障注入、
+   場域 location；not_started 的實作照樣模擬）、`test_fake_executor`（11）、`exec_step_iface.sh`（A1～A7）；說明在 `registry/api.md` 第 5 節。
+   使用者 11/19：先做、BT 到了再照對好的欄位調整接上
 6. **M1 第二步 uav_adapter**：等伯宇給新版 BT（我們合 uint64、spec 兩個 patch、在模擬測好再交還）、`ExecuteStep.action` 和他對好；
    子步驟見「2-1b M1 的進度」。無人機的 ExecuteSteps 要看 `teammates` 的 gate、回報 `task_progress`、`incident_update`。
 7. 和人對的（M0 收尾）：`/registry`、`/validate` 格式（羅凡）；`/test_run`、`ExecuteStep.action`、狗 BT 的 inspect 參數（`mode`／`duration_s`）、

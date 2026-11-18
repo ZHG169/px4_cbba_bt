@@ -1,0 +1,38 @@
+# 執行 TaskSpec 的一步（2-1b REG-2 的通用 Action；2026-11-19 草案，registry/api.md 第 5 節，**欄位還要和伯宇、羅凡對**）
+#
+# 狗和無人機（之後 Node-RED 的 adapter）共用：BT 的 ExecuteSteps 依序取 current_task.spec 的 steps，每一步呼叫一次
+# /<ns>/execute_step。平台內部的步驟（UAV 的 takeoff、set_altitude、land）由 adapter 依平台狀態機自動補，不出現在 steps。
+# 必須可以取消（對應 BT 的 halt() 與搶占）：取消後 status = CANCELED。執行中又收到新的 goal：舊的結束（status CANCELED、
+# detail 寫「被新的 goal 取代」）、執行新的。
+# 失敗碼（2-1b 的 8 個 E_*）→ CBBA 的 reason：cbba_core/failure_codes.hpp；BT 回報 task_result 時照填 failure_code。
+
+# ===== Goal =====
+uint64 task_id                 # CBBA 任務（64 位元 task_id）；0 = 不是 CBBA 任務（/test_run、手動測試）
+uint16 revision                # 任務的 revision（同 task_id 新 revision 時，BT 重送這一步）
+uint32 step_id                 # 第幾步（0 起，spec 的 steps 索引）
+string action                  # registry/actions.yaml 的名稱（go_to、patrol、inspect、track、speak、wait、return_to_dock、
+                               # alert_operator；系統動作 emergency_stop、emergency_land、report_state 也收）
+string object                  # 類別或「類別:實例」（person、machine:TA1、person:trk_88）；空 = 沒有
+string location_json           # api.md 第 4 節的 location（JSON）：{"zone": id}、{"poi": id}、{"asset": "machine:TA1"}、
+                               # {"dock": id}、{"frame": "map", "x": .., "y": .., "z": ..}；空 = 沒有
+string params_json             # 參數（JSON 物件，名稱照 actions.yaml）；空 = 全部用預設
+builtin_interfaces/Time deadline   # 0 = 用 actions.yaml 的 timeout_s（0 的動作依距離、duration_s 估）
+---
+# ===== Result =====
+uint8 SUCCEEDED=0
+uint8 FAILED=1
+uint8 CANCELED=2
+uint8 TIMEOUT=3
+uint8 status
+string failure_code            # E_PRECONDITION、E_UNREACHABLE、E_TIMEOUT、E_TARGET_LOST、E_LOW_BATTERY、E_SAFETY_STOP、
+                               # E_COMM、E_HW；成功、取消時空字串；TIMEOUT 時 E_TIMEOUT
+string failed_capability       # E_HW 時哪個能力壞了（tools.yaml 的 name）
+string findings_json           # 結果（JSON 陣列）：截圖 URI、讀值、偵測結果…；沒有時 "[]"
+string detail                  # 說明（只記 log；參數錯在哪、為什麼失敗）
+---
+# ===== Feedback =====
+string state                   # running、blocked（等外部條件）
+float32 progress               # 0～1（估計）
+string phase                   # 子階段：takeoff、climbing、moving、aiming、capturing、tracking、waiting、landing…
+string platform_state          # 平台狀態機：UAV 的 LANDED、AIRBORNE、EMERGENCY；狗是 READY、EMERGENCY
+geometry_msgs/PoseStamped pose # 目前位姿（map）

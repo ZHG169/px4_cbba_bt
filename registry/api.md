@@ -1,4 +1,4 @@
-# 註冊表的對外格式：`/registry`、`/validate`、`/test_run`、TaskSpec、ExecuteStep（2-1b M0，2026-11-16 草案）
+# 註冊表的對外格式：`/registry`、`/validate`、`/test_run`、TaskSpec、ExecuteStep（2-1b M0，2026-11-16 草案；ExecuteStep 11/19 放進 swarm_interfaces）
 
 2-1b 第九節的 M0（11/20）：「六份註冊表 schema v1.0 凍結；通用 Action 定義與 8 個失敗碼定版；`/registry`、`/validate`、
 `/test_run` 格式與羅凡確認」。分工：`/registry`、`/validate` 是勝翔（REG-1、PLN-2），`/test_run`、Action 介面是伯宇（BT-3、REG-2）。
@@ -268,21 +268,22 @@ POST /test_run/tr_0007/cancel → {"status": "canceling"}
   （`IncidentEvidence.msg`，內容變了才發）、`<state_dir>/gateway_<id>_evidence.log`。GCS 從任務回查：`assignments` 的 incident_id → 證據。
 - CBBA 封包只帶 incident 的參照（TaskSpec 裡的 URI 字串），證據多大都不影響 mesh；證據伺服器離線時任務照常執行（CBBA 不去讀它）。
 
-## 5. ExecuteStep（REG-2 的通用 Action，給伯宇的提案）
+## 5. ExecuteStep（REG-2 的通用 Action；2026-11-19 草案已放進 swarm_interfaces，**欄位還要和伯宇、羅凡對**）
 
 使用者 11/15 定：**一個通用的 `ExecuteStep.action`**（狗和無人機共用；BT 的 `ExecuteSteps` 逐步呼叫 `/<ns>/execute_step`），
-欄位照 2-1b 第二節的「通用介面」。和伯宇對好之後放進 `swarm_interfaces/action/ExecuteStep.action`。
+欄位照 2-1b 第二節的「通用介面」。11/19 先放進 `swarm_interfaces/action/ExecuteStep.action`（swarm_interfaces 2.8.0），
+加一個假的 adapter 讓大家對欄位、測流程；和伯宇對好之後再定案（差異只在欄位，adapter 的邏輯不變）。
 
 ```
 # Goal
-uint64 task_id                 # CBBA 任務（版本 4 的 64 位元 task_id）；/test_run 時是 0
-uint16 revision                # 任務的 revision
-uint32 step_id                 # 第幾步（0 起）
-string action                  # actions.yaml 的名稱
+uint64 task_id                 # CBBA 任務（64 位元 task_id）；0 = 不是 CBBA 任務（/test_run、手動測試）
+uint16 revision                # 任務的 revision（同 task_id 新 revision 時，BT 重送這一步）
+uint32 step_id                 # 第幾步（0 起，spec 的 steps 索引）
+string action                  # actions.yaml 的名稱（系統動作 emergency_stop、emergency_land、report_state 也收）
 string object                  # 類別或「類別:實例」（machine:TR-01、person:trk_88）；空 = 沒有
 string location_json           # 第 4 節的 location（JSON）；空 = 沒有
-string params_json             # 參數（JSON 物件）
-builtin_interfaces/Time deadline   # 0 = 用 actions.yaml 的 timeout_s
+string params_json             # 參數（JSON 物件，名稱照 actions.yaml）；空 = 全部用預設
+builtin_interfaces/Time deadline   # 0 = 用 actions.yaml 的 timeout_s（0 的動作依距離、duration_s 估）
 ---
 # Result
 uint8 SUCCEEDED=0
@@ -290,20 +291,50 @@ uint8 FAILED=1
 uint8 CANCELED=2
 uint8 TIMEOUT=3
 uint8 status
-string failure_code            # 8 個 E_*；成功時空字串
+string failure_code            # 8 個 E_*；成功、取消時空字串；TIMEOUT 時 E_TIMEOUT
 string failed_capability       # E_HW 時哪個能力壞了
-string findings_json           # 截圖 URI、讀值、偵測結果（JSON 陣列）
+string findings_json           # 結果（JSON 陣列）：截圖 URI、讀值、偵測結果；沒有時 "[]"
+string detail                  # 說明（只記 log）——提案時沒有，11/19 加（和 TaskResult.detail 一樣）
 ---
 # Feedback
-string state                   # running
+string state                   # running、blocked
 float32 progress               # 0～1
-geometry_msgs/PoseStamped pose # 目前位姿
-string phase                   # 子階段說明（例如 takeoff、aiming、capturing）
+string phase                   # 子階段（takeoff、climbing、moving、aiming、capturing、tracking、waiting、landing…）
+string platform_state          # 平台狀態機：UAV 的 LANDED、AIRBORNE、EMERGENCY；狗是 READY、EMERGENCY——11/19 加
+geometry_msgs/PoseStamped pose # 目前位姿（map）
 ```
 
-- 必須可取消（對應 BT 的 `halt()` 與搶占）。取消後 Result 的 status = CANCELED。
-- 平台內部步驟（UAV 的 takeoff、set_altitude）由 adapter 依平台狀態機自動補，不出現在 steps 裡；進度回饋照常送（phase）。
+- 必須可取消（對應 BT 的 `halt()` 與搶占）。取消後 Result 的 status = CANCELED。執行中又收到新的 goal：舊的結束（CANCELED、
+  detail「被新的 goal 取代」，ROS 的 goal 狀態是 ABORTED，因為沒有要求取消），做新的。
+- 平台內部步驟（UAV 的 takeoff、set_altitude、land）由 adapter 依平台狀態機自動補，不出現在 steps 裡；進度回饋照常送（phase）。
+- 內容不合法（和閘道注入前的 TaskSpec 檢查同一套，第 4.2 節的錯誤碼）→ FAILED、E_PRECONDITION，detail 寫錯誤碼。
 - 失敗碼到 CBBA 的 reason：見 `cbba_core/failure_codes.hpp`（`task_result.failure_code`）。
+
+### 5.1 假的 adapter（`swarm_cbba` 的 `fake_adapter`，2026-11-19）
+
+不接真的載具，照 `actions.yaml` 檢查、用簡單的運動模型模擬：給對欄位、BT 的 ExecuteSteps 在沒有載具時測流程、uav_adapter 的參考行為。
+
+```bash
+ros2 run swarm_cbba fake_adapter --ros-args -r __ns:=/v60 -p platform:=quadruped \
+  -p registry_dir:=$HOME/CBBA_BT/registry -p site_dir:=$HOME/CBBA_BT/site-config/yard
+ros2 action send_goal --feedback /v60/execute_step swarm_interfaces/action/ExecuteStep \
+  '{task_id: 1, action: go_to, location_json: "{\"poi\": \"OBS_HV_A_FRONT\"}"}'
+ros2 param set /v60/fake_adapter faults "['inspect=E_HW:thermal_camera@0.3']"   # 故障注入：action=E_CODE[:capability][@進度]
+```
+
+| 項目 | 模擬 |
+|---|---|
+| go_to | 移到 location（zone 的中心、poi、asset 的觀察姿態、dock、座標），`standoff_m` 停在前面；UAV 用 `altitude_m` → 區域的 `cruise_altitude_m` → `cruise_altitude` |
+| patrol | `waypoints` 或 `area`（區域的頂點），繞 `loops` 圈 |
+| inspect、track、wait | 不移動：inspect 瞄準 1 s＋拍 `duration_s`（findings 一張截圖，帶 mode）；track 跟 `duration_s`；wait 等 `duration_s` |
+| speak、alert_operator、report_state | 2 s、0.5 s、立即（findings 帶 template、severity、平台狀態） |
+| return_to_dock | 移到 `dock`（沒給回起點）；UAV 降落 → LANDED |
+| 平台狀態機 | UAV：LANDED 時需要在空中的動作先 takeoff（1.5 m）→ climbing → AIRBORNE；emergency_land → EMERGENCY → 降落 → LANDED。狗：READY；emergency_stop 之後 EMERGENCY，下一個 goal 恢復 |
+| 逾時 | goal 的 deadline；沒有時 actions.yaml 的 timeout_s；0 的動作「估計時間 × 1.5 + 10 s」。`slowdown` < 1 讓實際速度變慢 |
+| not_started 的實作 | 照樣模擬，附警告（`allow_not_started`，預設 true；閘道注入時照樣擋） |
+
+測試：`swarm_cbba/test/test_fake_executor.cpp`（11 項）、`swarm_cbba/test/exec_step_iface.sh`（A1～A7：回饋、自動起飛與降落、
+不合法的一步、取消、故障注入、逾時、新的 goal 取代舊的）。
 
 ## 6. 統一的 Event（事件狀態機的輸出，2-1b 第七節）
 
