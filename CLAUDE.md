@@ -644,7 +644,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
    子步驟見「2-1b M1 的進度」。無人機的 ExecuteSteps 要看 `teammates` 的 gate、回報 `task_progress`、`incident_update`。
 7. 和人對的（M0 收尾）：`/registry`、`/validate` 格式（羅凡）；`/test_run`、`ExecuteStep.action`、狗 BT 的 inspect 參數（`mode`／`duration_s`）、
    狗 BT 接 CB-4 的話題（伯宇）；Planner 訂 `incident_updates`、`fallback_request`；V60 的酬載填 `fleet.yaml`。
-8. 文件：`tdr_design.md` 的「收斂」一節寫「出價上限之後再加」，但程式（`CbbaAgent::buildBundle`、`bidFor`）早就有 bid warping 上限，要改成一致。
+8. ~~文件：`tdr_design.md` 的「收斂」一節和程式的 bid warping 上限不一致~~（11/18 改好）。
 9. ~~push~~（11/17：使用者 push 了 7 個 commit〔已拿掉 Co-Authored-By〕；README 的 `8315bd8` 由使用者 push）。
 10. 第 5 週收尾（選做）：重跑 `demo --scenario blackout`；斷網 8 s vs 20 s；C9 重複 5～10 次；loss 記每台實際分到的任務種類。
 11. 避碰選做（使用者：合理就好）：回起飛點最後一段限速；約 6 m/s 對飛時緊急退讓的抽動。
