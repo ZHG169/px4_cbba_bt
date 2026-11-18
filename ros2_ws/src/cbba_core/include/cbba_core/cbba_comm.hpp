@@ -81,6 +81,7 @@
 #include "cbba_core/wire_detection.hpp"
 #include "cbba_core/task_report.hpp"
 #include "cbba_core/wire_task_report.hpp"
+#include "cbba_core/wire_signature.hpp"
 #include "cbba_core/wire_header.hpp"
 #include "cbba_core/wire_incident_update.hpp"
 #include "cbba_core/wire_sync.hpp"
@@ -92,6 +93,30 @@ namespace cbba_core
 {
 
 using Bytes = std::vector<std::uint8_t>;
+
+// 簽章（任務欄位補齊 13，2026-11-18；wire_signature.hpp）。全隊的金鑰表一樣（HMAC 是對稱的：PoC，知道金鑰的節點
+// 都能假冒；正式部署換 Ed25519，各機只拿得到自己的私鑰）
+struct SecurityConfig
+{
+  enum class Mode : std::uint8_t
+  {
+    OFF,       // 不簽、不驗（收到有簽章的只拿掉簽章）
+    SIGN,      // 自己的簽；收到有簽章的驗（驗不過丟掉），沒簽章的照收（全隊換成 REQUIRE 之前的過渡）
+    REQUIRE,   // 自己的簽；沒簽章、驗不過的都丟掉、不轉送
+  };
+  Mode mode{Mode::OFF};
+  struct Key
+  {
+    AgentId agent{kNoAgent};
+    std::uint16_t key_id{0};
+    std::vector<std::uint8_t> secret;
+  };
+  std::vector<Key> keys;              // 全隊的金鑰（含自己的）；撤銷 = 拿掉那一把
+  std::uint16_t sign_key_id{0};       // 自己簽用哪一把（0 = 自己的金鑰裡 key_id 最大的）：輪換時先全隊加新的，再換這個
+  // 可以建立任務（TASK_ANNOUNCE 的 issuer）的機號；空 = 有金鑰的都可以。閘道統一建任務時設成閘道（例如 {200}）
+  std::set<AgentId> task_issuers;
+  double max_future_skew{30.0};       // issued_at 比現在晚超過這麼久的不收（時鐘不對或偽造）
+};
 
 struct CommConfig
 {
@@ -144,6 +169,7 @@ struct CommConfig
   std::vector<AgentId> gateways;  // 閘道的機號（多跳時判斷在線用）；直接鄰居的閘道不用列也認得
   DetectionOutboxConfig detection{};
   ReportOutboxConfig report{};    // 任務結果送閘道（任務欄位補齊 11，2026-11-18）：同偵測的 outbox
+  SecurityConfig security{};
   // 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md）：狀態變化時馬上送一份、之後再送 progress_repeat 兩份
   //（錯開，補掉包）；執行中每 progress_period 重送最新的快照
   double progress_period{2.0};
@@ -337,6 +363,14 @@ struct CommStats
   int reports_acked{0};
   int reports_received{0};      // 閘道：新收到的
   int report_duplicates{0};
+  // 簽章（任務欄位補齊 13，2026-11-18）
+  int signed_out{0};            // 自己簽的
+  int signature_ok{0};          // 驗過的（第一次）
+  int signed_repeats{0};        // 同一則（同一個 nonce）又收到：重放、轉送、補發（照舊交給去重複）
+  int unsigned_rejected{0};     // REQUIRE：沒簽章的丟掉
+  int bad_signatures{0};        // 金鑰不認得、簽章不對、時間在未來
+  int unauthorized_issuers{0};  // TASK_ANNOUNCE 的 issuer 不在 task_issuers
+  int signature_conflicts{0};   // 同一個 nonce、內容不同（偽造或金鑰外洩）
   // 角色進度（CB-4，2026-11-16）
   int progress_reports{0};      // 本機 BT 的回報（有變化的）
   int progress_sent{0};         // 送出的 TASK_PROGRESS（含錯開的重送、定期快照）
@@ -645,6 +679,14 @@ private:
   wire::TaskAnnounceBody announceBody(TaskId id) const;
   static wire::TaskAnnounceBody bodyOf(const Task & t);   // 任務定義的欄位（relay 不填）
   void noteZones(const Task & task);
+  // 簽章：送出前（直接送、轉送、補發的一筆）加上簽章：已經驗過、存著的那一則原樣帶上；自己是 origin 的現在簽
+  Bytes signOutgoing(Bytes packet);
+  // 收到後：驗簽章、拿掉簽章（交給原本的解碼）；不收的回傳 nullopt
+  std::optional<Bytes> verifyIncoming(const Bytes & packet, double now);
+  const SecurityConfig::Key * securityKey(AgentId agent, std::uint16_t key_id) const;
+  // 驗過（或自己簽的）的事件：(種類, origin, session, seq) → 帶簽章的「表頭之後的全部」（重送、補發時原樣帶）
+  std::map<std::tuple<std::uint8_t, AgentId, std::uint64_t, std::uint32_t>, Bytes> signed_;
+  double last_now_{0.0};   // 上次 poll／receive 的時刻（簽章的 issued_at；send 沒有帶時間）
   std::set<std::pair<TaskId, std::uint16_t>> zone_noted_;   // 已經檢查過區域版本的（task, revision）
   std::vector<ZoneWarning> zone_warnings_;
   bool smallMove(const Task & old, const Task & task) const;

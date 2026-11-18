@@ -500,6 +500,9 @@ wire::Header CbbaComm::newHeader(PacketType type)
 
 void CbbaComm::send(Bytes bytes, PacketType type, TxKind kind)
 {
+  if (config_.security.mode != SecurityConfig::Mode::OFF && wire::isSignedType(type)) {
+    bytes = signOutgoing(std::move(bytes));
+  }
   ++stats_.sent[type];
   stats_.sent_bytes[type] += bytes.size();
   stats_.tx_bytes += bytes.size();
@@ -509,6 +512,108 @@ void CbbaComm::send(Bytes bytes, PacketType type, TxKind kind)
     stats_.tx_relay_bytes += bytes.size();
   }
   outbox_.push_back(std::move(bytes));
+}
+
+// ===========================================================================
+// 簽章（任務欄位補齊 13，2026-11-18；wire_signature.hpp）
+// ===========================================================================
+const SecurityConfig::Key * CbbaComm::securityKey(AgentId agent, std::uint16_t key_id) const
+{
+  const SecurityConfig::Key * best = nullptr;
+  for (const SecurityConfig::Key & k : config_.security.keys) {
+    if (k.agent != agent || (key_id != 0 && k.key_id != key_id)) {
+      continue;
+    }
+    if (best == nullptr || k.key_id > best->key_id) {
+      best = &k;   // key_id 0：自己的金鑰裡最大的那把
+    }
+  }
+  return best;
+}
+
+Bytes CbbaComm::signOutgoing(Bytes packet)
+{
+  if (config_.security.mode == SecurityConfig::Mode::OFF || packet.size() < wire::kHeaderSize + wire::kRelaySize) {
+    return packet;
+  }
+  const auto relay_block = wire::parseRelay(packet.data(), packet.size());
+  if (!relay_block) {
+    return packet;
+  }
+  const auto key = std::make_tuple(packet[3], relay_block->origin_id, relay_block->origin_session,
+      relay_block->origin_seq);
+  const auto stored = signed_.find(key);
+  if (stored != signed_.end()) {
+    // 驗過的那一則：表頭之後換成存著的（帶原本的簽章；同一個 origin 就是同一則事件，內容一樣）
+    packet.resize(wire::kHeaderSize);
+    packet.insert(packet.end(), stored->second.begin(), stored->second.end());
+    packet[18] = static_cast<std::uint8_t>((packet.size() - wire::kHeaderSize) >> 8);
+    packet[19] = static_cast<std::uint8_t>(packet.size() - wire::kHeaderSize);
+    return packet;
+  }
+  if (relay_block->origin_id != id()) {
+    return packet;   // 別人的、沒簽過的（SIGN 模式收進來的沒簽章的）：照原樣
+  }
+  const SecurityConfig::Key * k = securityKey(id(), config_.security.sign_key_id);
+  if (k == nullptr) {
+    return packet;   // 自己沒有金鑰：節點層啟動時就擋了，這裡只是保險
+  }
+  const auto issued = static_cast<std::uint64_t>(std::llround(std::max(last_now_, 0.0) * 1e3));
+  Bytes out = wire::appendHmacSignature(packet, k->key_id, issued, k->secret);
+  signed_[key] = Bytes(out.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize), out.end());
+  ++stats_.signed_out;
+  return out;
+}
+
+std::optional<Bytes> CbbaComm::verifyIncoming(const Bytes & packet, double now)
+{
+  const SecurityConfig & sec = config_.security;
+  auto split = wire::splitSignature(packet);
+  if (sec.mode == SecurityConfig::Mode::OFF) {
+    return split ? split->first : packet;
+  }
+  if (!split) {
+    if (sec.mode == SecurityConfig::Mode::REQUIRE) {
+      ++stats_.unsigned_rejected;
+      return std::nullopt;
+    }
+    return packet;   // SIGN：過渡期，沒簽章的照收
+  }
+  Bytes & stripped = split->first;
+  const wire::SignatureTrailer & sig = split->second;
+  const auto relay_block = wire::parseRelay(stripped.data(), stripped.size());
+  if (!relay_block) {
+    ++stats_.malformed;
+    return std::nullopt;
+  }
+  const SecurityConfig::Key * k = sig.key_id != 0 ? securityKey(relay_block->origin_id, sig.key_id) : nullptr;
+  if (k == nullptr || static_cast<double>(sig.issued_ms) / 1e3 > now + sec.max_future_skew ||
+    !wire::verifyHmacSignature(stripped, sig, k->secret))
+  {
+    ++stats_.bad_signatures;
+    return std::nullopt;
+  }
+  if (packet[3] == static_cast<std::uint8_t>(PacketType::TASK_ANNOUNCE) && !sec.task_issuers.empty() &&
+    sec.task_issuers.count(relay_block->origin_id) == 0)
+  {
+    ++stats_.unauthorized_issuers;
+    return std::nullopt;
+  }
+  const auto key = std::make_tuple(packet[3], relay_block->origin_id, relay_block->origin_session,
+      relay_block->origin_seq);
+  const Bytes payload(packet.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize), packet.end());
+  const auto stored = signed_.find(key);
+  if (stored != signed_.end()) {
+    if (stored->second != payload) {
+      ++stats_.signature_conflicts;   // 同一個 nonce、不同內容
+      return std::nullopt;
+    }
+    ++stats_.signed_repeats;          // 重放、轉送、補發：去重複照舊處理
+  } else {
+    signed_[key] = payload;
+    ++stats_.signature_ok;
+  }
+  return std::move(stripped);
 }
 
 void CbbaComm::relay(const Bytes & bytes)
@@ -522,6 +627,7 @@ void CbbaComm::relay(const Bytes & bytes)
 
 void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
 {
+  last_now_ = now;
   const auto h = wire::parseHeader(data, size);
   if (!h) {
     ++stats_.malformed;
@@ -548,7 +654,14 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
   }
   ++stats_.received[h->type];
   neighborOf(*h).last_heard = now;   // 發送者（含轉送者）一定是直接鄰居
-  const Bytes bytes(data, data + size);
+  Bytes bytes(data, data + size);
+  if (wire::isSignedType(h->type)) {
+    auto verified = verifyIncoming(bytes, now);
+    if (!verified) {
+      return;   // 驗不過：不處理、不轉送
+    }
+    bytes = std::move(*verified);
+  }
   switch (h->type) {
     case PacketType::AGENT_STATE: onAgentState(*h, bytes); break;
     case PacketType::CBBA_STATE: onCbbaState(*h, bytes, now); break;
@@ -570,6 +683,7 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
 
 std::vector<Bytes> CbbaComm::poll(double now)
 {
+  last_now_ = now;
   if (start_ < 0.0) {
     start_ = now;
   }
@@ -1214,13 +1328,13 @@ void CbbaComm::drainRepair(double now)
     const auto taskItems = [&](TaskId task_id, const RepairNeed & need) {
         std::vector<wire::SyncItem> mine;
         if (need.announce && origins_.count(task_id) > 0) {
-          if (auto item = wire::toSyncItem(wire::encodeTaskAnnounce(item_header, announceBody(task_id)))) {
+          if (auto item = wire::toSyncItem(signOutgoing(wire::encodeTaskAnnounce(item_header, announceBody(task_id))))) {
             mine.push_back(std::move(*item));
           }
         }
         const auto close = closes_.find(task_id);
         if (need.close && close != closes_.end()) {
-          if (auto item = wire::toSyncItem(wire::encodeTaskClose(item_header, close->second))) {
+          if (auto item = wire::toSyncItem(signOutgoing(wire::encodeTaskClose(item_header, close->second)))) {
             mine.push_back(std::move(*item));
           }
         }
@@ -1241,7 +1355,7 @@ void CbbaComm::drainRepair(double now)
       std::vector<wire::SyncItem> mine;
       const auto st = incidents_.find(*it);
       if (st != incidents_.end() && st->second.revision > 0 && st->second.origin.origin_id != 0) {
-        if (auto item = wire::toSyncItem(wire::encodeIncidentUpdate(item_header, incidentBody(*it, st->second)))) {
+        if (auto item = wire::toSyncItem(signOutgoing(wire::encodeIncidentUpdate(item_header, incidentBody(*it, st->second))))) {
           mine.push_back(std::move(*item));
         }
       }
@@ -1278,7 +1392,7 @@ void CbbaComm::drainRepair(double now)
       std::vector<wire::SyncItem> mine;
       const auto st = specs_.find(it->first);
       if (st != specs_.end() && st->second.complete && it->second < st->second.part_count) {
-        if (auto item = wire::toSyncItem(wire::encodeTaskSpec(item_header, specPartBody(it->first, it->second)))) {
+        if (auto item = wire::toSyncItem(signOutgoing(wire::encodeTaskSpec(item_header, specPartBody(it->first, it->second))))) {
           mine.push_back(std::move(*item));
         }
       }
@@ -1352,7 +1466,14 @@ void CbbaComm::onSyncBatch(const wire::Header & h, const Bytes & bytes, double n
     return;
   }
   for (const wire::SyncItem & item : *items) {
-    const Bytes packet = wire::syncItemPacket(item, h);
+    Bytes packet = wire::syncItemPacket(item, h);
+    if (wire::isSignedType(item.type)) {
+      auto verified = verifyIncoming(packet, now);
+      if (!verified) {
+        continue;
+      }
+      packet = std::move(*verified);
+    }
     if (item.type == PacketType::TASK_ANNOUNCE) {
       const auto b = wire::decodeTaskAnnounce(packet);
       if (!b) {

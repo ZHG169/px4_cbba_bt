@@ -139,6 +139,12 @@ uncertainty_m、standoff_m、steps、success／abort 條件、timeout、report_p
 還沒做的：BT／adapter 照 report_policy 控制相機（串流、定期截圖）；GCS／VMS 端實際的回寫；證據庫本身（保存期限、權限、刪除）在控制中心。
 swarm_interfaces 2.7.0：**TaskResult 加欄位，狗的 BT 要 `dog_bt.sh build`**（型別雜湊變了，舊的 BT 會和新的 cbba_node 對不上）。
 
+### 第五批的實作（2026-11-18，13 簽章與資安；單元、`sec_iface.sh`、回歸全過）
+
+| 做法 | 程式 | 測試 |
+|---|---|---|
+| 簽 TASK_ANNOUNCE、TASK_SPEC、TASK_CLOSE、INCIDENT_UPDATE：封包最後 31 B 的簽章（HMAC-SHA256 的 PoC；alg 留給 Ed25519），簽轉送區塊＋內容（nonce ＝ origin_session、origin_seq），不簽表頭；驗過的存起來，非 issuer 的轉送、補發原樣帶上；`task_issuers` 白名單；`security_mode` none（off）／sign／require；金鑰檔與輪換、撤銷；細節在 `cbba_core/doc/protocol.md` 第八節 | `crypto.*`、`wire_signature.*`、`cbba_comm`（`signOutgoing`、`verifyIncoming`）、`cbba_node`（參數、金鑰檔） | `test_crypto` 3 項（FIPS、RFC 4231 向量）、`test_security` 7 項（4 個驗收：改位置簽章失效、未授權 issuer 拒收不轉送、同 nonce 判定重放、未授權取消 P0）、`sec_iface.sh` S1～S4 |
+
 > 下面第 0～6 節是 11/17 稍早的分析（使用者提供 PDF 之前），以上一節為準：路徑繞行估算（F6、N3）不做（路徑交給 Nav2）；
 > 檢查器與核准放在閘道；第 4 節的實作順序由上表取代。
 

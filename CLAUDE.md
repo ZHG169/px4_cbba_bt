@@ -431,7 +431,7 @@ CBBA 照現在各自分配（不動 TDR、17 條規則），協同在執行端�
 閘道 `incident_updates`、`fallback_request`。swarm_interfaces 2.3.0。測試：`test_group_progress`、`test_incident`、`test_wire_task_progress`、
 `test_wire_incident_update`、`test_spec_gates`；節點 `swarm_cbba/test/cb4_iface.sh`（P0～P7）、`cb4b_iface.sh`（S0～S4）、`cb4c_iface.sh`（I1、D1、D2、C1）。
 
-### 任務欄位補齊（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉，2026-11-17 規劃；**第一批 01、02、04 已完成、11/18 測過**）
+### 任務欄位補齊（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉，2026-11-17 規劃；**第一～五批 11/18 完成、測過**，剩整理：06 時間、09 協同出價）
 
 全文 `docs/planner_task_definition_plan.md`（欄位總表＋欠缺項目、TaskCore 最終定義、13 列規劃）。三層：TaskCore＝A 層 TASK_ANNOUNCE、
 TaskSpec＝B 層、IncidentRecord＝C 層（閘道／控制中心）。原則：CBBA 只管能不能做、誰適合、誰得標、團隊一致；Planner 把事件轉成合法角色
@@ -488,6 +488,14 @@ TaskSpec `report_policy` 檢查；TaskResult 加 completed_steps、attachments�
 證據 — `InjectTask` 的 evidence_uri 等；TaskSpec 只帶 `evidence` 的 uri、confidence；閘道發 `incident_evidence`、紀錄檔。
 swarm_interfaces 2.7.0（TaskResult 改了：狗的 BT 要重編）。測試：`test_wire_task_report`、`test_task_report`、`test_task_meta` Evidence、
 `test_spec_validator` ReportPolicy、`swarm_cbba/test/report_iface.sh`（R1～R5）。
+
+**第五批（11/18 測過、commit；`cbba_core/doc/protocol.md` 第八節）**：簽 TASK_ANNOUNCE、TASK_SPEC、TASK_CLOSE、INCIDENT_UPDATE（封包最後 31 B，
+HMAC-SHA256 PoC，`cbba_core/crypto.*`、`wire_signature.*`）；驗過的簽章存起來，非 issuer 的轉送、補發原樣帶；cbba_node 參數 `security_mode`
+none（＝ off，預設）／sign／require、`security_keys_file`（不進 repo）、`security_sign_key_id`、`task_issuers`。測試：`test_crypto`、`test_security`、
+`swarm_cbba/test/sec_iface.sh`（S1～S4）。
+測試時遇到、已修：命令列 `security_mode:=off` 被 YAML 讀成 false（cbba_node 當掉）→ 多收 `none`，說明一律寫 none；簽章擋下的 WARN
+第一次馬上印、之後最多每 10 s 彙總（被擋的任務會一直重播、轉送，原本幾乎每 0.5 s 一行）；腳本的 `ros2 topic pub -w 1` 加 `timeout`
+（訂閱的節點掛掉時會無限等）、等「指派給 BT」要等到任務編號（啟動時那行「無」不算）。
 
 ## 機間 UDP：現在有兩條（2026-10-13 整理）
 
@@ -599,9 +607,10 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 `a6dd8a8`（4a 閘道）、`dd9336e`（狗 BT 讀 spec）、`4b20ad5`（4b 改版＋README 版本 4）、`afe3ea3`（4c 過期）、`f754ac8`（4d）、
 `c1f7c17`（通用 steps、`inspect` 改名）、`e52f159`（4e＋inspect 拍 1 張）、`70ad844`（4f 第一批）；之前 `2edd074`（第 5 週收尾＋M0 合約）。
 **push**：GitHub 的 `origin/hetero-tasking` 停在 11/14 的 `beb06c1`（使用者 11/16：先 commit、不要 push）；GitHub 的 main 停在 `2553ca8`，約好一起換時再合進 main（PR：`https://github.com/ZHG169/px4_cbba_bt/pull/new/hetero-tasking`）。
-**還沒 commit**（11/16）：CB-4 第二、三批（測過）、itest `group`（`itest.py`、`ros_bridge.py`、`config.json`、`README.md`，還沒跑成功）、
-`tdr_design.md`（能力只定義有沒有）、這份 CLAUDE.md。第二、三批改到的檔案重疊，建議合成一個 commit；itest 跑過再一起或另一個。
-使用者說要 commit 時才 commit（一步一個或合併，問使用者）；push 到 `hetero-tasking`，不推 main。
+11/17～18（任務欄位補齊）：`1889b71`（第一批）、`dc39cc5`（第二批，協定版本 5）、`c64791e`（第三、四批：改到的檔案重疊，合成一個）、
+第五批（簽章）見 `git log`。
+**push 由使用者自己做**（11/18 起）；GitHub 上的狀態以使用者為準。
+使用者說要 commit 時才 commit（一步一個或合併，問使用者）；只 commit 到 `hetero-tasking`，不推 main。
 不要進 repo：`graphify-out/`、repo 根目錄的 `build/`、`install/`、`log/`（在根目錄跑 colcon 留下的，正確的在 `ros2_ws/` 底下）、`ros2_ws/src/uav_px4_bt.zip`、`docs/reports/2-1b_*.pdf`、`docs/reports/82fd836a-…實驗規劃.pdf`（使用者的檔案，要不要收先問）、`swarm_zenoh` 的 `__pycache__`、`ros2_ws/src/world/`（伯宇的原檔）、
 隊友的資料（`docs/handoff_uav_*`、`docs/messageImage_*.jpg`、`swarm_cbba/testdata_for_uav_2026-10-12/`、宜臻的實作說明 .md，`.gitignore`）。
 共用的 `ros2_ws/install` 改 C++ 後要在 uav 容器重新編譯 6 個套件；改了 `docker/.env`、`gen_compose.py`、Fast DDS 範本後要 `./stop.sh && ./start.sh`。
@@ -613,7 +622,9 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 1. ~~itest `group`~~（11/17：G0～G15＋G14D、G15R 共 18 項全過，`20261117_015231_group`；影片 `group.mp4`、`group_0.5x.mp4`）
 2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 測過、commit `1889b71`（11/18）；**第二批 05、08、07 11/18 commit**（協定版本 5、TASK_ANNOUNCE 128 B、swarm_interfaces 2.5.0；`zone_iface.sh`）；**第三批 10、12 11/18 測過、commit**（TaskSpec 檢查、任務 timeout_s、核准；swarm_interfaces 2.6.0；`exec_iface.sh`）；
    **第四批 11、03 11/18 測過、commit**（TASK_REPORT 14／15＋結果 outbox、report_policy、證據紀錄；swarm_interfaces 2.7.0；
-   `report_iface.sh`；TaskResult 改了，狗的 BT 要重編）；之後第五批 13 簽章，再整理 06 時間、09 協同出價
+   `report_iface.sh`；TaskResult 改了，狗的 BT 要重編）；**第五批 13 簽章 11/18 測過、commit**
+   （HMAC PoC、`security_mode`、`sec_iface.sh`）；**最後一批是整理：06 時間（現有絕對時刻寫成合約、補時鐘偏差與亂序的測試）、
+   09 協同出價第二階段（有效到達 = max(自身、前置里程碑、同步)）**
 3. ~~**TDR 參數實驗**~~（`docs/tdr_experiment_plan.md`，11/16 照使用者的〈TDR 參數設定與測試計畫〉PDF 重新規劃）：階段 A、B 的程式寫好
    （`mission_sim` 的量測、`tdr_experiment`〔S1～S6〕、`cbba_sim tdr`、`scripts/tdr_report.py`、`test_scoring` +3、`test_tdr_experiment` 9 項），
    ✅ 11/16 階段 A～D 跑完：**`energy_weight` 50 → 25**（程式預設已改），`half_life_by_priority` 維持 60/120/300/600 s；

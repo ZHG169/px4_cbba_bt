@@ -279,3 +279,23 @@ AGENT_STATE 多了 BT 的執行狀態。任務多時版本 2 每個任務 21 B�
 | R5 暫時拒絕 | 只請求一次；BT 狀態改變後重新請求，版本較大 |
 | R6 BT 沒回覆 | 3 s 後收到 RELEASE（同一個版本）；延遲的接受沒有啟動任務 |
 | R7 故障 | 沒有請求（修正前：逾時撤回的任務在 BT 變故障時被「狀態改變 → 恢復出價」又請求了一次） |
+
+## 八、協定版本 5 的簽章（任務欄位補齊 13，2026-11-18）
+
+格式在 `wire_signature.hpp` 開頭；摘要：
+
+| 項目 | 做法 |
+|---|---|
+| 簽哪些 | 有權限意義的：TASK_ANNOUNCE（建立、改版）、TASK_SPEC、TASK_CLOSE（完成、取消、過期、略過）、INCIDENT_UPDATE。狀態類（AGENT_STATE、CBBA_STATE、TASK_PROGRESS…）不簽 |
+| 放哪裡 | 封包最後的 31 B（key_id 2、issued_at_ms 8、tag 16、alg 1、"CBSG" 4），算在 payload_length 裡：轉送、SYNC_BATCH 的補發原樣帶著 |
+| 簽什麼 | 協定版本、種類、表頭之後的全部（轉送區塊＋內容）、key_id、issued_at。不簽表頭（轉送時發送者、序號會換）；canonical 就是本來的大端序逐欄編碼 |
+| 演算法 | PoC：HMAC-SHA256 取 16 B（`crypto.*`，自己實作、不加依賴）；alg 欄位留給 Ed25519。HMAC 是對稱的：全隊同一份金鑰表、知道金鑰的都能假冒 → 正式部署換 Ed25519 |
+| issuer、nonce | issuer ＝ origin_id，金鑰用 (issuer, key_id) 找；nonce ＝ 轉送區塊的 (origin_session, origin_seq)。同一個 nonce 再收到 → `signed_repeats`（重放、轉送、補發都是），去重複照舊；同一個 nonce 內容不同 → 丟掉（`signature_conflicts`） |
+| 非 issuer 的重送 | 驗過的（和自己簽的）存成「表頭之後的全部」，重送、轉送、補發時原樣帶上：補發都用原本的 origin，所以補給晚加入的節點也驗得過 |
+| 授權 | TASK_ANNOUNCE 的 issuer 要在 `task_issuers`（空 = 有金鑰的都可以；閘道統一建任務時設 [200]）；取消、完成照原本的權限（建立者、cancel_authorities、執行者），有簽章之後 origin 不能冒充 |
+| 模式 | `security_mode` none（＝ off，預設；命令列的 off 會被 YAML 讀成 false，要用 none）／sign（自己的簽、沒簽章的照收：換版的過渡）／require（沒簽章、驗不過的丟掉、不轉送） |
+| 時間 | issued_at 比現在晚超過 30 s 的不收；不做「太舊」的檢查（補發本來就會帶舊的） |
+| 金鑰 | `security_keys_file`（一行「機號 key_id 十六進位金鑰」，不要進 repo）；輪換：全隊先加新的 → 簽的一方 `security_sign_key_id` 換新的 → 舊任務都結束後再拿掉舊的（拿掉 = 撤銷，用舊金鑰簽的任務補發就驗不過了） |
+| 機密性 | 不加密：交給 mesh／VPN（一般的 TLS 不能直接用在 UDP multicast） |
+| 流量 | 簽的封包每則多 31 B（TASK_ANNOUNCE 128 → 159 B）；狀態類不變 |
+

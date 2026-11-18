@@ -28,6 +28,7 @@ clean() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
 has() { clean "$1" | grep -qF -- "$2"; }
 # wait_has 字串 檔案 秒
 wait_has() { local t=0; until has "$2" "$1" || [ $t -ge $(( $3 * 5 )) ]; do sleep 0.2; t=$((t+1)); done; has "$2" "$1"; }
+wait_re() { local t=0; until clean "$2" | grep -qE -- "$1" || [ $t -ge $(( $3 * 5 )) ]; do sleep 0.2; t=$((t+1)); done; clean "$2" | grep -qE -- "$1"; }
 stop_all() { pkill -f "__node:=zonet_[a-z0-9]+( |$)" 2>/dev/null; pkill -f "timeout 90 ros2 topic echo" 2>/dev/null; sleep 1; }
 trap stop_all EXIT
 
@@ -72,7 +73,7 @@ else
 fi
 sleep 1
 grep -q "區域註冊表版本 1" $L/zone_warning.txt && ok "Z4 zone_warning 話題" || bad "Z4 zone_warning（看 $L/zone_warning.txt）"
-wait_has "指派給 BT：" $L/dog.log 5 && clean $L/dog.log | grep "指派給 BT：" | grep -qv "無$" &&
+wait_re "指派給 BT：[0-9A-F]{4}\\." $L/dog.log 5 &&   # 啟動時那行「指派給 BT：無」不算
   ok "Z4 照常出價：狗拿到任務" || bad "Z4 狗沒拿到任務（看 $L/dog.log）"
 
 # ---------- Z5 ----------

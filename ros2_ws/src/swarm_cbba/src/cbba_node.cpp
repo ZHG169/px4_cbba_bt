@@ -66,6 +66,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -81,6 +82,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -550,6 +552,47 @@ public:
     comm.gateway_timeout = declare_parameter<double>("gateway_timeout", comm.gateway_timeout);
     // 移動目標的改版（任務欄位補齊 04，2026-11-17）：只動位置、位移 < 這個值（m）不重新評估（得標者照舊）；0 = 一律重新評估。全隊要一樣
     comm.retarget_threshold = declare_parameter<double>("retarget_threshold_m", comm.retarget_threshold);
+    // 簽章（任務欄位補齊 13，2026-11-18；cbba_core/wire_signature.hpp）：none（= off，預設；命令列寫 off 會被 YAML 當成
+    // false，所以用 none 或 'off'）／sign（過渡：自己的簽、沒簽章的照收）／
+    // require（沒簽章、驗不過的丟掉、不轉送）。金鑰檔一行一把「機號 key_id 十六進位金鑰」（# 開頭是註解；全隊同一份，
+    // HMAC 是 PoC：知道金鑰的都能假冒，正式部署換 Ed25519）；金鑰檔不要放進 repo
+    {
+      const std::string mode = declare_parameter<std::string>("security_mode", "none");
+      if (mode == "off" || mode == "none") {
+        comm.security.mode = SecurityConfig::Mode::OFF;
+      } else if (mode == "sign") {
+        comm.security.mode = SecurityConfig::Mode::SIGN;
+      } else if (mode == "require") {
+        comm.security.mode = SecurityConfig::Mode::REQUIRE;
+      } else {
+        throw std::invalid_argument("security_mode must be none (off), sign or require");
+      }
+      const std::string keys_file = declare_parameter<std::string>("security_keys_file", envOr("CBBA_SECURITY_KEYS", ""));
+      comm.security.sign_key_id = static_cast<std::uint16_t>(declare_parameter<int>("security_sign_key_id", 0));
+      for (const auto id : declare_parameter<std::vector<std::int64_t>>("task_issuers", std::vector<std::int64_t>{})) {
+        if (id < 1 || id > 65534) {
+          throw std::invalid_argument("task_issuers must be agent ids 1~65534");
+        }
+        comm.security.task_issuers.insert(static_cast<AgentId>(id));
+      }
+      if (comm.security.mode != SecurityConfig::Mode::OFF) {
+        comm.security.keys = loadSecurityKeys(keys_file);   // 讀不到、格式不對：丟例外，拒絕啟動
+        const bool mine = std::any_of(comm.security.keys.begin(), comm.security.keys.end(),
+            [agent_id, &comm](const SecurityConfig::Key & k) {
+              return k.agent == agent_id && (comm.security.sign_key_id == 0 || k.key_id == comm.security.sign_key_id);
+            });
+        if (!mine) {
+          throw std::runtime_error("security_keys_file " + keys_file + " has no signing key for agent " +
+                  std::to_string(agent_id));
+        }
+        std::string issuers;
+        for (const AgentId a : comm.security.task_issuers) {
+          issuers += (issuers.empty() ? "" : ",") + std::to_string(a);
+        }
+        RCLCPP_INFO(get_logger(), "簽章：%s，金鑰 %zu 把（%s），可以建任務的 %s", mode.c_str(), comm.security.keys.size(),
+          keys_file.c_str(), issuers.empty() ? "有金鑰的都可以" : issuers.c_str());
+      }
+    }
     comm.detection.capacity = static_cast<std::size_t>(
       declare_parameter<int>("detection_buffer", static_cast<int>(comm.detection.capacity)));
     comm.detection.merge_radius = declare_parameter<double>("detection_merge_radius", comm.detection.merge_radius);
@@ -786,6 +829,62 @@ private:
     RCLCPP_WARN(get_logger(), "世代檔 %s：%s → 改用隨機世代 %u（重開機後可能和之前的撞，機器人很少建任務所以只警告）",
       path.c_str(), error.c_str(), static_cast<unsigned>(epoch));
     return epoch;
+  }
+
+  // 金鑰檔：一行「機號 key_id 十六進位金鑰」（≥ 16 B），# 開頭與空行略過
+  static std::vector<SecurityConfig::Key> loadSecurityKeys(const std::string & path)
+  {
+    if (path.empty()) {
+      throw std::runtime_error("security_mode is not off but security_keys_file is empty");
+    }
+    std::ifstream in(path);
+    if (!in) {
+      throw std::runtime_error("cannot read security_keys_file " + path);
+    }
+    std::vector<SecurityConfig::Key> keys;
+    std::string line;
+    int n = 0;
+    while (std::getline(in, line)) {
+      ++n;
+      const auto first = line.find_first_not_of(" \t");
+      if (first == std::string::npos || line[first] == '#') {
+        continue;
+      }
+      std::istringstream ls(line);
+      long agent = 0;
+      long key_id = 0;
+      std::string hex;
+      if (!(ls >> agent >> key_id >> hex) || agent < 1 || agent > 65534 || key_id < 1 || key_id > 65535 ||
+        hex.size() % 2 != 0 || hex.size() < 32 || hex.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+      {
+        throw std::runtime_error("security_keys_file " + path + " line " + std::to_string(n) +
+                ": want \"agent key_id hex(>=16 bytes)\"");
+      }
+      SecurityConfig::Key k;
+      k.agent = static_cast<AgentId>(agent);
+      k.key_id = static_cast<std::uint16_t>(key_id);
+      for (std::size_t i = 0; i < hex.size(); i += 2) {
+        k.secret.push_back(static_cast<std::uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+      }
+      keys.push_back(std::move(k));
+    }
+    return keys;
+  }
+
+  // 簽章被擋下的（驗不過、未授權的 issuer、沒簽章、同一個 nonce 不同內容）：第一次馬上警告，之後最多每 10 s 彙總一次
+  //（被擋的任務會一直重播、被轉送，每一則都算，不限速會洗版）
+  void reportSecurity(double now)
+  {
+    const CommStats & st = comm_->stats();
+    const std::array<int, 4> now_counts{st.bad_signatures, st.unauthorized_issuers, st.unsigned_rejected,
+      st.signature_conflicts};
+    if (now_counts != security_counts_ && (security_last_ < 0.0 || now - security_last_ >= 10.0)) {
+      security_last_ = now;
+      RCLCPP_WARN(get_logger(), "簽章：丟掉的封包累計 驗不過 %d、未授權的 issuer %d、沒簽章 %d、同 nonce 不同內容 %d（驗過 %d、重複 %d）",
+        st.bad_signatures, st.unauthorized_issuers, st.unsigned_rejected, st.signature_conflicts, st.signature_ok,
+        st.signed_repeats);
+      security_counts_ = now_counts;
+    }
   }
 
   // 同一機號只能有一個 cbba_node。檔案裡寫 PID 方便查是誰拿著
@@ -1116,6 +1215,7 @@ private:
     dropOptionals(now);
     handleWatchdog(now);
     handleTimeouts();
+    reportSecurity(now);
     if (gateway_) {
       publishApprovals(now);
       handleReports(now);
@@ -2650,6 +2750,8 @@ private:
   std::string gateway_state_file_;                 // 對照表存檔（任務欄位補齊 01）
   std::string gateway_state_saved_;                // 上次寫進檔案的內容（變了才寫）
   std::set<TaskId> schema_warned_;                 // 機器人：TaskSpec 的主版本不認得、已經警告過的任務
+  std::array<int, 4> security_counts_{};          // 上次印的簽章擋下的數量
+  double security_last_{-1.0};                     // 上次印的時刻
   std::map<TaskId, std::uint32_t> p0_fallback_version_;   // 單獨 P0 任務的 FallbackRequest 第幾次（冪等鍵）
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr zone_warning_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr capability_sub_;

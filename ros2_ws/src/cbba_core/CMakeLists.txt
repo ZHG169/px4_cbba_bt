@@ -35,6 +35,8 @@ add_library(${PROJECT_NAME}_core
   src/approval.cpp
   src/task_report.cpp
   src/wire_task_report.cpp
+  src/crypto.cpp
+  src/wire_signature.cpp
   src/udp_link.cpp
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
@@ -79,6 +81,8 @@ set(CBBA_CORE_TESTS
   test_approval
   test_wire_task_report
   test_task_report
+  test_crypto
+  test_security
   test_detection
   test_mission_sim
   test_tdr_experiment
