@@ -19,9 +19,10 @@
 | 一件事要幾台 | 一個任務一台 | **角色組（CB-4）**：同一個 incident 拆成多個角色（`group_id`），各角色分別拍賣；precedence、會合點、all-or-nothing、distinct、optional |
 | 出價公式 | 舊公式（空間 × 時間成本、電池加權） | **時間折扣報酬（TDR）**：Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量；w_E 25（參數實驗定案）、half_life P0～P3 60/120/300/600 s |
 | 失效處理 | 失聯接手、失敗交回 | ＋連鎖撤銷（取消失效角色與依賴它的角色）、FallbackRequest、失聯接手做法 A（接手時限到才開始算組的恢復期限） |
-| 協定 | 版本 4 的前半（64 位元 task_id、TaskSpec） | 版本 4 完整：再加 TASK_PROGRESS（12）、INCIDENT_UPDATE（13）、DETECTION（10、11）、TASK_ANNOUNCE 124 B |
-| 介面 | swarm_interfaces 2.0 以前 | **swarm_interfaces 2.3.0**：`teammates`、`task_progress`、`incident_update`、`detection`、`InjectTask`、`FallbackRequest`… |
-| 註冊表 | — | `registry/`（actions、objects、tools、platforms、fleet、event_types）＋`site-config/yard` |
+| 協定 | 版本 4 的前半（64 位元 task_id、TaskSpec） | **版本 5**（11/18）：版本 4 再加 TASK_PROGRESS（12）、INCIDENT_UPDATE（13）、DETECTION（10、11）、TASK_REPORT（14、15）、TASK_ANNOUNCE 128 B（區域政策、區域註冊表版本）、簽章（HMAC PoC，`security_mode`） |
+| 介面 | swarm_interfaces 2.0 以前 | **swarm_interfaces 2.7.0**：`teammates`、`task_progress`、`incident_update`、`detection`、`InjectTask`、`FallbackRequest`、`approve_task`、`task_reports`、`incident_evidence`… |
+| 註冊表 | — | `registry/`（actions、objects、tools、platforms、fleet、event_types、task_types）＋`site-config/yard`（區域、設備、觀察點、起降點） |
+| 任務欄位 | task_id、位置、期限、價值 | **〈2-1〉第二節的 13 列都補齊**（11/18）：識別與追溯、任務語意、空間（觀察點）、區域與樓層、能力、搶占遲滯、時間合約、協同出價、執行規格檢查、核准、回報、證據、簽章 |
 
 **和 main 的關係**：還沒合進 main（伯宇 `git pull` main 不會拿到）；約好全隊一起換時再合。協定與訊息和 main 不相容：
 用這個分支時，**全隊（含狗的 cbba_node、狗的 BT）都要用同一版重新編譯**（uav 容器編 6 個套件；狗的 BT `dog_bt.sh build`）。
@@ -36,7 +37,7 @@ colcon build --symlink-install --packages-select swarm_interfaces cbba_core swar
 python3 docker/itest/itest.py group --dogs 3 --kill-existing
 ```
 
-**目前狀態（2026-11-17）**
+**目前狀態（2026-11-18）**
 
 | 項目 | 狀態 |
 |---|---|
@@ -44,13 +45,14 @@ python3 docker/itest/itest.py group --dogs 3 --kill-existing
 | 出價改成 TDR；參數實驗（`cbba_sim tdr`，情境 S1～S6 × w_E × half_life × 掉包率）→ w_E 50 改 25 | ✅ `docs/tdr_experiment_plan.md` |
 | CB-4 團隊協同（三批）＋失聯接手做法 A | ✅ 單元＋節點腳本（`cb4*_iface.sh`） |
 | **itest group G0～G15**：precedence、incident、會合、distinct、all-or-nothing、Planner 改版／fallback、異質分工、失聯接手、接手逾時、連鎖撤銷、optional 略過、搶占、**偵測 → 寫死的假 Planner → 組隊**（狗偵測到人、UAV 偵測到火）、去重、補發 | ✅ 18／18 PASS（`20261117_015231_group`）；影片 `group.mp4` |
+| **任務欄位補齊**（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉的 13 列，五批＋整理批）：協定版本 5、區域註冊表（禁入、樓層、高度、室內）、`preempt_margin_pct`、P0 看門狗、TaskSpec 檢查器（閘道）、任務 timeout、核准流程、TASK_REPORT＋結果 outbox、證據 URI、簽章、時間合約與時鐘偏差告警、**協同出價**（有效到達 = max(自身、前置角色里程碑、會合)） | ✅ 單元＋節點腳本（`meta`／`zone`／`exec`／`report`／`sec_iface.sh`）＋itest 回歸（11/18）；`docs/planner_task_definition_plan.md` |
 | 真的規劃器（範本展開 PLN-1、九層檢查器 PLN-2）、真的偵測器外掛（EVT-1） | ⏳ 現在由 itest 的假 Planner、`detection` 話題代替 |
 | 無人機的 uav_adapter（`ExecuteStep.action`）、BT 讀 spec／teammates／task_progress | ⏳ 等和伯宇對 Action 介面 |
 | 狗的 BT 接 CB-4 話題、同 task_id 新 revision 更新目標 | ⏳ 要和伯宇對 |
 | 狗的速度、耗電實測（TDR 參數實驗階段 E）、Gazebo 2 狗＋1 UAV 驗證（階段 F、M3） | ⏳ |
 
-設計文件：`ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`（合約）、`cb4_design.md`（團隊協同）、`formula/tdr_design.md`（出價公式）、
-`parameters.md`（參數）；測試與報告：`docker/itest/README.md`（group 一節）、`docs/cbba_test_report_20261116.md`。
+設計文件：`ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`（合約）、`cb4_design.md`（團隊協同、協同出價）、`formula/tdr_design.md`（出價公式）、
+`protocol.md`（第八節簽章、第九節時間合約）、`parameters.md`（參數）、`docs/planner_task_definition_plan.md`（任務欄位補齊）；測試與報告：`docker/itest/README.md`（group 一節）、`docs/cbba_test_report_20261116.md`。
 
 ## 架構
 
@@ -68,9 +70,10 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 
 - 控制路徑（節點 → XRCE Agent → PX4）走每台自己的線，**不經過 mesh**；**DDS 只在機內**。
 - 機間只有兩條 UDP multicast：
-  - **CBBA 協定版本 4**（`cbba_node`，port 14600）：每筆任務資料帶 task_id，不相容於「機間通訊封包規格」2026-10-06，
+  - **CBBA 協定版本 5**（`cbba_node`，port 14600）：每筆任務資料帶 task_id，不相容於「機間通訊封包規格」2026-10-06，
     見 `ros2_ws/src/cbba_core/doc/protocol.md`；版本 3（2026-10-28）改補發（`cbba_core/doc/protocol_v3_sync.md`）；
-    **版本 4**（2026-11-11 起，2-1b M0）：64 位元 task_id、能力過濾、P0～P3、TaskSpec、閘道、改版，見 `cbba_core/doc/cbba_m0_contract.md`。
+    **版本 4**（2026-11-11 起，2-1b M0）：64 位元 task_id、能力過濾、P0～P3、TaskSpec、閘道、改版，見 `cbba_core/doc/cbba_m0_contract.md`；
+    **版本 5**（2026-11-18，`hetero-tasking`）：TASK_ANNOUNCE 128 B（區域）、TASK_REPORT、簽章，見 `protocol.md` 第八、九節。
     各版本互相拒收，全隊（含狗）要用同一版編譯。
   - **飛行層位置廣播**（無人機 BT 的 `flight_beacon`，port 14601，10 Hz）：給 CBF 避碰用的鄰機位置與速度。
 - 用 `docker/scripts/mesh_tc.sh` 模擬丟包與延遲。
@@ -81,7 +84,7 @@ sim ─┬─ sim_uav1_net（線）─ uav1 ─┐
 ```
             ┌──────────────── 每台載具的機上電腦 ────────────────┐
  其他載具 ◄═UDP═► cbba_node ◄─ robot_state ── 狀態轉接（無人機：px4_state_bridge）
- （協定版本 4）       │  ▲
+ （協定版本 5）       │  ▲
    current_task       │  │ task_result、new_task（例如火警）
    task_closed        ▼  │
    task_announced*     BT（無人機：uav_px4_bt；狗：伯宇的 task_manager）→ PX4／Nav2
