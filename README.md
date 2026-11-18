@@ -20,8 +20,9 @@
 | 出價公式 | 舊公式（空間 × 時間成本、電池加權） | **時間折扣報酬（TDR）**：Σ 成功率 × 價值 × 2^(−到達時間 / half_life) − w_E × 耗電 / 可用電量；w_E 25（參數實驗定案）、half_life P0～P3 60/120/300/600 s |
 | 失效處理 | 失聯接手、失敗交回 | ＋連鎖撤銷（取消失效角色與依賴它的角色）、FallbackRequest、失聯接手做法 A（接手時限到才開始算組的恢復期限） |
 | 協定 | 版本 4 的前半（64 位元 task_id、TaskSpec） | **版本 5**（11/18）：版本 4 再加 TASK_PROGRESS（12）、INCIDENT_UPDATE（13）、DETECTION（10、11）、TASK_REPORT（14、15）、TASK_ANNOUNCE 128 B（區域政策、區域註冊表版本）、簽章（HMAC PoC，`security_mode`） |
-| 介面 | swarm_interfaces 2.0 以前 | **swarm_interfaces 2.7.0**：`teammates`、`task_progress`、`incident_update`、`detection`、`InjectTask`、`FallbackRequest`、`approve_task`、`task_reports`、`incident_evidence`… |
+| 介面 | swarm_interfaces 2.0 以前 | **swarm_interfaces 2.8.0**：`teammates`、`task_progress`、`incident_update`、`detection`、`InjectTask`、`FallbackRequest`、`approve_task`、`task_reports`、`incident_evidence`…；**`ExecuteStep.action`**（BT → adapter 的通用執行介面，草案） |
 | 註冊表 | — | `registry/`（actions、objects、tools、platforms、fleet、event_types、task_types）＋`site-config/yard`（區域、設備、觀察點、起降點） |
+| 執行端 | 各平台的 BT 自己接 Nav2、PX4 | **一個通用的 `ExecuteStep.action`**（`/<ns>/execute_step`，草案、11/19）：BT 的 ExecuteSteps 逐步呼叫，狗、無人機、Node-RED 的 adapter 共用；假的 adapter（`fake_adapter`）先給大家對欄位、測流程 |
 | 任務欄位 | task_id、位置、期限、價值 | **〈2-1〉第二節的 13 列都補齊**（11/18）：識別與追溯、任務語意、空間（觀察點）、區域與樓層、能力、搶占遲滯、時間合約、協同出價、執行規格檢查、核准、回報、證據、簽章 |
 
 **和 main 的關係**：還沒合進 main（伯宇 `git pull` main 不會拿到）；約好全隊一起換時再合。協定與訊息和 main 不相容：
@@ -37,7 +38,7 @@ colcon build --symlink-install --packages-select swarm_interfaces cbba_core swar
 python3 docker/itest/itest.py group --dogs 3 --kill-existing
 ```
 
-**目前狀態（2026-11-18）**
+**目前狀態（2026-11-19）**
 
 | 項目 | 狀態 |
 |---|---|
@@ -47,12 +48,14 @@ python3 docker/itest/itest.py group --dogs 3 --kill-existing
 | **itest group G0～G15**：precedence、incident、會合、distinct、all-or-nothing、Planner 改版／fallback、異質分工、失聯接手、接手逾時、連鎖撤銷、optional 略過、搶占、**偵測 → 寫死的假 Planner → 組隊**（狗偵測到人、UAV 偵測到火）、去重、補發 | ✅ 18／18 PASS（`20261117_015231_group`）；影片 `group.mp4` |
 | **任務欄位補齊**（〈2-1〉第二節＋〈CBBA 任務欄位逐列實作規劃〉的 13 列，五批＋整理批）：協定版本 5、區域註冊表（禁入、樓層、高度、室內）、`preempt_margin_pct`、P0 看門狗、TaskSpec 檢查器（閘道）、任務 timeout、核准流程、TASK_REPORT＋結果 outbox、證據 URI、簽章、時間合約與時鐘偏差告警、**協同出價**（有效到達 = max(自身、前置角色里程碑、會合)） | ✅ 單元＋節點腳本（`meta`／`zone`／`exec`／`report`／`sec_iface.sh`）＋itest 回歸（11/18）；`docs/planner_task_definition_plan.md` |
 | 真的規劃器（範本展開 PLN-1、九層檢查器 PLN-2）、真的偵測器外掛（EVT-1） | ⏳ 現在由 itest 的假 Planner、`detection` 話題代替 |
-| 無人機的 uav_adapter（`ExecuteStep.action`）、BT 讀 spec／teammates／task_progress | ⏳ 等和伯宇對 Action 介面 |
+| **`ExecuteStep.action` 草案＋假 adapter**（`swarm_cbba` 的 `fake_adapter`：和閘道同一套檢查、UAV 平台狀態機與自動起飛／降落、取消、逾時、故障注入、場域的 location） | ✅ 單元（`test_fake_executor`）＋節點腳本（`exec_step_iface.sh` A1～A7，11/19）；欄位見 `registry/api.md` 第 5 節，**要和伯宇、羅凡對** |
+| 無人機的 uav_adapter（同一個 Action，後端接 PX4）、BT 的 ExecuteSteps 讀 spec／teammates／task_progress | ⏳ uav_adapter 先在 SITL 單獨做；BT 端等伯宇的新版 |
 | 狗的 BT 接 CB-4 話題、同 task_id 新 revision 更新目標 | ⏳ 要和伯宇對 |
 | 狗的速度、耗電實測（TDR 參數實驗階段 E）、Gazebo 2 狗＋1 UAV 驗證（階段 F、M3） | ⏳ |
 
 設計文件：`ros2_ws/src/cbba_core/doc/cbba_m0_contract.md`（合約）、`cb4_design.md`（團隊協同、協同出價）、`formula/tdr_design.md`（出價公式）、
-`protocol.md`（第八節簽章、第九節時間合約）、`parameters.md`（參數）、`docs/planner_task_definition_plan.md`（任務欄位補齊）；測試與報告：`docker/itest/README.md`（group 一節）、`docs/cbba_test_report_20261116.md`。
+`protocol.md`（第八節簽章、第九節時間合約）、`parameters.md`（參數）、`docs/planner_task_definition_plan.md`（任務欄位補齊）、
+`registry/api.md`（註冊表與 ExecuteStep 的對外格式）；測試與報告：`docker/itest/README.md`（group 一節）、`docs/cbba_test_report_20261116.md`。
 
 ## 架構
 
