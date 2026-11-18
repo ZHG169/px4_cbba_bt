@@ -89,7 +89,7 @@ CbbaComm::CbbaComm(
   const AgentState & state, const ScoringParams & params, const CommConfig & config,
   std::uint64_t session_id)
 : agent_(state, params), config_(config), session_(session_id != 0 ? session_id : randomSession()),
-  outbox_det_(config.detection)
+  outbox_det_(config.detection), outbox_rep_(config.report)
 {
   if (!wire::validAgentId(state.id)) {
     throw std::invalid_argument("agent id must be 1~65534");
@@ -561,6 +561,8 @@ void CbbaComm::receive(const std::uint8_t * data, std::size_t size, double now)
     case PacketType::TASK_SPEC: onTaskSpec(bytes, now); break;
     case PacketType::DETECTION: onDetection(bytes, now); break;
     case PacketType::DETECTION_ACK: onDetectionAck(bytes, now); break;
+    case PacketType::TASK_REPORT: onTaskReport(bytes, now); break;
+    case PacketType::TASK_REPORT_ACK: onTaskReportAck(bytes, now); break;
     case PacketType::TASK_PROGRESS: onTaskProgress(bytes, now); break;
     case PacketType::INCIDENT_UPDATE: onIncidentUpdate(bytes, now); break;
   }
@@ -676,6 +678,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
 
   // 偵測：機器人送佇列裡到期的；閘道送確認
   sendDetections(now);
+  sendReports(now);
 
   std::vector<Bytes> out;
   out.swap(outbox_);
@@ -2649,6 +2652,171 @@ void CbbaComm::onDetectionAck(const Bytes & bytes, double now)
   for (std::uint32_t seq : b->seqs) {
     if (outbox_det_.ack(seq)) {
       ++stats_.detections_acked;
+    }
+  }
+}
+
+// ===========================================================================
+// 任務的執行結果（任務欄位補齊 11，協定版本 5，2026-11-18；task_report.hpp）
+// ===========================================================================
+bool CbbaComm::addReport(const TaskReport & r, double now)
+{
+  if (!validTaskReport(r)) {
+    return false;
+  }
+  ++stats_.reports_added;
+  if (config_.gateway) {
+    ReceivedReport rr;
+    rr.agent = id();
+    rr.session = session_;
+    rr.seq = ++local_rep_seq_;
+    rr.report = r;
+    rr.received_at = now;
+    received_rep_.push_back(std::move(rr));
+    ++stats_.reports_received;
+    return true;
+  }
+  if (outbox_rep_.add(r, gatewayOnline(now))) {
+    ++stats_.reports_evicted;
+  }
+  return true;
+}
+
+std::vector<ReceivedReport> CbbaComm::takeReports()
+{
+  std::vector<ReceivedReport> out;
+  out.swap(received_rep_);
+  return out;
+}
+
+void CbbaComm::sendReports(double now)
+{
+  for (auto & [target, seqs] : rep_acks_due_) {
+    for (std::size_t pos = 0; pos < seqs.size(); pos += wire::kMaxReportAckSeqs) {
+      const wire::Header h = newHeader(PacketType::TASK_REPORT_ACK);
+      wire::TaskReportAckBody ack;
+      ack.relay = wire::originOf(h);
+      ack.target_id = target.first;
+      ack.target_session = target.second;
+      const std::size_t end = std::min(pos + wire::kMaxReportAckSeqs, seqs.size());
+      ack.seqs.assign(seqs.begin() + static_cast<std::ptrdiff_t>(pos), seqs.begin() + static_cast<std::ptrdiff_t>(end));
+      dedup_.firstSeen(PacketType::TASK_REPORT_ACK, ack.relay, now);
+      send(wire::encodeTaskReportAck(h, ack), PacketType::TASK_REPORT_ACK);
+    }
+  }
+  rep_acks_due_.clear();
+
+  if (config_.gateway || outbox_rep_.size() == 0 || !gatewayOnline(now)) {
+    return;
+  }
+  for (const ReportOutbox::Item & item : outbox_rep_.due(now)) {
+    const wire::Header h = newHeader(PacketType::TASK_REPORT);
+    const TaskReport & r = item.report;
+    wire::TaskReportBody b;
+    b.relay = wire::originOf(h);
+    b.report_seq = item.seq;
+    b.task_id = r.task;
+    b.revision = r.revision;
+    b.assign_version = r.assign_version;
+    b.t_ms = static_cast<std::uint64_t>(std::llround(std::max(r.t, 0.0) * 1e3));
+    b.flags = static_cast<std::uint8_t>((r.success ? wire::kReportSuccess : 0) |
+      (r.position_valid ? wire::kReportPositionValid : 0) | (item.buffered ? wire::kReportBuffered : 0));
+    b.completed_steps = r.completed_steps;
+    b.x = static_cast<float>(r.final_position.x);
+    b.y = static_cast<float>(r.final_position.y);
+    b.z = static_cast<float>(r.final_position.z);
+    b.failure_code = r.failure_code;
+    b.detail = r.detail;
+    b.findings_uri = r.findings_uri;
+    b.attachments = r.attachments;
+    dedup_.firstSeen(PacketType::TASK_REPORT, b.relay, now);
+    const bool retry = item.tries > 1;
+    if (retry) {
+      ++stats_.report_retries;
+    } else {
+      ++stats_.reports_sent;
+    }
+    send(wire::encodeTaskReport(h, b), PacketType::TASK_REPORT, retry ? TxKind::RETRY : TxKind::BASE);
+  }
+}
+
+void CbbaComm::onTaskReport(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeTaskReport(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::TASK_REPORT, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  if (b->relay.origin_id != id()) {
+    relay(bytes);
+  }
+  if (!config_.gateway) {
+    return;
+  }
+  rep_acks_due_[{b->relay.origin_id, b->relay.origin_session}].push_back(b->report_seq);
+  if (!inbox_rep_.firstSeen(b->relay.origin_id, b->relay.origin_session, b->report_seq, now)) {
+    ++stats_.report_duplicates;
+    return;
+  }
+  ReceivedReport r;
+  r.agent = b->relay.origin_id;
+  r.session = b->relay.origin_session;
+  r.seq = b->report_seq;
+  r.buffered = (b->flags & wire::kReportBuffered) != 0;
+  r.received_at = now;
+  TaskReport & t = r.report;
+  t.task = b->task_id;
+  t.revision = b->revision;
+  t.assign_version = b->assign_version;
+  t.t = static_cast<double>(b->t_ms) / 1e3;
+  t.success = (b->flags & wire::kReportSuccess) != 0;
+  t.position_valid = (b->flags & wire::kReportPositionValid) != 0;
+  t.completed_steps = b->completed_steps;
+  t.final_position = {b->x, b->y, b->z};
+  t.failure_code = b->failure_code;
+  t.detail = b->detail;
+  t.findings_uri = b->findings_uri;
+  t.attachments = b->attachments;
+  received_rep_.push_back(std::move(r));
+  ++stats_.reports_received;
+}
+
+void CbbaComm::onTaskReportAck(const Bytes & bytes, double now)
+{
+  const auto b = wire::decodeTaskReportAck(bytes);
+  if (!b) {
+    ++stats_.malformed;
+    return;
+  }
+  if (!dedup_.firstSeen(PacketType::TASK_REPORT_ACK, b->relay, now)) {
+    ++stats_.duplicates;
+    return;
+  }
+  if (rejectedOrigin(b->relay)) {
+    ++stats_.conflict_dropped;
+    return;
+  }
+  if (b->target_id != id()) {
+    if (b->relay.origin_id != id()) {
+      relay(bytes);
+    }
+    return;
+  }
+  if (b->target_session != session_) {
+    return;
+  }
+  last_det_ack_ = now;   // 閘道的確認：在線判斷用（和偵測的確認共用）
+  for (std::uint32_t seq : b->seqs) {
+    if (outbox_rep_.ack(seq)) {
+      ++stats_.reports_acked;
     }
   }
 }

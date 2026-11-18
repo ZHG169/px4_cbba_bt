@@ -96,6 +96,10 @@ TEST(WireHeader, RejectsInvalid)
   bad[3] = 13;
   EXPECT_TRUE(parseHeader(bad));                       // INCIDENT_UPDATE（CB-4 第三批）
   bad[3] = 14;
+  EXPECT_TRUE(parseHeader(bad));                       // TASK_REPORT（版本 5，2026-11-18）
+  bad[3] = 15;
+  EXPECT_TRUE(parseHeader(bad));                       // TASK_REPORT_ACK
+  bad[3] = 16;
   EXPECT_FALSE(parseHeader(bad));                      // 不認得的種類
   EXPECT_FALSE(parseHeader(packet(makeHeader(PacketType::AGENT_STATE, 0))));        // 0 = 無人
   EXPECT_FALSE(parseHeader(packet(makeHeader(PacketType::AGENT_STATE, 0xFFFF))));   // 保留

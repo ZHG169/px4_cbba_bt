@@ -119,6 +119,26 @@ uncertainty_m、standoff_m、steps、success／abort 條件、timeout、report_p
 - 「升級」只做告警（task_orphaned＋log）＋FallbackRequest，沒有自動提高優先級。
 - 鄰居的樓層、高度上限不在 AGENT_STATE 裡：閘道的「有沒有能做的載具」（capableAgents）只看平台的區域限制。
 
+### 第三批的實作（2026-11-18，10、12；單元、`exec_iface.sh`、回歸全過）
+
+| 列 | 做法 | 程式 | 測試 |
+|---|---|---|---|
+| 10 執行規格 | steps 是唯一的執行介面（不用 bt_subtree）。閘道注入前的 **TaskSpec 檢查**（`swarm_cbba/spec_validator.*`，要 `registry_dir`；`site_dir` 時另外查位置、設備實例）：動作存在且可規劃開放、參數型別範圍 enum required、location／object（required、參照存在、沒代換的範本字串、物件類別）、步數 ≤ 20、平台支援（not_started 不算）、wait_for 引用、成功／中止條件格式、timeout_s。有錯不注入，警告回 `InjectTask.warnings`。**任務層級 `timeout_s`**：執行端 cbba_node 強制（`AssignmentManager::setTaskTimeout`，停住的時間不算）→ 當成 E_TIMEOUT 失敗。8 個動作的支援表在 `registry/api.md` 4.2 | `spec_validator.*`、`assignment_manager.*`、`cbba_node` | `test_spec_validator` 7 項、`exec_iface.sh` E1～E4 |
+| 12 人機與安全 | 核准狀態 PROPOSED → WAITING_APPROVAL → APPROVED → INJECTED／REJECTED（EXPIRED），核准前不建 CBBA 任務（`cbba_core/approval.*`）；誰要核准：`InjectTask.requires_approval`、事件類型 requires_approval、風險 high 的動作（`approval_policy` none／risk／strict）；`approve_task` 服務（單號或整個事件、操作者必填）、`approvals` 話題、稽核紀錄檔；safety_notes 只顯示 | `approval.*`、`cbba_node`、`ApproveTask.srv`、`ApprovalState.msg`、swarm_interfaces 2.6.0 | `test_approval` 4 項、`exec_iface.sh` E5、E6 |
+
+還沒做的：前置條件鏈（preconditions／effects 模擬）、續航、機隊可行性（`/validate` 的另外幾層）；BT 端照 success_criteria、abort_conditions
+判斷（狗、無人機的 BT）；在等核准的單子不存檔（閘道重開要規劃器重送）。
+
+### 第四批的實作（2026-11-18，11、03；單元、`report_iface.sh`、回歸全過）
+
+| 列 | 做法 | 程式 | 測試 |
+|---|---|---|---|
+| 11 回報 | TaskSpec `report_policy`（stream、snapshot_period_s、channels gcs／vms／operator、required_findings）注入前檢查；`TaskResult` 加 completed_steps、attachments、final_position；**TASK_REPORT／TASK_REPORT_ACK**（協定版本 5 的種類 14、15，轉送）：執行者把被接受的結果送閘道，**結果 outbox**（閘道斷線時暫存、恢復後補送、沒確認重送、限速、滿了丟最舊的）；閘道發 `task_reports`（channels、missing_findings）、紀錄檔 | `task_report.*`、`wire_task_report.*`、`cbba_comm`、`spec_validator`、`cbba_node`、`TaskReport.msg` | `test_wire_task_report` 3 項、`test_task_report` 4 項、`test_spec_validator` ReportPolicy、`report_iface.sh` R2～R5 |
+| 03 證據 | `InjectTask` 帶事件的證據（URI＋信心值＋攝影機）；URI 規則 `evidence://<incident>/<種類>/<檔名>`；TaskSpec 只帶 `evidence` 的 uri、confidence；整筆留在閘道（`incident_evidence`、紀錄檔）；CBBA 封包不帶證據 | `task_meta`、`cbba_node`、`IncidentEvidence.msg` | `test_task_meta` Evidence、`report_iface.sh` R1、R5 |
+
+還沒做的：BT／adapter 照 report_policy 控制相機（串流、定期截圖）；GCS／VMS 端實際的回寫；證據庫本身（保存期限、權限、刪除）在控制中心。
+swarm_interfaces 2.7.0：**TaskResult 加欄位，狗的 BT 要 `dog_bt.sh build`**（型別雜湊變了，舊的 BT 會和新的 cbba_node 對不上）。
+
 > 下面第 0～6 節是 11/17 稍早的分析（使用者提供 PDF 之前），以上一節為準：路徑繞行估算（F6、N3）不做（路徑交給 Nav2）；
 > 檢查器與核准放在閘道；第 4 節的實作順序由上表取代。
 

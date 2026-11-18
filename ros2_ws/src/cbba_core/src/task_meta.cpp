@@ -77,6 +77,12 @@ std::string checkMeta(const TaskMeta & meta, const Vec3 & observe)
   {
     return "uncertainty_m、standoff_m 要 ≥ 0";
   }
+  if (!validEvidenceUri(meta.evidence_uri)) {
+    return "evidence_uri 要是 evidence://、https://、http://、s3://、file:// 開頭、≤ 512 B、沒有空白";
+  }
+  if (!std::isfinite(meta.evidence_confidence) || meta.evidence_confidence < 0.0 || meta.evidence_confidence > 1.0) {
+    return "evidence_confidence 要在 0～1";
+  }
   if (meta.track_id.size() > kMaxTrackId) {
     return "track_id 最多 " + std::to_string(kMaxTrackId) + " B";
   }
@@ -154,6 +160,9 @@ std::string metaJsonMembers(const TaskMeta & meta, const Vec3 & observe, std::ui
   if (!meta.description.empty()) {
     add("description", jsonString(meta.description));
   }
+  if (!meta.evidence_uri.empty()) {
+    add("evidence", "{\"uri\":" + jsonString(meta.evidence_uri) + ",\"confidence\":" + number(meta.evidence_confidence) + "}");
+  }
   add("observe_pose", pose(observe, floor));
   if (meta.target_kind != TargetKind::NONE) {
     add("target_kind", jsonString(toString(meta.target_kind)));
@@ -176,8 +185,25 @@ const std::vector<std::string> & reservedSpecKeys()
   static const std::vector<std::string> keys = {
     "schema_version", "incident_id", "source", "source_id", "event_type", "event_type_id", "task_type",
     "task_type_id", "role", "role_id", "description", "observe_pose", "target_kind", "target", "track_id",
-    "uncertainty_m", "standoff_m"};
+    "uncertainty_m", "standoff_m", "evidence"};
   return keys;
+}
+
+bool validEvidenceUri(const std::string & uri)
+{
+  if (uri.empty()) {
+    return true;
+  }
+  if (uri.size() > kMaxUri || uri.find_first_of(" \t\r\n") != std::string::npos) {
+    return false;
+  }
+  for (const char * scheme : {"evidence://", "https://", "http://", "s3://", "file://"}) {
+    const std::string s(scheme);
+    if (uri.size() > s.size() && uri.compare(0, s.size(), s) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::optional<std::uint16_t> specSchemaMajor(const std::string & version)

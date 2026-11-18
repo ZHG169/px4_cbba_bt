@@ -142,3 +142,28 @@ TEST(TaskMeta, SchemaMajor)
   EXPECT_FALSE(specSchemaMajor("1."));
   EXPECT_FALSE(specSchemaMajor("1.x"));
 }
+
+TEST(TaskMeta, EvidenceReferenceOnly)
+{
+  // 03：TaskSpec 只帶證據的參照與信心值；URI 的 scheme、長度、空白；信心值 0～1
+  TaskMeta m = pointMeta();
+  m.evidence_uri = "evidence://ev_0042/snapshot/cam07_0001.jpg";
+  m.evidence_confidence = 0.93;
+  EXPECT_EQ(checkMeta(m, {6.0, 0.0, 0.0}), "");
+  const std::string j = metaJsonMembers(m, {6.0, 0.0, 0.0}, 1);
+  EXPECT_NE(j.find("\"evidence\":{\"uri\":\"evidence://ev_0042/snapshot/cam07_0001.jpg\",\"confidence\":0.930}"),
+    std::string::npos) << j;
+  EXPECT_TRUE(validEvidenceUri(""));
+  EXPECT_TRUE(validEvidenceUri("https://vms.local/clip/1.mp4"));
+  EXPECT_FALSE(validEvidenceUri("ftp://x/y"));
+  EXPECT_FALSE(validEvidenceUri("evidence://"));
+  EXPECT_FALSE(validEvidenceUri("evidence://a b"));
+  EXPECT_FALSE(validEvidenceUri("evidence://" + std::string(600, 'x')));
+  m.evidence_confidence = 1.5;
+  EXPECT_NE(checkMeta(m, {6.0, 0.0, 0.0}), "");
+  m.evidence_confidence = 0.5;
+  m.evidence_uri = "C:\\images\\1.jpg";
+  EXPECT_NE(checkMeta(m, {6.0, 0.0, 0.0}), "");
+  TaskMeta none;
+  EXPECT_EQ(metaJsonMembers(none, {}, 0).find("evidence"), std::string::npos);
+}

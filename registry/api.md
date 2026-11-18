@@ -204,6 +204,70 @@ POST /test_run/tr_0007/cancel → {"status": "canceling"}
   **不重新評估**（得標者照舊，BT 收到新的 revision 更新導航）；≥ 3 m 或同時改了別的欄位 → 照一般改版重新評估。
   規劃器改版時相對時間（deadline_sec 等）和上一版一樣 → 閘道沿用原本的絕對時刻（期限不會因改版往後推）。
 
+### 4.2 執行規格與核准（任務欄位補齊第三批，2026-11-18）
+
+角色 spec 最上層另外可以寫（規劃器給，閘道注入前檢查，`swarm_cbba/spec_validator.*`）：
+
+```json
+{"steps": [...],
+ "success_criteria": [{"effect": "has_observation"}],
+ "abort_conditions": [{"failure_code": "E_TARGET_LOST"}, {"battery_below_pct": 25}, {"elapsed_s": 300}, {"zone_entered": "Z_HV_A"}],
+ "timeout_s": 300,
+ "safety_notes": ["只在安全距離外觀察"]}
+```
+
+- `success_criteria`：結構化，每條 `{"effect": 名稱}`（`actions.yaml` 的 conditions），要有某一步的動作會產生它；BT 全部成立才回報成功
+  （BT 端還沒做）。`abort_conditions`：每條剛好一個鍵（failure_code 8 個 E_* 之一、battery_below_pct 0～100、elapsed_s、zone_entered）。
+- `timeout_s`：任務層級的逾時。**執行端的 cbba_node 會強制**：執行中（停在 gate、會合點的時間不算）超過就當成 BT 回報
+  `E_TIMEOUT` 失敗（TRANSIENT、釋放、current_task 換掉）。
+- `safety_notes`：只給人看；真正的限制要轉成區域（zone_policy_id）、standoff、能力、中止條件。
+- 閘道（有 `registry_dir` 時）檢查 `/validate` 的 format、vocabulary、params，加上平台支援與 wait_for；錯誤碼同第 2 節，
+  再加 `LOCATION_MISSING`、`OBJECT_MISSING`、`UNKNOWN_OBJECT`、`PARAM_UNKNOWN`（警告）、`PLATFORM_NOT_SUPPORTED`、`BAD_WAIT_FOR`、
+  `BAD_CONDITION`、`BAD_TIMEOUT`。有錯就不注入（`InjectTask` 回拒絕原因），警告放在回應的 `warnings`。前置條件鏈、續航、機隊層還沒做。
+
+**8 個可規劃動作的支援表**（`actions.yaml` 的 implementations；`not_started` 視為不支援，注入時 `PLATFORM_NOT_SUPPORTED`）：
+
+| 動作 | quadruped | uav |
+|---|---|---|
+| go_to | sim_verified | in_development |
+| patrol | not_started | not_started |
+| inspect | sim_verified | in_development |
+| track | not_started | not_started |
+| speak | not_started | （沒有） |
+| wait | not_started | in_development |
+| return_to_dock | not_started | in_development |
+| alert_operator | not_started（經閘道） | not_started（經閘道） |
+
+**核准**（任務欄位補齊 12）：`InjectTask.requires_approval`、事件類型的 `requires_approval`、風險 high 的動作（閘道參數
+`approval_policy`：none／risk〔預設〕／strict〔再加實作還沒 field_verified 的〕）→ 回 `waiting_approval`、`approval_id`，**不建 CBBA 任務**。
+值班用 `/<ns>/approve_task`（`ApproveTask.srv`：單號，或 incident_id 整個事件一起；`operator_name` 必填）核准或拒絕；
+狀態 PROPOSED → WAITING_APPROVAL → APPROVED → INJECTED／REJECTED（或等的時候過期 EXPIRED）發在 `/<ns>/approvals`
+（`ApprovalState.msg`），稽核紀錄附加在 `<state_dir>/gateway_<id>_approvals.log`（tab 分隔：時刻、單號、狀態、事件、角色、revision、
+操作者、任務、原因、備註）。等核准的時間從期限、release 扣掉；在等的單子閘道重開會遺失（規劃器重送即可，冪等）。
+
+### 4.3 回報與證據（任務欄位補齊第四批，2026-11-18）
+
+**回報要求**（角色 spec 的 `report_policy`，閘道注入前檢查）：
+
+```json
+"report_policy": {"stream": false, "snapshot_period_s": 5, "channels": ["gcs", "vms"], "required_findings": ["image"]}
+```
+
+- `stream`、`snapshot_period_s` 給 BT／adapter 控制相機（串流、定期截圖；BT 端還沒做）。`channels`：回寫頻道 gcs、vms、operator。
+  `required_findings`：`objects.yaml` 的 findings 詞彙（image、detection、reading…）。
+- 結果：BT 的 `task_result` 多了 `completed_steps`、`attachments`（URI，最多 8 個）、`final_position`。執行者的 cbba_node 把被接受的結果
+  （成功、失敗都算）經 **TASK_REPORT**（協定版本 5 的種類 14，閘道回 TASK_REPORT_ACK 15）送閘道；**閘道斷線時暫存在執行者**，
+  恢復後由舊到新補送（標 `buffered`）。閘道發 `/<ns>/task_reports`（`TaskReport.msg`：結果、findings、附件、最後位置、channels、
+  `missing_findings`），附加在 `<state_dir>/gateway_<id>_reports.log`。VMS／GCS 的回寫照 channels 從這個話題接。
+
+**證據**（`InjectTask` 的 evidence_uri、evidence_confidence、camera_ids、snapshot_uri、clip_uri、vlm_result_uri）：
+
+- URI 規則：`evidence://<incident_id>/<種類>/<檔名>`（控制中心的證據庫；種類 snapshot、clip、vlm、findings），也收 https、http、s3、file；
+  ≤ 512 B、不能有空白。保存期限、讀取權限、刪除由控制中心決定（不在 CBBA）。
+- 角色 TaskSpec 只帶 `"evidence": {"uri", "confidence"}`；整筆（攝影機、截圖、影片、VLM 結果）留在閘道：`/<ns>/incident_evidence`
+  （`IncidentEvidence.msg`，內容變了才發）、`<state_dir>/gateway_<id>_evidence.log`。GCS 從任務回查：`assignments` 的 incident_id → 證據。
+- CBBA 封包只帶 incident 的參照（TaskSpec 裡的 URI 字串），證據多大都不影響 mesh；證據伺服器離線時任務照常執行（CBBA 不去讀它）。
+
 ## 5. ExecuteStep（REG-2 的通用 Action，給伯宇的提案）
 
 使用者 11/15 定：**一個通用的 `ExecuteStep.action`**（狗和無人機共用；BT 的 `ExecuteSteps` 逐步呼叫 `/<ns>/execute_step`），

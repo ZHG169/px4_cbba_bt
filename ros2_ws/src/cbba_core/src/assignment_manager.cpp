@@ -152,6 +152,7 @@ void AssignmentManager::setBlocked(TaskId task, bool blocked, double now)
     info(taskName(task) + " 停在 wait_for（BLOCKED）：保持正式指派，停住的時間不計入執行逾時");
   } else if (!blocked && blocked_since_) {
     active_expected_ += now - *blocked_since_;
+    blocked_total_ += now - *blocked_since_;
     info(taskName(task) + " 解除等待（停了 " + std::to_string(static_cast<int>(now - *blocked_since_)) + " s）");
     blocked_since_.reset();
   }
@@ -162,6 +163,8 @@ void AssignmentManager::startActive(const HeldAssignment & a, double now)
 {
   active_ = a;
   active_since_ = now;
+  blocked_total_ = 0.0;
+  timeout_fired_ = false;
   const auto rev = comm_.agent().tasks().find(a.task);
   active_revision_ = rev != comm_.agent().tasks().end() ? rev->second.revision : 0;
   active_expected_ = now + config_.overrun_margin;
@@ -177,9 +180,36 @@ void AssignmentManager::startActive(const HeldAssignment & a, double now)
 // ===========================================================================
 // 每個 tick
 // ===========================================================================
+void AssignmentManager::setTaskTimeout(TaskId task, double timeout_s)
+{
+  if (task != timeout_task_ || timeout_s != timeout_s_) {
+    timeout_task_ = task;
+    timeout_s_ = timeout_s;
+    timeout_fired_ = false;
+  }
+}
+
+std::vector<TaskId> AssignmentManager::takeTimedOut()
+{
+  std::vector<TaskId> out;
+  out.swap(timed_out_);
+  return out;
+}
+
 void AssignmentManager::step(double now)
 {
   checkHeld(now);
+
+  // 任務層級的逾時（任務欄位補齊 10）：執行時間扣掉停住的
+  if (active_ && active_->task == timeout_task_ && timeout_s_ > 0.0 && !timeout_fired_) {
+    const double stopped = blocked_total_ + (blocked_since_ ? now - *blocked_since_ : 0.0);
+    if (now - active_since_ - stopped > timeout_s_) {
+      timeout_fired_ = true;
+      timed_out_.push_back(active_->task);
+      warn(name(active_->task, active_->version) + " 超過任務的 timeout_s " + std::to_string(static_cast<int>(timeout_s_)) +
+        " s（不含停住的 " + std::to_string(static_cast<int>(stopped)) + " s）：當成 E_TIMEOUT 失敗");
+    }
+  }
 
   // 執行中的任務改版（只改位置、時間、價值，指派保留；2026-11-13）：這個 revision 的 TaskSpec 收齊才重發 current_task
   //（同一個 task_id、新的 revision），收齊前 BT 照舊版繼續

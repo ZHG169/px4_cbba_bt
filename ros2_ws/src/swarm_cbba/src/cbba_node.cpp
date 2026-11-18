@@ -70,6 +70,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -89,17 +90,21 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int16.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
+#include <swarm_interfaces/msg/approval_state.hpp>
 #include <swarm_interfaces/msg/detection.hpp>
 #include <swarm_interfaces/msg/fallback_request.hpp>
+#include <swarm_interfaces/msg/incident_evidence.hpp>
 #include <swarm_interfaces/msg/incident_state.hpp>
 #include <swarm_interfaces/msg/incident_update.hpp>
 #include <swarm_interfaces/msg/robot_state.hpp>
+#include <swarm_interfaces/msg/task_report.hpp>
 #include <swarm_interfaces/msg/task.hpp>
 #include <swarm_interfaces/msg/task_assignments.hpp>
 #include <swarm_interfaces/msg/task_orphaned.hpp>
 #include <swarm_interfaces/msg/task_progress.hpp>
 #include <swarm_interfaces/msg/task_result.hpp>
 #include <swarm_interfaces/msg/teammates.hpp>
+#include <swarm_interfaces/srv/approve_task.hpp>
 #include <swarm_interfaces/srv/inject_task.hpp>
 
 #include "cbba_core/assignment_manager.hpp"
@@ -107,10 +112,12 @@
 #include "cbba_core/cbba_comm.hpp"
 #include "cbba_core/energy_model.hpp"
 #include "cbba_core/failure_codes.hpp"
+#include "cbba_core/approval.hpp"
 #include "cbba_core/gateway.hpp"
 #include "cbba_core/udp_link.hpp"
 #include "swarm_cbba/registry.hpp"
 #include "swarm_cbba/spec_compose.hpp"
+#include "swarm_cbba/spec_validator.hpp"
 #include "swarm_cbba/spec_gates.hpp"
 
 namespace cbba_core
@@ -125,6 +132,10 @@ using TaskOrphanedMsg = swarm_interfaces::msg::TaskOrphaned;
 using DetectionMsg = swarm_interfaces::msg::Detection;
 using AssignmentsMsg = swarm_interfaces::msg::TaskAssignments;
 using InjectTaskSrv = swarm_interfaces::srv::InjectTask;
+using ApproveTaskSrv = swarm_interfaces::srv::ApproveTask;
+using ApprovalStateMsg = swarm_interfaces::msg::ApprovalState;
+using TaskReportMsg = swarm_interfaces::msg::TaskReport;
+using IncidentEvidenceMsg = swarm_interfaces::msg::IncidentEvidence;
 using TaskProgressMsg = swarm_interfaces::msg::TaskProgress;
 using TeammatesMsg = swarm_interfaces::msg::Teammates;
 using TeammateMsg = swarm_interfaces::msg::Teammate;
@@ -449,6 +460,7 @@ public:
         }
       }
       zones = std::make_shared<const ZoneRegistry>(swarm_cbba::toZoneRegistry(site, registry ? &*registry : nullptr));
+      site_ = site;   // 閘道的 TaskSpec 檢查用（位置、設備實例）
       RCLCPP_INFO(get_logger(), "區域註冊表 %s：版本 %u、%zu 個區域、%zu 個政策；樓層 %u、高度上限 %.1f m",
         site_dir.c_str(), static_cast<unsigned>(zones->version), zones->zones.size(), zones->policies.size(),
         static_cast<unsigned>(s.floor), s.max_altitude);
@@ -628,6 +640,29 @@ public:
         RCLCPP_WARN(get_logger(), "閘道沒有註冊表（registry_dir）：注入的 event_type、task_type、role 照收，編號都是 0（UNKNOWN）");
       }
       loadGatewayState(wallNow());
+      // 核准（任務欄位補齊 12，2026-11-18）：none（都不用核准，測試用）／risk（規劃器要求、事件類型 requires_approval、
+      // 風險 high 的動作；預設）／strict（再加實作還沒 field_verified 的動作）。稽核紀錄一行一筆附加在 approvals_log
+      approval_policy_ = declare_parameter<std::string>("approval_policy", "risk");
+      if (approval_policy_ != "none" && approval_policy_ != "risk" && approval_policy_ != "strict") {
+        throw std::invalid_argument("approval_policy must be none, risk or strict");
+      }
+      approvals_log_ = declare_parameter<std::string>("approvals_log",
+          state_dir + "/gateway_" + std::to_string(agent_id) + "_approvals.log");
+      approvals_pub_ = create_publisher<ApprovalStateMsg>(topic("approvals"), rclcpp::QoS(50).reliable().transient_local());
+      // 結果與證據（任務欄位補齊 11、03，2026-11-18）：GCS／VMS 從話題拿，另外附加在 state_dir 的紀錄檔
+      reports_pub_ = create_publisher<TaskReportMsg>(topic("task_reports"), rclcpp::QoS(100).reliable().transient_local());
+      evidence_pub_ = create_publisher<IncidentEvidenceMsg>(topic("incident_evidence"),
+          rclcpp::QoS(100).reliable().transient_local());
+      reports_log_ = declare_parameter<std::string>("reports_log",
+          state_dir + "/gateway_" + std::to_string(agent_id) + "_reports.log");
+      evidence_log_ = declare_parameter<std::string>("evidence_log",
+          state_dir + "/gateway_" + std::to_string(agent_id) + "_evidence.log");
+      approve_srv_ = create_service<ApproveTaskSrv>(topic("approve_task"),
+          [this](const std::shared_ptr<ApproveTaskSrv::Request> req,
+          std::shared_ptr<ApproveTaskSrv::Response> res) {onApprove(*req, *res);});
+      if (!registry_) {
+        RCLCPP_WARN(get_logger(), "閘道沒有註冊表：TaskSpec 不檢查（動作、參數、位置），核准只看 requires_approval");
+      }
       incident_states_pub_ = create_publisher<IncidentStateMsg>(topic("incident_updates"), rclcpp::QoS(50).reliable());
       fallback_pub_ = create_publisher<FallbackRequestMsg>(topic("fallback_request"),
           rclcpp::QoS(20).reliable().transient_local());
@@ -883,11 +918,13 @@ private:
     // 其他（TRANSIENT／STOPPED）failure_exclude_sec 秒
     const double exclude = reason == TaskResultMsg::PERMANENT ? kInf :
       reason == TaskResultMsg::PREEMPTED ? preempt_exclude_sec_ : failure_exclude_sec_;
-    const ReportCheck check = assignments_->onResult(msg.task_id, active->version, msg.success, now, exclude);
+    const std::uint64_t held_version = active->version;   // onResult 之後 active 會清掉
+    const ReportCheck check = assignments_->onResult(msg.task_id, held_version, msg.success, now, exclude);
     if (check != ReportCheck::ACCEPTED) {
       RCLCPP_WARN(get_logger(), "任務 %s 的回報拒絕（%s），任務狀態不變", name.c_str(), toString(check));
       return;
     }
+    sendReport(msg, held_version, now);
     // 括號內照機器狗端放 detail（比 reason 名稱具體）；BT 沒給 detail 時用失敗碼，再沒有用 reason 名稱
     const char * why = !msg.detail.empty() ? msg.detail.c_str() :
       !msg.failure_code.empty() ? msg.failure_code.c_str() : reasonName(reason);
@@ -1078,6 +1115,11 @@ private:
     publishAssignments(now);
     dropOptionals(now);
     handleWatchdog(now);
+    handleTimeouts();
+    if (gateway_) {
+      publishApprovals(now);
+      handleReports(now);
+    }
     handleZoneWarnings();
     saveGatewayState();
     handleIncidents(now);
@@ -1630,17 +1672,73 @@ private:
       m.track_id = req.track_id;
       m.uncertainty_m = req.uncertainty_m;
       m.standoff_m = req.standoff_m;
+      m.evidence_uri = req.evidence_uri;
+      m.evidence_confidence = req.evidence_confidence;
       std::string why = resolveSemantics(m);
       if (why.empty()) {
+        why = checkEvidence(req);
+      }
+      if (why.empty()) {
         why = checkMeta(m, t.position);   // 先檢查，組 spec 的錯誤訊息才不會蓋掉欄位的錯
+      }
+      // TaskSpec 的檢查（任務欄位補齊 10）：有錯就不注入；警告回給規劃器
+      std::vector<std::string> approval_reasons;
+      if (why.empty() && registry_) {
+        const swarm_cbba::SpecValidation v = swarm_cbba::validateSpec(req.spec, *registry_, site_ ? &*site_ : nullptr,
+          req.platform, req.role_index, req.role_count);
+        why = v.summary();
+        for (const auto & w : v.warnings) {
+          res.warnings.push_back(w.code + "：" + w.message + (w.path.empty() ? "" : "（" + w.path + "）"));
+        }
+        if (approval_policy_ != "none") {
+          for (const auto & a : v.high_risk_actions) {
+            approval_reasons.push_back("高風險動作 " + a);
+          }
+          if (approval_policy_ == "strict") {
+            for (const auto & a : v.unverified_actions) {
+              approval_reasons.push_back("實作還沒 field_verified：" + a);
+            }
+          }
+        }
+        if (const swarm_cbba::EventType * e = m.event_type.empty() ? nullptr : registry_->eventType(m.event_type);
+          e != nullptr && e->requires_approval && approval_policy_ != "none")
+        {
+          approval_reasons.push_back("事件類型 " + e->name + " 要核准");
+        }
+      }
+      if (req.requires_approval && approval_policy_ != "none") {
+        approval_reasons.insert(approval_reasons.begin(), "規劃器要求核准");
       }
       if (why.empty()) {
         if (const auto spec = swarm_cbba::composeSpec(req.spec, m, t.position, req.floor, &why)) {
           in.spec = *spec;
         }
       }
+      const auto known = gateway_->injected().find({req.incident_id, req.role});
+      const bool already = known != gateway_->injected().end() && known->second.revision == req.revision;
+      if (why.empty()) {
+        publishEvidence(req, now);   // 等核准的也記：證據和要不要派是兩回事
+      }
       if (!why.empty()) {
         r.reason = why;
+      } else if (!approval_reasons.empty() && !already) {
+        // 核准前不建 CBBA 任務（任務欄位補齊 12）
+        const auto p = approvals_.propose(in, approval_reasons, now);
+        res.accepted = true;
+        res.duplicate = p.duplicate;
+        res.waiting_approval = true;
+        res.approval_id = p.id;
+        res.event_type_id = m.event_type_id;
+        res.task_type_id = m.task_type_id;
+        res.role_id = m.role_id;
+        std::string reasons;
+        for (const auto & s : approval_reasons) {
+          reasons += (reasons.empty() ? "" : "、") + s;
+        }
+        RCLCPP_WARN(get_logger(), "注入 %s/%s rev %u%s：等值班核准（核准單 %u%s；%s）", req.incident_id.c_str(),
+          req.role.c_str(), req.revision, semanticLabel(m).c_str(), p.id, p.duplicate ? "，重送" : "", reasons.c_str());
+        publishApprovals(now);
+        return;
       } else {
         r = gateway_->inject(in, now);
       }
@@ -1799,6 +1897,287 @@ private:
       schema_warned_.insert(id);
       RCLCPP_WARN(get_logger(), "任務 %s 的 TaskSpec schema_version %s 這版不認得（認得 %u.x）：BT 可能不能執行",
         taskName(id).c_str(), version.c_str(), static_cast<unsigned>(kRoleSpecSchemaMajor));
+    }
+  }
+
+  // ---------- 核准（任務欄位補齊 12，2026-11-18） ----------
+  void onApprove(const ApproveTaskSrv::Request & req, ApproveTaskSrv::Response & res)
+  {
+    const double now = wallNow();
+    std::string error;
+    const auto ids = approvals_.decide(req.approval_id, req.incident_id, req.approve, req.operator_name, req.note, now,
+        &error);
+    res.ok = !ids.empty();
+    res.reason = error;
+    for (const std::uint32_t id : ids) {
+      res.approval_ids.push_back(id);
+      TaskId task = 0;
+      if (req.approve) {
+        std::string why;
+        const auto in = approvals_.injectable(id, now, &why);
+        if (!in) {
+          approvals_.markFailed(id, ApprovalState::EXPIRED, why, now);
+        } else {
+          const InjectResult r = gateway_->inject(*in, now);
+          if (r.status == InjectStatus::REJECTED) {
+            approvals_.markFailed(id, ApprovalState::REJECTED, "核准後注入失敗：" + r.reason, now);
+          } else {
+            approvals_.markInjected(id, r, now);
+            task = r.task_id;
+          }
+        }
+      }
+      res.task_ids.push_back(task);
+      const ApprovalRecord * rec = approvals_.find(id);
+      RCLCPP_INFO(get_logger(), "核准單 %u（%s/%s rev %u）：%s by %s%s%s", id, rec->request.incident_id.c_str(),
+        rec->request.role.c_str(), rec->request.revision, toString(rec->state), req.operator_name.c_str(),
+        task != 0 ? (" → 任務 " + taskName(task)).c_str() : "", rec->note.empty() ? "" : ("（" + rec->note + "）").c_str());
+    }
+    if (!res.ok) {
+      RCLCPP_WARN(get_logger(), "approve_task：%s", error.c_str());
+    }
+    publishApprovals(now);
+  }
+
+  // 狀態變化：發 approvals、附加稽核紀錄（一行一筆，tab 分隔：時刻、單號、狀態、事件、角色、revision、操作者、任務、原因、備註）
+  void publishApprovals(double now)
+  {
+    if (!approvals_pub_) {
+      return;
+    }
+    approvals_.expire(now);
+    const auto changes = approvals_.takeChanges();
+    if (changes.empty()) {
+      return;
+    }
+    std::ofstream log;
+    if (!approvals_log_.empty()) {
+      std::error_code ec;
+      std::filesystem::create_directories(std::filesystem::path(approvals_log_).parent_path(), ec);
+      log.open(approvals_log_, std::ios::app);
+    }
+    for (const auto & [id, state] : changes) {
+      const ApprovalRecord * r = approvals_.find(id);
+      ApprovalStateMsg m;
+      m.approval_id = id;
+      m.state = static_cast<std::uint8_t>(state);
+      m.incident_id = r->request.incident_id;
+      m.role = r->request.role;
+      m.revision = r->request.revision;
+      m.reasons = r->reasons;
+      m.operator_name = r->operator_name;
+      m.note = r->note;
+      m.task_id = r->task_id;
+      m.group_id = r->group_id;
+      m.stamp = toRosTime(now);
+      approvals_pub_->publish(m);
+      if (state == ApprovalState::EXPIRED) {
+        RCLCPP_WARN(get_logger(), "核准單 %u（%s）過期：%s", id, r->request.incident_id.c_str(), r->note.c_str());
+      }
+      if (log) {
+        std::string reasons;
+        for (const auto & s : r->reasons) {
+          reasons += (reasons.empty() ? "" : "；") + s;
+        }
+        char stamp[32];
+        std::snprintf(stamp, sizeof(stamp), "%.3f", now);
+        log << stamp << "\t" << id << "\t" << toString(state) << "\t" << r->request.incident_id << "\t" <<
+          r->request.role << "\t" << r->request.revision << "\t" << r->operator_name << "\t" <<
+          (r->task_id != 0 ? taskName(r->task_id) : std::string("-")) << "\t" << reasons << "\t" << r->note << "\n";
+      }
+    }
+    if (!approvals_log_.empty() && !log) {
+      RCLCPP_WARN(get_logger(), "核准紀錄寫不進 %s", approvals_log_.c_str());
+    }
+  }
+
+  // ---------- 回報與證據（任務欄位補齊 11、03，2026-11-18） ----------
+  // UTF-8 安全的截斷（不切在多位元組字元中間）
+  static std::string clip(const std::string & s, std::size_t max)
+  {
+    if (s.size() <= max) {
+      return s;
+    }
+    std::size_t n = max;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) {
+      --n;
+    }
+    return s.substr(0, n);
+  }
+
+  // 執行者：BT 的結果（被接受的）送閘道。附件超過 8 個、太長的 URI 丟掉並警告（不影響任務的狀態）
+  void sendReport(const TaskResultMsg & msg, std::uint64_t version, double now)
+  {
+    TaskReport r;
+    r.task = msg.task_id;
+    const auto it = comm_->agent().tasks().find(msg.task_id);
+    r.revision = it != comm_->agent().tasks().end() ? it->second.revision : 0;
+    r.assign_version = version;
+    r.t = now;
+    r.success = msg.success;
+    r.completed_steps = msg.completed_steps;
+    r.position_valid = msg.final_position_valid;
+    r.final_position = {msg.final_position.x, msg.final_position.y, msg.final_position.z};
+    r.failure_code = clip(msg.failure_code, wire::kMaxReportCode);
+    r.detail = clip(msg.detail, wire::kMaxReportDetail);
+    r.findings_uri = msg.findings_uri.size() <= wire::kMaxReportUri ? msg.findings_uri : std::string();
+    std::size_t dropped = msg.findings_uri.size() > wire::kMaxReportUri ? 1 : 0;
+    for (const std::string & a : msg.attachments) {
+      TaskReport trial = r;
+      trial.attachments.push_back(a);
+      if (a.size() <= wire::kMaxReportUri && r.attachments.size() < wire::kMaxReportAttachments && validTaskReport(trial)) {
+        r.attachments.push_back(a);
+      } else {
+        ++dropped;
+      }
+    }
+    if (dropped > 0) {
+      RCLCPP_WARN(get_logger(), "任務 %s 的結果：%zu 個 URI 太長或太多（附件最多 8 個、每個 ≤ 512 B、整筆 ≤ 1200 B），沒送閘道",
+        taskName(msg.task_id).c_str(), dropped);
+    }
+    if (!comm_->addReport(r, now)) {
+      RCLCPP_WARN(get_logger(), "任務 %s 的結果不合法，沒送閘道", taskName(msg.task_id).c_str());
+    } else if (!gateway_ && !comm_->gatewayOnline(now)) {
+      RCLCPP_WARN(get_logger(), "任務 %s 的結果：閘道斷線，先暫存（%zu 筆），恢復後送出", taskName(msg.task_id).c_str(),
+        comm_->reportsPending());
+    }
+  }
+
+  // 閘道：收到的結果 → task_reports、紀錄檔（一行一筆，tab 分隔）
+  void handleReports(double now)
+  {
+    if (!reports_pub_) {
+      return;
+    }
+    const auto reports = comm_->takeReports();
+    if (reports.empty()) {
+      return;
+    }
+    std::ofstream log;
+    if (!reports_log_.empty()) {
+      std::error_code ec;
+      std::filesystem::create_directories(std::filesystem::path(reports_log_).parent_path(), ec);
+      log.open(reports_log_, std::ios::app);
+    }
+    for (const ReceivedReport & rr : reports) {
+      const TaskReport & r = rr.report;
+      TaskReportMsg m;
+      m.task_id = r.task;
+      m.revision = r.revision;
+      m.assign_version = r.assign_version;
+      m.agent_id = rr.agent;
+      if (const auto * known = gateway_->findTask(r.task)) {
+        m.incident_id = known->meta.incident_id;
+      }
+      m.success = r.success;
+      m.failure_code = r.failure_code;
+      m.detail = r.detail;
+      m.completed_steps = r.completed_steps;
+      m.findings_uri = r.findings_uri;
+      m.attachments = r.attachments;
+      m.final_position_valid = r.position_valid;
+      m.final_position.x = r.final_position.x;
+      m.final_position.y = r.final_position.y;
+      m.final_position.z = r.final_position.z;
+      m.buffered = rr.buffered;
+      const swarm_cbba::ReportPolicy policy = swarm_cbba::specReportPolicy(comm_->taskSpec(r.task).value_or(std::string()));
+      m.channels = policy.channels;
+      m.missing_findings = r.success && !policy.required_findings.empty() && r.findings_uri.empty() &&
+        r.attachments.empty();
+      m.reported = toRosTime(r.t);
+      m.received = toRosTime(now);
+      reports_pub_->publish(m);
+      RCLCPP_INFO(get_logger(), "結果：%s 由 %u %s%s，做完 %u 步、附件 %zu 個%s%s", taskName(r.task).c_str(), rr.agent,
+        r.success ? "成功" : ("失敗 " + r.failure_code).c_str(), rr.buffered ? "（斷線時暫存）" : "", r.completed_steps,
+        r.attachments.size(), m.missing_findings ? "；警告：report_policy 要 findings 卻沒有" : "",
+        m.channels.empty() ? "" : "；回寫頻道已列在 channels");
+      if (log) {
+        std::string attachments;
+        for (const auto & a : r.attachments) {
+          attachments += (attachments.empty() ? "" : " ") + a;
+        }
+        char stamp[32];
+        std::snprintf(stamp, sizeof(stamp), "%.3f", now);
+        log << stamp << "\t" << taskName(r.task) << "\t" << m.incident_id << "\t" << rr.agent << "\t" <<
+          (r.success ? "SUCCESS" : "FAILED") << "\t" << r.failure_code << "\t" << r.completed_steps << "\t" <<
+          r.findings_uri << "\t" << attachments << "\t" << r.detail << "\n";
+      }
+    }
+  }
+
+  // 證據（任務欄位補齊 03）：URI 的格式、camera_ids 的數量與長度
+  static std::string checkEvidence(const InjectTaskSrv::Request & req)
+  {
+    for (const std::string * uri : {&req.snapshot_uri, &req.clip_uri, &req.vlm_result_uri}) {
+      if (!validEvidenceUri(*uri)) {
+        return "證據的 URI「" + clip(*uri, 80) + "」要是 evidence://、https://、http://、s3://、file:// 開頭、≤ 512 B、沒有空白";
+      }
+    }
+    if (req.camera_ids.size() > 16) {
+      return "camera_ids 最多 16 個";
+    }
+    for (const std::string & c : req.camera_ids) {
+      if (c.empty() || c.size() > 64) {
+        return "camera_ids 每個要是 1～64 B";
+      }
+    }
+    return {};
+  }
+
+  // 閘道：事件的證據紀錄（內容變了才發、才寫）。不複製影像，只記參照
+  void publishEvidence(const InjectTaskSrv::Request & req, double now)
+  {
+    if (!evidence_pub_ || (req.evidence_uri.empty() && req.camera_ids.empty() && req.snapshot_uri.empty() &&
+      req.clip_uri.empty() && req.vlm_result_uri.empty()))
+    {
+      return;
+    }
+    std::string cameras;
+    for (const auto & c : req.camera_ids) {
+      cameras += (cameras.empty() ? "" : ",") + c;
+    }
+    char confidence[16];
+    std::snprintf(confidence, sizeof(confidence), "%.3f", req.evidence_confidence);
+    const std::string line = req.incident_id + "\t" + cameras + "\t" + confidence + "\t" + req.evidence_uri + "\t" +
+      req.snapshot_uri + "\t" + req.clip_uri + "\t" + req.vlm_result_uri;
+    auto & last = evidence_last_[req.incident_id];
+    if (last == line) {
+      return;
+    }
+    last = line;
+    IncidentEvidenceMsg m;
+    m.incident_id = req.incident_id;
+    m.camera_ids = req.camera_ids;
+    m.confidence = req.evidence_confidence;
+    m.evidence_uri = req.evidence_uri;
+    m.snapshot_uri = req.snapshot_uri;
+    m.clip_uri = req.clip_uri;
+    m.vlm_result_uri = req.vlm_result_uri;
+    m.stamp = toRosTime(now);
+    evidence_pub_->publish(m);
+    RCLCPP_INFO(get_logger(), "證據：事件 %s（信心 %s，攝影機 %s）%s", req.incident_id.c_str(), confidence,
+      cameras.empty() ? "無" : cameras.c_str(), req.evidence_uri.c_str());
+    if (!evidence_log_.empty()) {
+      std::error_code ec;
+      std::filesystem::create_directories(std::filesystem::path(evidence_log_).parent_path(), ec);
+      std::ofstream log(evidence_log_, std::ios::app);
+      char stamp[32];
+      std::snprintf(stamp, sizeof(stamp), "%.3f", now);
+      log << stamp << "\t" << line << "\n";
+    }
+  }
+
+  // 任務層級的逾時（任務欄位補齊 10）：當成 BT 回報 E_TIMEOUT 的失敗（釋放、TRANSIENT 排除），current_task 會換掉
+  void handleTimeouts()
+  {
+    for (const TaskId t : assignments_->takeTimedOut()) {
+      TaskResultMsg msg;
+      msg.task_id = t;
+      msg.success = false;
+      msg.detail = "TASK_TIMEOUT";
+      msg.reason = TaskResultMsg::TRANSIENT;
+      msg.failure_code = "E_TIMEOUT";
+      onTaskResult(msg);
     }
   }
 
@@ -2032,6 +2411,7 @@ private:
         RCLCPP_INFO(get_logger(), "指派給 BT：%s (%.1f, %.1f, %.1f)", taskName(t.id).c_str(),
           t.position.x, t.position.y, t.position.z);
         warnSpecSchema(t.id, msg.spec);
+        assignments_->setTaskTimeout(t.id, swarm_cbba::specTimeout(msg.spec).value_or(0.0));
       } else {
         msg.status = TaskMsg::CANCELLED;   // task_id = 0：沒有任務
         msg.status_stamp = toRosTime(now);
@@ -2255,7 +2635,18 @@ private:
   rclcpp::Publisher<TaskMsg>::SharedPtr spec_missing_pub_;
   // 閘道（participate: never）
   std::unique_ptr<Gateway> gateway_;
-  std::optional<swarm_cbba::Registry> registry_;   // 閘道：語意名稱 → 編號（任務欄位補齊 02）
+  std::optional<swarm_cbba::Registry> registry_;   // 閘道：語意名稱 → 編號（任務欄位補齊 02）、TaskSpec 檢查（10）
+  std::optional<swarm_cbba::Site> site_;           // 閘道：TaskSpec 的位置、設備實例（site_dir）
+  ApprovalQueue approvals_;                        // 閘道：核准（12）
+  std::string approval_policy_{"none"};
+  std::string approvals_log_;
+  rclcpp::Publisher<ApprovalStateMsg>::SharedPtr approvals_pub_;
+  rclcpp::Service<ApproveTaskSrv>::SharedPtr approve_srv_;
+  rclcpp::Publisher<TaskReportMsg>::SharedPtr reports_pub_;           // 閘道：結果（11）
+  rclcpp::Publisher<IncidentEvidenceMsg>::SharedPtr evidence_pub_;    // 閘道：證據（03）
+  std::string reports_log_;
+  std::string evidence_log_;
+  std::map<std::string, std::string> evidence_last_;                  // incident → 上次記的內容
   std::string gateway_state_file_;                 // 對照表存檔（任務欄位補齊 01）
   std::string gateway_state_saved_;                // 上次寫進檔案的內容（變了才寫）
   std::set<TaskId> schema_warned_;                 // 機器人：TaskSpec 的主版本不認得、已經警告過的任務

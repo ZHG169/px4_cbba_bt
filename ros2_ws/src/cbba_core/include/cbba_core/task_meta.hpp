@@ -10,6 +10,8 @@
 //   description     人看的說明（GCS、log）
 //   observe_pose    這個角色真正要到的位置（＝ TASK_ANNOUNCE 的 x、y、z，出價、TDR 都算到這裡）
 //   target、target_kind（point／area／moving）、track_id、uncertainty_m、standoff_m  事件（目標）本身的位置與形狀
+//   evidence        {"uri", "confidence"}（任務欄位補齊 03，2026-11-18）：只放證據的參照，影像、VLM 結果本身留在控制中心
+//                  （閘道另外記整筆事件證據，發 incident_evidence）；CBBA 封包不帶
 //
 // 規劃器負責把觀察點放在離目標 standoff_m 以外（安全距離）；閘道只檢查距離夠不夠，不幫忙推。
 // 這裡不依賴 JSON 函式庫：metaJsonMembers() 只產生最上層的成員字串，由節點層插進規劃器給的 spec。
@@ -66,11 +68,18 @@ struct TaskMeta
   std::string track_id;          // MOVING 必填
   double uncertainty_m{0.0};     // 目標位置的不確定半徑（AREA：區域半徑）
   double standoff_m{0.0};        // 觀察點至少離目標多遠；0 = 不檢查
+  std::string evidence_uri;      // 證據的參照（evidence:// 、https:// …）；空 = 沒有
+  double evidence_confidence{0.0};   // 0～1
 };
 
 constexpr std::size_t kMaxDescription = 200;   // B
 constexpr std::size_t kMaxTrackId = 64;
 constexpr double kStandoffTolerance = 0.05;    // m：規劃器算出的觀察點剛好在 standoff_m 上時的數值誤差
+constexpr std::size_t kMaxUri = 512;
+
+// 證據的 URI（任務欄位補齊 03）：scheme 是 evidence（控制中心的證據庫，evidence://<incident_id>/<種類>/<檔名>）、
+// https、http、s3、file 之一，≤ kMaxUri B，不能有空白。空字串 = 沒有（合法）
+bool validEvidenceUri(const std::string & uri);
 
 // 欄位檢查（閘道注入前）；observe 是 TASK_ANNOUNCE 的位置（觀察點）。空字串 = 合法
 std::string checkMeta(const TaskMeta & meta, const Vec3 & observe);

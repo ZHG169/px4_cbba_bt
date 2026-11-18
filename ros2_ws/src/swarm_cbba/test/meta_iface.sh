@@ -33,7 +33,7 @@ start_dog() { ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/v60 -r __node:=
   --params-file $CFG/cbba_v60.yaml "${COMMON[@]}" -p participate:=always \
   -p initial_position:="[0.0, 0.0, 0.0]" -p battery:=100.0 > $L/$1 2>&1 & }
 
-STEPS='{"steps": [{"action": "go_to"}, {"action": "inspect", "object": "person:trk_88"}]}'
+STEPS='{"steps": [{"action": "go_to", "location": {"x": 10.0, "y": 0.0}}, {"action": "inspect", "object": "person:trk_88"}]}'
 # inject 名稱 事件 revision x 其他欄位（YAML，可空）spec → 回應存在 $L/inject_名稱.log
 inject() {
   ros2 service call /gcs/inject_task swarm_interfaces/srv/InjectTask \
@@ -103,7 +103,7 @@ inject m4 meta-4 1 13.0 "" "$STEPS"   # 觀察點 13、目標 15：2 m < 3 m
   bad "M4 standoff（看 $L/inject_m4.log）"
 inject m4b meta-4b 1 10.0 ", track_id: ''" "$STEPS"
 [ "$(field m4b accepted)" = "False" ] && ok "M4 moving 沒有 track_id 拒絕" || bad "M4 track_id（看 $L/inject_m4b.log）"
-inject m5 meta-5 1 10.0 "" '{"incident_id": "other", "steps": []}'
+inject m5 meta-5 1 10.0 "" '{"incident_id": "other", "steps": [{"action": "inspect"}]}'
 [ "$(field m5 accepted)" = "False" ] && grep -q "incident_id" $L/inject_m5.log && ok "M5 spec 自己帶閘道的鍵拒絕" ||
   bad "M5（看 $L/inject_m5.log）"
 

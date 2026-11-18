@@ -20,3 +20,8 @@ uint8 reason
 string failure_code
 string failed_capability        # E_HW 時故障的能力標籤（例如 thermal_camera）：這台之後不再對需要它的任務出價，到 capability_restored（2026-11-18）或 cbba_node 重開
 string findings_uri             # 執行結果（照片等）的位置；M0 只記 log，之後轉給閘道
+# 任務欄位補齊 11「回報」（2026-11-18）：cbba_node 把這些（連同 failure_code、findings_uri）送閘道（TASK_REPORT，閘道斷線時暫存）
+uint16 completed_steps          # 做完 spec 的前幾步
+string[] attachments            # 附件（截圖、影像片段）的 URI，最多 8 個、每個 ≤ 512 B；影像本身不上 mesh
+bool final_position_valid
+geometry_msgs/Point final_position   # 結束時的位置（map ENU）

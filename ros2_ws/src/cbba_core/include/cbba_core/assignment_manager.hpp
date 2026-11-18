@@ -142,6 +142,11 @@ public:
   // 停住的時間不計入執行逾時（overrun：預估的完成時刻往後延）
   void setBlocked(TaskId task, bool blocked, double now);
   bool blocked() const {return blocked_since_.has_value();}
+  // 任務層級的逾時（任務欄位補齊 10，2026-11-18；TaskSpec 的 timeout_s，節點層解析後給）：執行中超過這麼久
+  //（停在 gate、會合點等的時間不算）→ takeTimedOut 回傳一次，節點當成 E_TIMEOUT 的失敗處理（釋放、TRANSIENT 排除）。
+  // 0 = 不限。換任務時清掉
+  void setTaskTimeout(TaskId task, double timeout_s);
+  std::vector<TaskId> takeTimedOut();
   // 每個 tick（comm.poll 之後）：檢查持有的指派、逾時，決定要送的請求與 assigned_task
   void step(double now);
   // BT 的回覆：版本不是目前在等的那一個就忽略（延遲的接受不能啟動任務）
@@ -209,6 +214,11 @@ private:
   bool overrun_{false};
   std::optional<double> blocked_since_;   // 執行中的任務停在 gate 的開始時刻
   TaskId blocked_task_{0};
+  double blocked_total_{0.0};             // 這次執行停住的累計（任務層級逾時不算）
+  TaskId timeout_task_{0};
+  double timeout_s_{0.0};
+  bool timeout_fired_{false};
+  std::vector<TaskId> timed_out_;
   double last_mismatch_warn_{-1e9};
 
   TaskId candidate_{0};

@@ -1,0 +1,13 @@
+# 值班核准／拒絕（閘道的 /<ns>/approve_task；任務欄位補齊 12「人機與安全」，2026-11-18）
+# approval_id ≠ 0：只決定那一張；= 0：incident_id 裡所有在等核准的（同一個事件的角色一起核准）。
+# 核准的照 InjectTask 注入（時間扣掉等待的；等的時候已過 expires 或硬期限 → EXPIRED、不注入）。紀錄寫進稽核檔
+uint32 approval_id
+string incident_id
+bool approve
+string operator_name               # 必填：核准紀錄要知道是誰
+string note
+---
+bool ok
+string reason                      # 沒有可決定的（單號不在、已經決定過、沒給 operator_name）
+uint32[] approval_ids              # 這次決定的
+uint64[] task_ids                  # 核准後注入的任務（和 approval_ids 對應；沒注入成功是 0）

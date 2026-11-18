@@ -79,6 +79,8 @@
 #include "cbba_core/wire_cbba_state.hpp"
 #include "cbba_core/wire_completion.hpp"
 #include "cbba_core/wire_detection.hpp"
+#include "cbba_core/task_report.hpp"
+#include "cbba_core/wire_task_report.hpp"
 #include "cbba_core/wire_header.hpp"
 #include "cbba_core/wire_incident_update.hpp"
 #include "cbba_core/wire_sync.hpp"
@@ -141,6 +143,7 @@ struct CommConfig
   double retarget_threshold{3.0};
   std::vector<AgentId> gateways;  // 閘道的機號（多跳時判斷在線用）；直接鄰居的閘道不用列也認得
   DetectionOutboxConfig detection{};
+  ReportOutboxConfig report{};    // 任務結果送閘道（任務欄位補齊 11，2026-11-18）：同偵測的 outbox
   // 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md）：狀態變化時馬上送一份、之後再送 progress_repeat 兩份
   //（錯開，補掉包）；執行中每 progress_period 重送最新的快照
   double progress_period{2.0};
@@ -326,6 +329,14 @@ struct CommStats
   int detections_acked{0};      // 閘道確認了
   int detections_received{0};   // 閘道：收到的新偵測（不含重複；含閘道本機的）
   int detection_duplicates{0};  // 閘道：重複收到（機器人沒收到確認而重送）
+  // 任務結果（任務欄位補齊 11，2026-11-18）
+  int reports_added{0};         // 機器人：本機的結果
+  int reports_evicted{0};       // 佇列滿了丟掉的
+  int reports_sent{0};
+  int report_retries{0};
+  int reports_acked{0};
+  int reports_received{0};      // 閘道：新收到的
+  int report_duplicates{0};
   // 角色進度（CB-4，2026-11-16）
   int progress_reports{0};      // 本機 BT 的回報（有變化的）
   int progress_sent{0};         // 送出的 TASK_PROGRESS（含錯開的重送、定期快照）
@@ -480,6 +491,13 @@ public:
   std::size_t detectionsBuffered() const {return outbox_det_.bufferedCount();}
   // 閘道：收到的新偵測（取走）
   std::vector<ReceivedDetection> takeDetections();
+
+  // 任務的執行結果（任務欄位補齊 11，2026-11-18）：執行者放進佇列，閘道在線時送 TASK_REPORT、等確認（斷線時暫存）；
+  // 閘道自己的直接放進 takeReports()。長度不合法（validTaskReport）回傳 false
+  bool addReport(const TaskReport & r, double now);
+  std::size_t reportsPending() const {return outbox_rep_.size();}
+  std::size_t reportsBuffered() const {return outbox_rep_.bufferedCount();}
+  std::vector<ReceivedReport> takeReports();   // 閘道：收到的結果（取走）
 
   // ---------- 角色進度（CB-4 第一批，2026-11-16，doc/cb4_design.md） ----------
   // 本機 BT 回報（task_progress 話題）：要是自己目前保留或執行中的正式指派（否則 STALE）。reached 是這次新達成的里程碑
@@ -807,6 +825,16 @@ private:
   std::map<std::pair<AgentId, std::uint64_t>, std::vector<std::uint32_t>> acks_due_;   // 閘道：(機器人, session) → 要確認的
   double last_det_ack_{-1e9};   // 上次收到閘道的確認
   std::uint32_t local_det_seq_{0};   // 閘道本機的偵測流水號
+
+  // 任務結果（2026-11-18）
+  void sendReports(double now);
+  void onTaskReport(const Bytes & bytes, double now);
+  void onTaskReportAck(const Bytes & bytes, double now);
+  ReportOutbox outbox_rep_;
+  DetectionInbox inbox_rep_;
+  std::vector<ReceivedReport> received_rep_;
+  std::map<std::pair<AgentId, std::uint64_t>, std::vector<std::uint32_t>> rep_acks_due_;
+  std::uint32_t local_rep_seq_{0};
 };
 
 }  // namespace cbba_core

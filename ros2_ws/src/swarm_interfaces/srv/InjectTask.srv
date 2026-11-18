@@ -67,6 +67,17 @@ float32 standoff_m                 # 觀察點（position）至少離目標多�
 # no_entry。閘道沒有區域註冊表、或沒有這個政策 → 拒絕。指定了 platform 時，觀察點在那個平台不能進的區域也拒絕
 uint16 zone_policy_id
 # fallback_template 單獨任務也可以給（2026-11-18）：P0 沒人得標 p0_unassigned_timeout_s（10 s）時閘道發 FallbackRequest
+# 任務欄位補齊第三批（2026-11-18，12 人機與安全）：要值班核准才注入。閘道另外依 approval_policy 決定（事件類型
+# requires_approval、風險 high 的動作）；要核准的先回 waiting_approval，核准（approve_task）後才建 CBBA 任務
+bool requires_approval
+# 任務欄位補齊 03（2026-11-18）：事件的證據（只放參照）。evidence_uri、evidence_confidence 寫進 TaskSpec 的 evidence；
+# 整筆（含 camera_ids、截圖、影片、VLM 結果）留在閘道，發 incident_evidence
+string evidence_uri
+float32 evidence_confidence        # 0～1
+string[] camera_ids
+string snapshot_uri
+string clip_uri
+string vlm_result_uri
 ---
 bool accepted                      # 建立了、改版了，或同一個鍵重送（duplicate）
 bool duplicate
@@ -77,3 +88,6 @@ uint16 revision                    # 這個任務目前的 revision
 uint16 event_type_id               # 註冊表的編號；0 = 不知道（沒有註冊表、沒指定）
 uint16 task_type_id
 uint16 role_id
+bool waiting_approval              # 要核准：還沒建 CBBA 任務（task_id = 0），等 approve_task；看 approvals 話題
+uint32 approval_id                 # 核准單號（waiting_approval 時）
+string[] warnings                  # TaskSpec 檢查的警告（不認得的參數等；不影響注入）

@@ -476,6 +476,19 @@ swarm_interfaces 2.4.0。協定封包不變（版本 4）。測試：`test_task_
 （task_orphaned P0_UNASSIGNED、FallbackRequest 加 `task_id`）；swarm_interfaces 2.5.0。測試：`test_zones`、`test_gateway`（ZoneGateway、
 Watchdog）、`test_registry` SiteZonesForCbba、`swarm_cbba/test/zone_iface.sh`（Z1～Z6）。
 
+**第三批（11/18 測過、commit，細節見 `planner_task_definition_plan.md`「第三批的實作」、`registry/api.md` 4.2）**：閘道注入前的
+TaskSpec 檢查（`swarm_cbba/spec_validator.*`：動作、參數、location／object、步數、平台支援、wait_for、success_criteria／abort_conditions、
+timeout_s；要 `registry_dir`）；執行端 cbba_node 強制任務的 `timeout_s`（當成 E_TIMEOUT）；核准（`cbba_core/approval.*`、`approve_task`、
+`approvals`、稽核紀錄 `gateway_<id>_approvals.log`、參數 `approval_policy` none／risk／strict）；swarm_interfaces 2.6.0。
+測試：`test_approval`、`test_spec_validator`、`swarm_cbba/test/exec_iface.sh`（E1～E6）。
+
+**第四批（11/18 測過、commit，細節見 `planner_task_definition_plan.md`「第四批的實作」、`registry/api.md` 4.3）**：回報 —
+TaskSpec `report_policy` 檢查；TaskResult 加 completed_steps、attachments、final_position；新封包 TASK_REPORT（14）／TASK_REPORT_ACK（15）
+＋結果 outbox（`cbba_core/task_report.*`，閘道斷線時暫存、恢復後補送）；閘道發 `task_reports`、紀錄檔 `gateway_<id>_reports.log`。
+證據 — `InjectTask` 的 evidence_uri 等；TaskSpec 只帶 `evidence` 的 uri、confidence；閘道發 `incident_evidence`、紀錄檔。
+swarm_interfaces 2.7.0（TaskResult 改了：狗的 BT 要重編）。測試：`test_wire_task_report`、`test_task_report`、`test_task_meta` Evidence、
+`test_spec_validator` ReportPolicy、`swarm_cbba/test/report_iface.sh`（R1～R5）。
+
 ## 機間 UDP：現在有兩條（2026-10-13 整理）
 
 DDS 不走 mesh（`.env` 的 `DDS_OVER_MESH=0`）：ROS 話題（robot_state、current_task、PX4…）只在機內。機間只有這兩條 UDP：
@@ -598,7 +611,9 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 **使用者 11/16 的範圍**：完成 CB-4＋TDR → 用「指令注入＋假 BT／假 Planner」測試，先測到這裡；真的 BT、人機介面（Node-RED）之後再對接。
 
 1. ~~itest `group`~~（11/17：G0～G15＋G14D、G15R 共 18 項全過，`20261117_015231_group`；影片 `group.mp4`、`group_0.5x.mp4`）
-2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 測過、commit `1889b71`（11/18）；**第二批 05、08、07 11/18 commit**（協定版本 5、TASK_ANNOUNCE 128 B、swarm_interfaces 2.5.0；`zone_iface.sh`）；之後第三批 10 執行規格 → 12 人機與安全
+2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 測過、commit `1889b71`（11/18）；**第二批 05、08、07 11/18 commit**（協定版本 5、TASK_ANNOUNCE 128 B、swarm_interfaces 2.5.0；`zone_iface.sh`）；**第三批 10、12 11/18 測過、commit**（TaskSpec 檢查、任務 timeout_s、核准；swarm_interfaces 2.6.0；`exec_iface.sh`）；
+   **第四批 11、03 11/18 測過、commit**（TASK_REPORT 14／15＋結果 outbox、report_policy、證據紀錄；swarm_interfaces 2.7.0；
+   `report_iface.sh`；TaskResult 改了，狗的 BT 要重編）；之後第五批 13 簽章，再整理 06 時間、09 協同出價
 3. ~~**TDR 參數實驗**~~（`docs/tdr_experiment_plan.md`，11/16 照使用者的〈TDR 參數設定與測試計畫〉PDF 重新規劃）：階段 A、B 的程式寫好
    （`mission_sim` 的量測、`tdr_experiment`〔S1～S6〕、`cbba_sim tdr`、`scripts/tdr_report.py`、`test_scoring` +3、`test_tdr_experiment` 9 項），
    ✅ 11/16 階段 A～D 跑完：**`energy_weight` 50 → 25**（程式預設已改），`half_life_by_priority` 維持 60/120/300/600 s；

@@ -32,6 +32,9 @@ add_library(${PROJECT_NAME}_core
   src/gateway.cpp
   src/task_meta.cpp
   src/zones.cpp
+  src/approval.cpp
+  src/task_report.cpp
+  src/wire_task_report.cpp
   src/udp_link.cpp
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
@@ -73,6 +76,9 @@ set(CBBA_CORE_TESTS
   test_gateway
   test_task_meta
   test_zones
+  test_approval
+  test_wire_task_report
+  test_task_report
   test_detection
   test_mission_sim
   test_tdr_experiment
