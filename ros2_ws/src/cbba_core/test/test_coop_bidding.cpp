@@ -258,3 +258,30 @@ TEST(CoopBidding, SyncRoleSeesTeammateArrival)
   EXPECT_EQ(t.coop.ready, 0.0);
   EXPECT_LT(near.agent().score(mine), 100.0 * std::exp2(-15.0 / 60.0));
 }
+
+TEST(CoopBidding, FirstBidAlreadyWaits)
+{
+  // 2026-11-20（itest G17）：新任務第一次出價前就算協同等待。reevaluate 設成很久一次，等待只能來自 addTask：
+  // 原本第一次出價照「到了就能開始」（≈ 97），近的空閒狗得標、assign_hold 0.4 s 後鎖定，之後的預估來不及改
+  CommConfig cc = coopConfig();
+  cc.reevaluate_period = 1000.0;
+  Swarm swarm(0.0, 1, cc);
+  swarm.addGateway(kGateway);
+  swarm.add(1, {0, 0, 5});
+  swarm.add(50, {90, 0, 0}, 100.0, AgentType::UGV);
+  swarm.run(2.0);
+  Gateway gw(swarm.node(kGateway));
+  const InjectResult a = gw.inject(roleRequest("aerial_overwatch", 0, 2, 1, {100.0, 0.0, 5.0}, 30.0), swarm.now());
+  ASSERT_EQ(a.status, InjectStatus::CREATED) << a.reason;
+  swarm.run(3.0);
+  ASSERT_EQ(swarm.node(50).agent().winner(a.task_id), 1);
+  InjectRequest ground = roleRequest("front", 1, 2, 2, {100.0, 0.0, 0.0}, 10.0);
+  ground.task.ext.precedence = 0b01;
+  const InjectResult b = gw.inject(ground, swarm.now());
+  ASSERT_EQ(b.status, InjectStatus::CREATED) << b.reason;
+  swarm.run(1.0);
+  CbbaComm & d = swarm.node(50);
+  ASSERT_EQ(d.agent().winner(b.task_id), 50);
+  EXPECT_NEAR(d.agent().tasks().at(b.task_id).coop.ready - swarm.now(), 55.0, 3.5);
+  EXPECT_LT(d.agent().score(b.task_id), 60.0);
+}

@@ -17,7 +17,7 @@
 //                  ["inspect=E_HW:thermal_camera@0.3", "go_to=E_UNREACHABLE"]
 //   slowdown       實際速度的倍數（< 1 測逾時；可以執行中改）
 //   feedback_hz    回饋頻率（預設 5）
-//   allow_not_started  actions.yaml 裡實作是 not_started 的也模擬（預設 true，附警告；閘道注入時會擋）
+//   supported_actions  宣告能做的動作（空 = 這個平台在 actions.yaml 有列實作的都模擬，not_started 的也算、附警告）
 // 執行中又收到新的 goal：舊的 abort（status CANCELED、detail「被新的 goal 取代」），做新的（BT 換任務時本來應該先取消）。
 #include <algorithm>
 #include <chrono>
@@ -83,7 +83,7 @@ public:
     }
     c.home = {{home[0], home[1], home[2]}};
     c.slowdown = declare_parameter<double>("slowdown", 1.0);
-    c.allow_not_started = declare_parameter<bool>("allow_not_started", c.allow_not_started);
+    c.supported_actions = declare_parameter<std::vector<std::string>>("supported_actions", std::vector<std::string>{});
     c.faults = parseFaults(declare_parameter<std::vector<std::string>>("faults", std::vector<std::string>{}));
     feedback_period_ = 1.0 / std::max(declare_parameter<double>("feedback_hz", 5.0), 0.1);
     executor_ = std::make_unique<FakeExecutor>(registry_, site_ ? &*site_ : nullptr, c);

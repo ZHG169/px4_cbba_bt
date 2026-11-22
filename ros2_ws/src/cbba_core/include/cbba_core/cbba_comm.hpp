@@ -563,6 +563,8 @@ public:
   // task 這個角色的一個 wait_for 現在的狀態（前面的角色：完成 → OPEN；略過 → 看它的 skip_satisfies；取消、過期 →
   // UNSATISFIABLE；還開著 → 有沒有達成那個里程碑；還不認得 → WAITING）
   GateState gateState(TaskId task, const WaitFor & wait, double now) const;
+  // 同上，用組號（任務自己還不在 agent_ 裡時用：addTask 第一次出價前算協同等待）
+  GateState groupGateState(TaskId group_id, const WaitFor & wait, double now) const;
   // all-or-nothing 的組（CB-4 第二批）：role_count 個角色都認得、每個必要角色（不是 optional）都有得標者（或已完成）
   // → complete；必要角色被取消、過期 → broken（不會湊齊，第三批由閘道處理）；missing 是還缺的 role_index
   struct GroupStatus
@@ -584,6 +586,15 @@ public:
   void setWaitResolver(WaitResolver resolver) {wait_resolver_ = std::move(resolver); wait_cache_.clear();}
   // agent 從現在的位置到 position 的預估時間（秒；自己用自己的速度，鄰居用 platform_speed；不知道位置、速度時 nullopt）
   std::optional<double> travelTime(AgentId agent, const Vec3 & position) const;
+
+  // ---------- 執行端支援的動作（2026-11-19，docs/execution_backend_plan.md） ----------
+  // TaskSpec 裡的動作（cbba_core 不解析 spec，由節點層給：spec → 動作名稱）
+  using ActionLister = std::function<std::vector<std::string>(const std::string & spec)>;
+  void setActionLister(ActionLister lister) {action_lister_ = std::move(lister); action_cache_.clear();}
+  // 這台能做的動作（cbba_node 由註冊表推導：actions.yaml × 平台 × 可用能力）；nullopt = 不限制。TaskSpec 有不在清單上的動作 → 不出價
+  //（unsupported_action；手上有的釋放，交給別台）。沒有 TaskSpec、還沒收齊的任務不擋（收齊後下一次重新評估再判斷）
+  void setSupportedActions(std::optional<std::set<std::string>> actions, double now);
+  const std::optional<std::set<std::string>> & supportedActions() const {return supported_actions_;}
 
   // ---------- 時鐘偏差（任務欄位補齊 06） ----------
   // 鄰居的時鐘 − 本機（最近一次 CBBA_STATE 估的，含網路延遲；沒收過時 nullopt）
@@ -745,6 +756,8 @@ private:
   std::map<TaskId, SpecStore> specs_;
   // 協同出價（09）：每次 reevaluate 前更新 Task::coop；wait_for 照（任務, revision）快取（resolver 解析 spec 不便宜）
   void updateCoopEta(double now);
+  // 一個任務的協同等待（updateCoopEta 和 addTask 共用；task 可以還不在 agent_ 裡）
+  CoopEta coopEtaFor(const Task & task, double now);
   std::vector<WaitFor> waitsOf(const Task & task);
   WaitResolver wait_resolver_;
   struct WaitCache
@@ -757,6 +770,11 @@ private:
   std::optional<double> milestoneEta(TaskId pred, Milestone milestone, double now) const;
   std::optional<double> arrivalEta(TaskId task, double now) const;
   std::vector<std::pair<AgentId, double>> skew_warnings_;
+  // 執行端支援的動作（2026-11-19）
+  bool updateSupport();
+  ActionLister action_lister_;
+  std::optional<std::set<std::string>> supported_actions_;
+  std::map<TaskId, std::pair<std::uint16_t, std::vector<std::string>>> action_cache_;   // 已收齊的 spec 的動作（照 revision）
   std::set<std::pair<TaskId, std::uint8_t>> repair_spec_;   // 補發佇列：TaskSpec 的段（進行中任務的定義之後送）
   std::map<TaskId, double> last_spec_pull_;
   std::size_t spec_pull_cursor_{0};

@@ -40,3 +40,6 @@ uint8 floor                           # 樓層；0 = 不分
 bool deadline_hard                    # deadline_sec 是硬期限（來不及就不出價）
 builtin_interfaces/Time release       # 可以開始的時刻；0 = 立即
 builtin_interfaces/Time expires       # 失效的時刻；0 = 不失效
+# 正式指派的版本（2026-11-19）：只有 current_task 帶，
+# 執行端（BT）用來擋舊的指令、判斷「同 task_id 換了一次指派」；0 = 不是正式指派（其他話題）
+uint64 assignment_version

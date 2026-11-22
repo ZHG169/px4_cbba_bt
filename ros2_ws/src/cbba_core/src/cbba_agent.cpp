@@ -328,6 +328,7 @@ bool CbbaAgent::updateTask(const Task & task, bool reauction, double now, bool r
   updated.status = TaskStatus::OPEN;
   updated.success_prob = it->second.success_prob;   // 本機的失敗打折不因改版重來
   updated.coop = it->second.coop;                   // 協同的預估時刻（09）：下一次 updateCoopEta 再更新
+  updated.unsupported = it->second.unsupported;     // 執行端支援的動作：改版後 CbbaComm::updateSupport 會重算
   it->second = updated;
   if (reauction) {
     releaseIf({task.id});
@@ -752,6 +753,16 @@ bool CbbaAgent::setCoopEta(TaskId id, const CoopEta & eta)
     return false;
   }
   c = eta;
+  return true;
+}
+
+bool CbbaAgent::setUnsupported(TaskId id, bool unsupported)
+{
+  const auto it = tasks_.find(id);
+  if (it == tasks_.end() || it->second.unsupported == unsupported) {
+    return false;
+  }
+  it->second.unsupported = unsupported;
   return true;
 }
 

@@ -99,6 +99,9 @@ struct Task
   // 不上網路：封包格式不帶、收到的任務一律是 1
   double success_prob{1.0};
   CoopEta coop{};   // 協同出價（09）：只在本機，不上網路；收到的任務一律是 0
+  // 這台的執行端不支援 TaskSpec 裡的某個動作（2026-11-19，supported_actions，docs/execution_backend_plan.md）：
+  // 只在本機（CbbaComm::updateSupport 設定），不出價
+  bool unsupported{false};
   // 2-1b（2026-11-11）：只有 type == NONE 的新型任務看這三個；舊型由 TaskType 決定（capabilities.hpp 的 effective*）
   std::uint8_t platform{0};           // 0 = 不限、1 = uav、2 = quadruped（和 AgentType 同值）
   Capabilities required_caps{0};      // 需要的能力（全部都要有）

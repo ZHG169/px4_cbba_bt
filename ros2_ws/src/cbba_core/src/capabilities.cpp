@@ -147,6 +147,7 @@ const char * toString(Fitness f)
     case Fitness::WRONG_FLOOR: return "wrong_floor";
     case Fitness::ALTITUDE_LIMIT: return "altitude_limit";
     case Fitness::ZONE_FORBIDDEN: return "zone_forbidden";
+    case Fitness::UNSUPPORTED_ACTION: return "unsupported_action";
     case Fitness::INDOOR: return "indoor";
   }
   return "?";
@@ -163,7 +164,7 @@ Fitness fitness(const AgentState & agent, const Task & task, const ZoneRegistry 
     return Fitness::CAPABILITY;
   }
   switch (checkZones(zones, agent, platformOf(agent.type), task)) {
-    case ZoneVerdict::OK: return Fitness::OK;
+    case ZoneVerdict::OK: return task.unsupported ? Fitness::UNSUPPORTED_ACTION : Fitness::OK;
     case ZoneVerdict::WRONG_FLOOR: return Fitness::WRONG_FLOOR;
     case ZoneVerdict::ALTITUDE_LIMIT: return Fitness::ALTITUDE_LIMIT;
     case ZoneVerdict::ZONE_FORBIDDEN: return Fitness::ZONE_FORBIDDEN;

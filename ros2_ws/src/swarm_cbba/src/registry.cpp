@@ -1,5 +1,6 @@
 #include "swarm_cbba/registry.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
@@ -1557,6 +1558,29 @@ cbba_core::ZoneRegistry toZoneRegistry(const Site & site, const Registry * regis
       policy.forbid.push_back(cbba_core::ZonePolicy::Rule{index, mask(f.platforms)});
     }
     out.policies.push_back(policy);
+  }
+  return out;
+}
+
+std::set<std::string> supportedActions(const Registry & registry, const std::string & platform,
+  const std::vector<std::string> & capabilities)
+{
+  const std::set<std::string> have(capabilities.begin(), capabilities.end());
+  std::set<std::string> out;
+  for (const ActionEntry & a : registry.actions) {
+    if (a.status != "open" || a.cls == "internal" || a.implementation(platform) == nullptr) {
+      continue;
+    }
+    bool ok = a.requires_any_of.empty();
+    for (const auto & group : a.requires_any_of) {
+      if (std::all_of(group.begin(), group.end(), [&have](const std::string & cap) {return have.count(cap) > 0;})) {
+        ok = true;
+        break;
+      }
+    }
+    if (ok) {
+      out.insert(a.name);
+    }
   }
   return out;
 }

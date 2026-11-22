@@ -187,17 +187,22 @@ StepSnapshot FakeExecutor::start(const StepGoal & goal, double now)
       step += ", \"params\": " + goal.params_json;
     }
     step += "}";
-    const SpecValidation v = validateSpec("{\"steps\": [" + step + "]}", registry_, site_, platform->code, 0, 0);
-    const ActionImpl * impl = entry != nullptr ? entry->implementation(config_.platform) : nullptr;
-    for (const SpecIssue & e : v.errors) {
-      if (e.code == "PLATFORM_NOT_SUPPORTED" && config_.allow_not_started && impl != nullptr &&
-        impl->autonomy == "not_started")
-      {
-        warnings_ += std::string(warnings_.empty() ? "警告：" : "；") + goal.action + " 在 " + config_.platform +
-          " 的實作是 not_started（閘道會擋；這裡照樣模擬）";
-        continue;
-      }
+    // 平台支援只警告（和閘道一樣），能不能做由下面的實作清單、supported_actions 決定
+    ValidateOptions options;
+    options.platform_support_is_error = false;
+    const SpecValidation v = validateSpec("{\"steps\": [" + step + "]}", registry_, site_, platform->code, 0, 0,
+      options);
+    if (!v.ok()) {
+      const SpecIssue & e = v.errors.front();
       return finish(StepStatus::FAILED, "E_PRECONDITION", e.code + " " + e.path + "：" + e.message);
+    }
+    if (entry != nullptr && entry->implementation(config_.platform) == nullptr) {
+      return finish(StepStatus::FAILED, "E_PRECONDITION",
+        "PLATFORM_NOT_SUPPORTED：" + config_.platform + " 沒有 " + goal.action + " 的實作（actions.yaml）");
+    }
+    const auto & sup = config_.supported_actions;
+    if (!sup.empty() && std::find(sup.begin(), sup.end(), goal.action) == sup.end()) {
+      return finish(StepStatus::FAILED, "E_PRECONDITION", "UNSUPPORTED_ACTION：這個執行端沒有宣告 " + goal.action);
     }
     for (const SpecIssue & w : v.warnings) {
       warnings_ += (warnings_.empty() ? "警告：" : "；") + w.code + " " + w.path + " " + w.message;

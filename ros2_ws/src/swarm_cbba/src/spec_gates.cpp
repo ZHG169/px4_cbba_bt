@@ -111,4 +111,26 @@ SyncResult evaluateSync(const std::vector<std::pair<std::uint8_t, SyncMember>> &
   return r;
 }
 
+std::vector<std::string> specActions(const std::string & spec)
+{
+  std::vector<std::string> out;
+  if (spec.empty()) {
+    return out;
+  }
+  try {
+    const YAML::Node steps = YAML::Load(spec)["steps"];
+    if (!steps || !steps.IsSequence()) {
+      return out;
+    }
+    for (const auto & s : steps) {
+      if (s.IsMap() && s["action"] && s["action"].IsScalar()) {
+        out.push_back(s["action"].Scalar());
+      }
+    }
+  } catch (const YAML::Exception &) {
+    out.clear();
+  }
+  return out;
+}
+
 }  // namespace swarm_cbba

@@ -32,6 +32,10 @@ struct SpecGates
   std::vector<std::string> warnings;  // 格式錯、不認得的里程碑、role_index 不在 precedence、指到自己（給 log）
 };
 
+// TaskSpec 裡用到的動作（steps[*].action，照順序、可能重複；格式不對回空清單）。2026-11-19：cbba_node 比對這台能做的動作
+//（由註冊表推導，docs/execution_backend_plan.md）
+std::vector<std::string> specActions(const std::string & spec);
+
 // spec：current_task.spec（空 = 沒有 TaskSpec）；precedence：任務 A 層的遮罩（位元 = role_index）；self：自己的 role_index
 SpecGates parseSpecGates(const std::string & spec, std::uint8_t precedence, std::uint8_t self);
 

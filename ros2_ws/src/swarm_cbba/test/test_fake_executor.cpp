@@ -139,7 +139,7 @@ TEST(FakeExecutor, InvalidStepsFailWithPrecondition)
 
 TEST(FakeExecutor, NotStartedImplementationIsSimulatedWithWarning)
 {
-  // patrol 在 actions.yaml 兩個平台都是 not_started：閘道會擋，假 adapter 照樣模擬（附警告）；關掉 allow_not_started 就擋
+  // patrol 在 actions.yaml 兩個平台都是 not_started：照樣模擬（附警告）；supported_actions 沒宣告 patrol 就擋（UNSUPPORTED_ACTION）
   FakeExecutor ex(registry(), nullptr, config("quadruped"));
   double t = 0.0;
   StepSnapshot s = ex.start(goal("patrol", "", R"({"waypoints": [[2, 0], [2, 2]], "loops": 2})"), t);
@@ -149,11 +149,11 @@ TEST(FakeExecutor, NotStartedImplementationIsSimulatedWithWarning)
   EXPECT_EQ(s.status, StepStatus::SUCCEEDED);
   EXPECT_NEAR(t, 8.0, 0.3);   // (0,0)→(2,0)→(2,2)→(2,0)→(2,2)：4 段各 2 m
   FakeExecutorConfig strict = config("quadruped");
-  strict.allow_not_started = false;
+  strict.supported_actions = {"go_to", "inspect"};
   FakeExecutor ex2(registry(), nullptr, strict);
   s = ex2.start(goal("patrol", "", R"({"waypoints": [[2, 0]]})"), 0.0);
   EXPECT_EQ(s.status, StepStatus::FAILED);
-  EXPECT_NE(s.detail.find("PLATFORM_NOT_SUPPORTED"), std::string::npos);
+  EXPECT_NE(s.detail.find("UNSUPPORTED_ACTION"), std::string::npos);
 }
 
 TEST(FakeExecutor, CancelStopsInPlace)

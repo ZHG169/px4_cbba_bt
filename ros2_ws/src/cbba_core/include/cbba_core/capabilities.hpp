@@ -70,11 +70,13 @@ Capabilities availableCaps(const AgentState & agent);
 Capabilities defaultCaps(AgentType type);
 
 // 2026-11-18 加區域的四種（zones.hpp 的 ZoneVerdict）
-enum class Fitness { OK, PLATFORM, CAPABILITY, WRONG_FLOOR, ALTITUDE_LIMIT, ZONE_FORBIDDEN, INDOOR };
-const char * toString(Fitness f);   // 出價表的原因：platform、capability、wrong_floor、altitude_limit、zone_forbidden、indoor
+enum class Fitness { OK, PLATFORM, CAPABILITY, WRONG_FLOOR, ALTITUDE_LIMIT, ZONE_FORBIDDEN, INDOOR, UNSUPPORTED_ACTION };
+// 出價表的原因：platform、capability、wrong_floor、altitude_limit、zone_forbidden、indoor、unsupported_action
+const char * toString(Fitness f);
 
 struct ZoneRegistry;
-// 平台、能力，再來樓層、高度、區域（zones 是 nullptr 時只看樓層與載具的高度上限）。
+// 平台、能力，再來樓層、高度、區域（zones 是 nullptr 時只看樓層與載具的高度上限），最後是執行端支不支援 TaskSpec 的動作
+//（Task::unsupported，2026-11-19）。
 // 其他條件（OPEN、電量、排除、鎖定…）在 CbbaAgent／scoring
 Fitness fitness(const AgentState & agent, const Task & task, const ZoneRegistry * zones = nullptr);
 

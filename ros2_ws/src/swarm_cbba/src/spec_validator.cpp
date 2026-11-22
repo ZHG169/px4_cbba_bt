@@ -65,8 +65,8 @@ class Checker
 {
 public:
   Checker(const Registry & reg, const Site * site, std::uint8_t platform, std::uint8_t role_index,
-    std::uint8_t role_count, SpecValidation & out)
-  : reg_(reg), site_(site), role_index_(role_index), role_count_(role_count), out_(out)
+    std::uint8_t role_count, const ValidateOptions & options, SpecValidation & out)
+  : reg_(reg), site_(site), role_index_(role_index), role_count_(role_count), options_(options), out_(out)
   {
     for (const PlatformEntry & p : reg.platforms) {
       if (platform == 0 || p.code == platform) {
@@ -179,8 +179,13 @@ private:
       for (const std::string & p : platforms_) {
         list += (list.empty() ? "" : "、") + p;
       }
-      error("PLATFORM_NOT_SUPPORTED", at + ".action", action.name + " 在 " + (list.empty() ? "（沒有平台）" : list) +
-        " 還沒有實作（actions.yaml 的 implementations；not_started 不算）");
+      const std::string msg = action.name + " 在 " + (list.empty() ? "（沒有平台）" : list) +
+        " 還沒有實作（actions.yaml 的 implementations；not_started 不算）";
+      if (options_.platform_support_is_error) {
+        error("PLATFORM_NOT_SUPPORTED", at + ".action", msg);
+      } else {
+        warning("PLATFORM_NOT_SUPPORTED", at + ".action", msg + "：照收，由各台能做的動作（註冊表推導）決定能不能出價");
+      }
     }
   }
 
@@ -496,6 +501,7 @@ private:
   const Site * site_;
   std::uint8_t role_index_;
   std::uint8_t role_count_;
+  ValidateOptions options_;
   SpecValidation & out_;
   std::vector<std::string> platforms_;
   std::set<std::string> effects_;   // 這些步驟會產生的效果（success_criteria 要有人產生）
@@ -503,7 +509,7 @@ private:
 }  // namespace
 
 SpecValidation validateSpec(const std::string & spec, const Registry & registry, const Site * site,
-  std::uint8_t platform, std::uint8_t role_index, std::uint8_t role_count)
+  std::uint8_t platform, std::uint8_t role_index, std::uint8_t role_count, const ValidateOptions & options)
 {
   SpecValidation out;
   if (spec.empty()) {
@@ -520,7 +526,7 @@ SpecValidation validateSpec(const std::string & spec, const Registry & registry,
     out.errors.push_back(SpecIssue{"SCHEMA", "", "spec 要是 JSON 物件"});
     return out;
   }
-  Checker(registry, site, platform, role_index, role_count, out).run(root);
+  Checker(registry, site, platform, role_index, role_count, options, out).run(root);
   return out;
 }
 

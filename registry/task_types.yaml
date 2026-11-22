@@ -35,3 +35,25 @@ roles:
   responder:           {id: 6, description: 處置}
   air_fire_watch:      {id: 7, description: 空中盯火（itest group）}
   ground_fire_verify:  {id: 8, description: 地面確認火情（itest group）}
+  # itest group（docker/itest，2026-11-19：閘道開 registry_dir 之後，測試用的角色名稱也要登記；只給測試用）
+  overwatch:           {id: 9, description: 空中監看（itest group 的簡稱）}
+  verify:              {id: 10, description: 單獨確認（itest group 的 fallback）}
+  air:                 {id: 11, description: 限無人機的角色（itest group G8）}
+  ground:              {id: 12, description: 限狗的角色（itest group）}
+  any:                 {id: 13, description: 不限平台的角色（itest group G8）}
+  A_ground:            {id: 14, description: 必要的地面角色 A（itest group G11）}
+  B_after_A:           {id: 15, description: 依賴 A 的角色 B（itest group G11）}
+  C_indep:             {id: 16, description: 不依賴 A 的角色 C（itest group G11）}
+  overwatch_opt:       {id: 17, description: optional 的空中監看（itest group G12）}
+  patrol_P3:           {id: 18, description: P3 巡檢（itest group G13）}
+  urgent_P0:           {id: 19, description: P0 緊急（itest group G13）}
+  role0:               {id: 20, description: 編號角色（itest group G5）}
+  role1:               {id: 21, description: 編號角色（itest group G5）}
+  role2:               {id: 22, description: 編號角色（itest group G5）}
+  role3:               {id: 23, description: 編號角色（itest group G5）}
+  role4:               {id: 24, description: 編號角色（itest group G5）}
+  patrol:              {id: 25, description: 附近的巡檢（itest group G17）}
+  ground_verify:       {id: 26, description: 等空中觀測的地面確認（itest group G17）}
+  task_A:              {id: 27, description: 搶占遲滯的 A（itest group G21A）}
+  task_B1:             {id: 28, description: 沒超過 margin 的 B1（itest group G21A）}
+  task_B2:             {id: 29, description: 超過 margin 的 B2（itest group G21A）}

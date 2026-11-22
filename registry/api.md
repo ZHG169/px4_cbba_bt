@@ -331,7 +331,7 @@ ros2 param set /v60/fake_adapter faults "['inspect=E_HW:thermal_camera@0.3']"   
 | return_to_dock | 移到 `dock`（沒給回起點）；UAV 降落 → LANDED |
 | 平台狀態機 | UAV：LANDED 時需要在空中的動作先 takeoff（1.5 m）→ climbing → AIRBORNE；emergency_land → EMERGENCY → 降落 → LANDED。狗：READY；emergency_stop 之後 EMERGENCY，下一個 goal 恢復 |
 | 逾時 | goal 的 deadline；沒有時 actions.yaml 的 timeout_s；0 的動作「估計時間 × 1.5 + 10 s」。`slowdown` < 1 讓實際速度變慢 |
-| not_started 的實作 | 照樣模擬，附警告（`allow_not_started`，預設 true；閘道注入時照樣擋） |
+| 能做的動作 | `supported_actions` 參數宣告（空 = 這個平台在 actions.yaml 有列實作的都模擬，not_started 的也算、附警告）；不在清單上 → UNSUPPORTED_ACTION。閘道對還沒實作的動作只警告，由各台的 supported_actions 決定能不能出價（`docs/execution_backend_plan.md`） |
 
 測試：`swarm_cbba/test/test_fake_executor.cpp`（11 項）、`swarm_cbba/test/exec_step_iface.sh`（A1～A7：回饋、自動起飛與降落、
 不合法的一步、取消、故障注入、逾時、新的 goal 取代舊的）。

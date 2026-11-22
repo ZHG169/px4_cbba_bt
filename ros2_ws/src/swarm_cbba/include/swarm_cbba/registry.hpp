@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -252,6 +253,13 @@ std::vector<std::string> checkRegistry(const Registry & registry);
 
 // 註冊表有、但這版程式（capabilities.hpp）不認得的能力標籤：註冊表比程式新。載具宣告了這些能力也用不到
 std::vector<std::string> unknownTools(const Registry & registry);
+
+// 這台能做的動作（2026-11-20，使用者定：由註冊表推導，不由執行端另外宣告）：actions.yaml 裡
+//   status open、class 不是 internal（可規劃與系統動作）、有這個平台（platforms.yaml 的 name）的實作，
+//   而且 requires.any_of 有一組能力全部在 capabilities（fleet.yaml 宣告的、扣掉執行中故障的）裡（沒寫 requires = 不需要）。
+// 實作的 autonomy（not_started…）不看：那是核准、檢查器警告用的；cbba_node 用這份清單判斷 TaskSpec 的動作能不能做
+std::set<std::string> supportedActions(const Registry & registry, const std::string & platform,
+  const std::vector<std::string> & capabilities);
 
 // ============================================================
 // 場域設定（2-1b 第五節：zone、poi、asset、dock／pad、pose）：site-config/<site>/

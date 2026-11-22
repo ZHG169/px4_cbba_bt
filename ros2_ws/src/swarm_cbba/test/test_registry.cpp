@@ -102,8 +102,9 @@ TEST(Registry, RepoRegistryLoadsAndMatchesCode)
   EXPECT_EQ(dog->platform, "quadruped");
   EXPECT_EQ(dog->ns, "/v60");
   EXPECT_EQ(dog->limits.docks, std::vector<std::string>{"DOCK_1"});
-  // 宣告的能力和節點原本的預設一樣：載入註冊表前後出價不變
-  EXPECT_EQ(cbba_core::parseCapabilities(dog->capabilities), cbba_core::defaultCaps(cbba_core::AgentType::UGV));
+  // 宣告的能力＝節點原本的預設＋speaker（2026-11-20：入侵範本的 speak 要它；只影響能不能做 speak，其他任務的出價不變）
+  EXPECT_EQ(cbba_core::parseCapabilities(dog->capabilities),
+    cbba_core::defaultCaps(cbba_core::AgentType::UGV) | cbba_core::capBit(cbba_core::Capability::SPEAKER));
   EXPECT_EQ(cbba_core::parseCapabilities(reg.robot(1)->capabilities),
     cbba_core::defaultCaps(cbba_core::AgentType::UAV));
   // 原文的 limits：max_altitude_m、max_flight_s、landing_pads
@@ -682,4 +683,27 @@ TEST(Registry, SiteZonesForCbba)
   EXPECT_TRUE(hasError(errors, "政策 1 的區域 Z_NOWHERE 不存在")) << firstOf(errors);
   EXPECT_TRUE(hasError(errors, "政策 1 的平台 boat")) << firstOf(errors);
   EXPECT_THROW(toZoneRegistry(bad, &reg), std::runtime_error);
+}
+
+TEST(Registry, SupportedActionsFromRegistry)
+{
+  // 能做的動作（2026-11-20）：actions.yaml 的 open、非 internal、有這個平台的實作，而且 requires.any_of 有一組能力都有。
+  // autonomy 不看（UAV 的 track 是 not_started 也算）；能力故障（拿掉 rgb_camera）時需要它的動作就不能做
+  const Registry reg = loadRegistry(REGISTRY_DIR);
+  const auto dog = supportedActions(reg, "quadruped", {"mobility_ground", "rgb_camera", "speaker"});
+  for (const char * a : {"go_to", "inspect", "track", "speak", "wait", "return_to_dock", "alert_operator", "emergency_stop"}) {
+    EXPECT_EQ(dog.count(a), 1u) << a;
+  }
+  EXPECT_EQ(dog.count("emergency_land"), 0u);   // 狗沒有實作
+  EXPECT_EQ(dog.count("takeoff"), 0u);          // internal
+  EXPECT_EQ(dog.count("pick_up"), 0u);          // closed
+  EXPECT_EQ(supportedActions(reg, "quadruped", {"mobility_ground", "rgb_camera"}).count("speak"), 0u);   // 沒有 speaker
+  const auto uav = supportedActions(reg, "uav", {"mobility_air", "rgb_camera"});
+  EXPECT_EQ(uav.count("track"), 1u);
+  EXPECT_EQ(uav.count("speak"), 0u);            // UAV 沒有實作
+  // rgb_camera 故障：inspect（rgb 或 thermal）、track 不能做，go_to 照樣可以
+  const auto broken = supportedActions(reg, "uav", {"mobility_air"});
+  EXPECT_EQ(broken.count("inspect"), 0u);
+  EXPECT_EQ(broken.count("track"), 0u);
+  EXPECT_EQ(broken.count("go_to"), 1u);
 }

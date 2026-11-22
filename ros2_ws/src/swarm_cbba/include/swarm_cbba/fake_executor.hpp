@@ -7,7 +7,8 @@
 //
 // 檢查：和閘道注入前的 TaskSpec 檢查是同一套（validateSpec，把這一步包成只有一步的 spec），錯誤碼一樣；
 //   另外收系統動作 emergency_stop、emergency_land、report_state（不是 plannable，validateSpec 不收）。
-//   實作標 not_started 的（patrol、track、speak…）預設也模擬，附警告（allow_not_started）。
+//   能做哪些動作看 supported_actions（假 adapter 的參數；空 = 這個平台在
+//   actions.yaml 有列實作的都模擬，not_started 的也算、附警告）；不在清單上 → FAILED、E_PRECONDITION（UNSUPPORTED_ACTION）。
 // 模擬（速度 speed m/s，UAV 的爬升、下降也用它）：
 //   go_to           移到 location（standoff_m：停在前面多遠）；UAV 用 altitude_m（沒給用區域的 cruise_altitude_m，再沒有用
 //                   cruise_altitude）
@@ -82,8 +83,8 @@ struct FakeExecutorConfig
   double takeoff_altitude{1.5};         // UAV 的 takeoff（Node-RED 的 /api/takeoff）
   std::array<double, 3> home{{0.0, 0.0, 0.0}};   // 起點（return_to_dock 沒給 dock 時回這裡）
   double slowdown{1.0};                 // 實際速度 = speed × slowdown（< 1 測逾時）
-  // actions.yaml 裡這個平台的實作是 not_started 的也模擬（閘道的檢查會擋，假 adapter 是要先測介面）：只附警告
-  bool allow_not_started{true};
+  // 宣告能做的動作；空 = 這個平台在 actions.yaml 有列實作的都模擬（not_started 的也算，附警告）
+  std::vector<std::string> supported_actions;
   std::vector<StepFault> faults;
 };
 

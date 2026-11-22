@@ -698,6 +698,7 @@ std::vector<Bytes> CbbaComm::poll(double now)
   if (now >= next_reevaluate_) {
     next_reevaluate_ = now + config_.reevaluate_period;
     updateCoopEta(now);
+    updateSupport();
     markChanged(agent_.reevaluate(now));
   }
 
@@ -1585,7 +1586,10 @@ std::vector<AgentId> CbbaComm::capableAgents(const Task & task, double now) cons
     s.type = n.vehicle_type;
     s.capabilities = ~Capabilities{0};
     s.failed_caps = ~n.capabilities;
-    if (fitness(s, task, zones) == Fitness::OK) {   // 鄰居的樓層、高度上限不知道：只看平台的區域限制
+    // unsupported 是本機執行端的（不知道鄰居支不支援，不擋）
+    Task theirs = task;
+    theirs.unsupported = false;
+    if (fitness(s, theirs, zones) == Fitness::OK) {   // 鄰居的樓層、高度上限不知道：只看平台的區域限制
       out.push_back(agent);
     }
   }
@@ -1825,7 +1829,15 @@ bool CbbaComm::addTask(const wire::RelayHeader & origin, const Task & task, doub
   }
   origins_[task.id] = origin;
   added_at_[task.id] = now;
-  markChanged(agent_.onTask(task, now));
+  // 協同出價（09）：第一次出價前就算好要等多久（2026-11-20，itest G17）。原本只在 reevaluate（每 1 s）更新，
+  // 第一次出價當成「到了就能開始」，近的空閒載具先得標、assign_hold 0.4 s 後就鎖定，之後的預估來不及改變得標者
+  Task first = task;
+  if (config_.coop_bidding && !config_.gateway && task.status == TaskStatus::OPEN && task.ext.group_id != 0 &&
+    (task.ext.precedence != 0 || task.ext.sync_window_s != 0))
+  {
+    first.coop = coopEtaFor(first, now);
+  }
+  markChanged(agent_.onTask(first, now));
   dirty_ = true;   // 任務清單變了，鄰居要知道
 
   const auto early = early_closes_.find(task.id);
@@ -2204,6 +2216,10 @@ void CbbaComm::completeSpec(TaskId id)
   }
   st.complete = true;
   st.json = std::move(json);
+  // 執行端支援的動作（2026-11-19）：TaskSpec 一收齊就判斷，不等下一次重新評估（否則不支援的那台可能先被指派）
+  if (updateSupport()) {
+    markChanged(agent_.reevaluate(last_now_));
+  }
 }
 
 // 缺 TaskSpec 的進行中任務：定期向鄰居要（缺口請求的狀態 OPEN_NO_SPEC，只問那一個流水號）。
@@ -3171,7 +3187,12 @@ GateState CbbaComm::gateState(TaskId task_id, const WaitFor & wait, double now) 
   if (t == agent_.tasks().end() || t->second.ext.group_id == 0) {
     return GateState::WAITING;
   }
-  const auto pred = roleTask(t->second.ext.group_id, wait.role_index);
+  return groupGateState(t->second.ext.group_id, wait, now);
+}
+
+GateState CbbaComm::groupGateState(TaskId group_id, const WaitFor & wait, double now) const
+{
+  const auto pred = roleTask(group_id, wait.role_index);
   if (!pred) {
     return GateState::WAITING;   // 前面的角色還不認得（任務定義還沒到）
   }
@@ -3372,31 +3393,7 @@ void CbbaComm::updateCoopEta(double now)
     if (e.precedence == 0 && e.sync_window_s == 0) {
       continue;
     }
-    CoopEta eta;
-    for (const WaitFor & w : waitsOf(task)) {
-      if (gateState(tid, w, now) != GateState::WAITING) {
-        continue;   // 已滿足；或不會滿足（取消、過期：閘道的連鎖撤銷處理）
-      }
-      const auto pred = roleTask(e.group_id, w.role_index);
-      if (!pred) {
-        continue;   // 前面的角色還不認得
-      }
-      if (const auto t = milestoneEta(*pred, w.milestone, now)) {
-        eta.ready = std::max(eta.ready, *t);
-      }
-    }
-    if (e.sync_window_s > 0) {
-      for (const TaskId other : groupTasks(e.group_id)) {
-        const Task & o = agent_.tasks().at(other);
-        if (other == tid || o.ext.sync_window_s == 0 || !isOpen(other) || expired(other, now)) {
-          continue;   // 完成的早就到了、取消或略過的不等（同 evaluateSync）
-        }
-        if (const auto t = arrivalEta(other, now)) {
-          eta.sync_first = eta.sync_first > 0.0 ? std::min(eta.sync_first, *t) : *t;
-          eta.sync_last = std::max(eta.sync_last, *t);
-        }
-      }
-    }
+    const CoopEta eta = coopEtaFor(task, now);
     const CoopEta & old = task.coop;
     if (differs(eta.ready, old.ready) || differs(eta.sync_first, old.sync_first) ||
       differs(eta.sync_last, old.sync_last))
@@ -3409,6 +3406,90 @@ void CbbaComm::updateCoopEta(double now)
       ++stats_.coop_updates;
     }
   }
+}
+
+CoopEta CbbaComm::coopEtaFor(const Task & task, double now)
+{
+  const TaskExt & e = task.ext;
+  CoopEta eta;
+  for (const WaitFor & w : waitsOf(task)) {
+    if (groupGateState(e.group_id, w, now) != GateState::WAITING) {
+      continue;   // 已滿足；或不會滿足（取消、過期：閘道的連鎖撤銷處理）
+    }
+    const auto pred = roleTask(e.group_id, w.role_index);
+    if (!pred) {
+      continue;   // 前面的角色還不認得
+    }
+    if (const auto t = milestoneEta(*pred, w.milestone, now)) {
+      eta.ready = std::max(eta.ready, *t);
+    }
+  }
+  if (e.sync_window_s > 0) {
+    for (const TaskId other : groupTasks(e.group_id)) {
+      const Task & o = agent_.tasks().at(other);
+      if (other == task.id || o.ext.sync_window_s == 0 || !isOpen(other) || expired(other, now)) {
+        continue;   // 完成的早就到了、取消或略過的不等（同 evaluateSync）
+      }
+      if (const auto t = arrivalEta(other, now)) {
+        eta.sync_first = eta.sync_first > 0.0 ? std::min(eta.sync_first, *t) : *t;
+        eta.sync_last = std::max(eta.sync_last, *t);
+      }
+    }
+  }
+  return eta;
+}
+
+// ===========================================================================
+// 執行端支援的動作（2026-11-19，docs/execution_backend_plan.md「not_started：不全域放行」）
+// ===========================================================================
+void CbbaComm::setSupportedActions(std::optional<std::set<std::string>> actions, double now)
+{
+  supported_actions_ = std::move(actions);
+  if (updateSupport()) {
+    markChanged(agent_.reevaluate(now));
+  }
+}
+
+// 每個進行中、TaskSpec 已收齊的任務：有沒有不在 supported_actions 的動作 → Task::unsupported。回傳有沒有改變
+bool CbbaComm::updateSupport()
+{
+  if (config_.gateway) {
+    return false;
+  }
+  std::vector<std::pair<TaskId, bool>> updates;
+  for (const auto & [tid, task] : agent_.tasks()) {
+    if (task.status != TaskStatus::OPEN) {
+      action_cache_.erase(tid);
+      continue;
+    }
+    bool unsupported = false;
+    if (supported_actions_ && action_lister_) {
+      auto it = action_cache_.find(tid);
+      if (it == action_cache_.end() || it->second.first != task.revision) {
+        const auto spec = taskSpec(tid);
+        if (spec && !spec->empty()) {
+          it = action_cache_.insert_or_assign(tid, std::make_pair(task.revision, action_lister_(*spec))).first;
+        } else {
+          it = action_cache_.end();   // 沒有 TaskSpec、還沒收齊：不擋
+        }
+      }
+      if (it != action_cache_.end()) {
+        for (const std::string & a : it->second.second) {
+          if (supported_actions_->count(a) == 0) {
+            unsupported = true;
+            break;
+          }
+        }
+      }
+    }
+    if (unsupported != task.unsupported) {
+      updates.emplace_back(tid, unsupported);
+    }
+  }
+  for (const auto & [tid, flag] : updates) {
+    agent_.setUnsupported(tid, flag);
+  }
+  return !updates.empty();
 }
 
 // ===========================================================================

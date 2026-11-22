@@ -184,3 +184,23 @@ TEST(SpecValidator, ReportPolicy)
   EXPECT_FALSE(none.stream);
   EXPECT_TRUE(none.channels.empty());
 }
+
+TEST(SpecValidator, PlatformSupportCanBeAWarning)
+{
+  // 閘道（2026-11-19，docs/execution_backend_plan.md）：平台在 actions.yaml 還沒實作（UAV 的 track 是 not_started、UAV 沒有 speak）
+  // → 只警告 PLATFORM_NOT_SUPPORTED，照收（各台由註冊表推導能做的動作決定能不能出價）；預設（假 adapter、其他用途）照樣是錯誤。
+  // 不認得的動作、go_to 沒有 location 不受影響
+  const std::string track = R"({"steps": [{"action": "track", "object": "person"}]})";
+  EXPECT_TRUE(hasCode(check(track, kUav).errors, "PLATFORM_NOT_SUPPORTED"));
+  ValidateOptions gw;
+  gw.platform_support_is_error = false;
+  const SpecValidation v = validateSpec(track, reg(), &site(), kUav, 0, 0, gw);
+  EXPECT_TRUE(v.ok());
+  EXPECT_TRUE(hasCode(v.warnings, "PLATFORM_NOT_SUPPORTED"));
+  EXPECT_TRUE(validateSpec(R"({"steps": [{"action": "speak", "params": {"template": "x"}}]})", reg(), &site(),
+    kUav, 0, 0, gw).ok());
+  EXPECT_TRUE(hasCode(validateSpec(R"({"steps": [{"action": "go_to"}]})", reg(), &site(), kDog, 0, 0, gw).errors,
+    "LOCATION_MISSING"));
+  EXPECT_TRUE(hasCode(validateSpec(R"({"steps": [{"action": "fly_away"}]})", reg(), &site(), kDog, 0, 0, gw).errors,
+    "UNKNOWN_ACTION"));
+}

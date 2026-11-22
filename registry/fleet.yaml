@@ -12,7 +12,7 @@
 # gateways：閘道（非競標的 CBBA 協定節點，不是載具，不列入能力統計），cbba_node 用來判斷閘道在不在線。
 #
 # 目前是模擬的機隊（docker：uav1～3、dog1～3，yard 場景）；能力照節點原本的預設（UAV：mobility_air、rgb_camera；
-# 狗：mobility_ground、rgb_camera）。實機（V60 的雲台變焦、熱像、喇叭；室內無人機的 indoor_flight、高度 3 m）待和伯宇確認後再加
+# 狗：mobility_ground、rgb_camera）；狗另外宣告 speaker（2026-11-20：入侵範本的 speak 要它；V60 的喇叭待伯宇確認）；dog3 另外宣告 manipulator（2026-11-19，itest group 的 G13：只有它能做要求 manipulator 的任務）。實機（V60 的雲台變焦、熱像、喇叭；室內無人機的 indoor_flight、高度 3 m）待和伯宇確認後再加
 #（2-1b 第十節的待確認問題）。
 schema_version: "1.0"
 robots:
@@ -22,11 +22,11 @@ robots:
      limits: {max_altitude_m: 10.0, max_flight_s: 900, landing_pads: [PAD_2]}}
   - {id: 3, name: uav3, platform: uav, floor: 1, ns: /uav3, capabilities: [mobility_air, rgb_camera],
      limits: {max_altitude_m: 10.0, max_flight_s: 900, landing_pads: [PAD_3]}}
-  - {id: 50, name: dog1, platform: quadruped, floor: 1, ns: /v60, capabilities: [mobility_ground, rgb_camera],
+  - {id: 50, name: dog1, platform: quadruped, floor: 1, ns: /v60, capabilities: [mobility_ground, rgb_camera, speaker],
      limits: {docks: [DOCK_1]}}
-  - {id: 51, name: dog2, platform: quadruped, floor: 1, ns: /v60_1, capabilities: [mobility_ground, rgb_camera],
+  - {id: 51, name: dog2, platform: quadruped, floor: 1, ns: /v60_1, capabilities: [mobility_ground, rgb_camera, speaker],
      limits: {docks: [DOCK_2]}}
-  - {id: 52, name: dog3, platform: quadruped, floor: 1, ns: /v60_2, capabilities: [mobility_ground, rgb_camera],
+  - {id: 52, name: dog3, platform: quadruped, floor: 1, ns: /v60_2, capabilities: [mobility_ground, rgb_camera, speaker, manipulator],
      limits: {docks: [DOCK_3]}}
 gateways:
   - {id: 200, name: gcs, ns: /gcs}

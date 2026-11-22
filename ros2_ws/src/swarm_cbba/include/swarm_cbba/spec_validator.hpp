@@ -52,10 +52,20 @@ struct SpecValidation
   std::string summary() const;                   // 第一個錯誤（給拒絕原因）；沒有錯誤時空字串
 };
 
+// 檢查的選項（2026-11-19）
+struct ValidateOptions
+{
+  // 任務的平台在 actions.yaml 沒有實作（或是 not_started）時：true = 錯誤 PLATFORM_NOT_SUPPORTED；false = 只警告。
+  // 閘道用 false（docs/execution_backend_plan.md「not_started：不全域放行」：動作合法就照收，由各台由註冊表推導的
+  // 能做的動作決定能不能出價，沒人能做時由孤兒任務、P0 看門狗處理）。不認得的動作、參數、location 等照樣是錯誤
+  bool platform_support_is_error{true};
+};
+
 // spec：規劃器的 spec（空 = 沒有，直接過）；platform：任務的平台代碼（0 = 不限）；site 可以是 nullptr（不檢查位置、
 // 實例是否存在）；role_index、role_count：任務 A 層的（單獨任務 count = 0）
 SpecValidation validateSpec(const std::string & spec, const Registry & registry, const Site * site,
-  std::uint8_t platform, std::uint8_t role_index, std::uint8_t role_count);
+  std::uint8_t platform, std::uint8_t role_index, std::uint8_t role_count,
+  const ValidateOptions & options = ValidateOptions{});
 
 // 任務層級的 timeout_s（沒有、格式不對回 nullopt）：機器人的 cbba_node 用來看執行逾時
 std::optional<double> specTimeout(const std::string & spec);

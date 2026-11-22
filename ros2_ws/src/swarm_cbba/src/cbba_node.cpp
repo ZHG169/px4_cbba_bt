@@ -56,7 +56,7 @@
 // 拿掉 exec_state、assignment_request／response（握手）；assign_hold 0.6 → 0.4 s；vehicle_type → agent_type。
 //
 // 機號（agent_id）1～254：RobotState.agent_id 是 uint8。協定本身是 uint16（1～65534）。
-// 返航點（只用在出價時估返航的耗電）：第一筆 robot_state 的位置。
+// 返航點（只用在出價時估返航的耗電）：參數 home_position；沒給時用第一筆 robot_state 的位置。
 //
 // 程序鎖：啟動時對 <lock_dir>/agentN.lock 加 flock（不等待），拿不到就拒絕啟動，從啟動持有到程序結束。
 // lock_dir 要在同一台機器的所有容器共用（docker 掛 /run/cbba，CBBA_LOCK_DIR），否則兩個容器各跑一個同機號的節點時鎖不到。
@@ -349,6 +349,13 @@ public:
     s.position = toVec(declare_parameter<std::vector<double>>(
         "initial_position", {0.0, 0.0, 0.0}), "initial_position");
     s.home = s.position;
+    // 返航點（2026-11-22）：有給就固定用它（起降板、充電樁）；沒給才用第一筆 robot_state 的位置。
+    // 原本只用第一筆：節點在外面重開時返航點變成重開的地方，返航耗電估錯、出價偏低（itest group 場景三發現）
+    const auto home = declare_parameter<std::vector<double>>("home_position", std::vector<double>{});
+    if (!home.empty()) {
+      s.home = toVec(home, "home_position");
+      home_fixed_ = true;
+    }
     s.battery = declare_parameter<double>("battery", 100.0);
     s.safety_reserve = declare_parameter<double>("safety_reserve", s.safety_reserve);
     s.energy_per_meter = declare_parameter<double>("energy_per_meter", s.energy_per_meter);
@@ -646,6 +653,16 @@ public:
     state_ = s;
     comm_ = std::make_unique<CbbaComm>(s, scoring, comm);   // 每次啟動新的 session
     comm_->setParticipating(false, wallNow());   // 第一個 tick 依 participate 決定
+    // 這台能做的動作（2026-11-20，使用者定）：由註冊表推導——actions.yaml 裡 open、有這個平台的實作、requires 的能力
+    // 符合 fleet.yaml 宣告的（扣掉執行中故障的，E_HW → capability_restored）。TaskSpec 有不能做的動作就不出價
+    //（unsupported_action）。沒有註冊表時不限制
+    comm_->setActionLister(swarm_cbba::specActions);
+    if (!gateway && registry) {
+      action_registry_ = registry;
+      const swarm_cbba::RobotEntry * me = registry->robot(static_cast<AgentId>(agent_id));
+      platform_name_ = me != nullptr ? me->platform : (uav ? "uav" : "quadruped");
+      updateSupportedActions(wallNow());
+    }
     // 協同出價（09）：依賴的角色要等哪些里程碑，從 TaskSpec 的 wait_for 讀（和 teammates 的 gate 同一個解析）
     comm_->setWaitResolver([](const Task & task, const std::string & spec) {
         std::vector<WaitFor> waits;
@@ -719,6 +736,9 @@ public:
       // 核准（任務欄位補齊 12，2026-11-18）：none（都不用核准，測試用）／risk（規劃器要求、事件類型 requires_approval、
       // 風險 high 的動作；預設）／strict（再加實作還沒 field_verified 的動作）。稽核紀錄一行一筆附加在 approvals_log
       approval_policy_ = declare_parameter<std::string>("approval_policy", "risk");
+      // 平台還沒實作的動作只警告（2026-11-19）：動作合法就照收，各台由註冊表推導能做的動作決定能不能出價；
+      // 不認得的動作、參數、location 等照樣拒絕
+      spec_options_.platform_support_is_error = false;
       if (approval_policy_ != "none" && approval_policy_ != "risk" && approval_policy_ != "strict") {
         throw std::invalid_argument("approval_policy must be none, risk or strict");
       }
@@ -962,7 +982,9 @@ private:
       state_.battery = msg.battery;
     }
     if (!have_state_) {
-      state_.home = state_.position;   // 第一次收到的位置當返航點
+      if (!home_fixed_) {
+        state_.home = state_.position;   // 第一次收到的位置當返航點（沒給 home_position 時）
+      }
       RCLCPP_INFO(get_logger(), "返航點 map (%.1f, %.1f, %.1f)，電量 %.0f%%",
         state_.home.x, state_.home.y, state_.home.z, state_.battery);
     }
@@ -1104,6 +1126,7 @@ private:
         RCLCPP_WARN(get_logger(), "能力 %s 故障（任務 %s 回報 %s）：之後不對需要它的任務出價，到 capability_restored 或重開為止；"
           "可用能力 %s", capabilityName(*cap), name.c_str(), msg.failure_code.c_str(),
           capabilitiesToString(availableCaps(state_)).c_str());
+        updateSupportedActions(wallNow());   // 需要這個能力的動作暫時不能做
       }
     }
     if (code.notify_orphan) {
@@ -1819,10 +1842,13 @@ private:
       std::vector<std::string> approval_reasons;
       if (why.empty() && registry_) {
         const swarm_cbba::SpecValidation v = swarm_cbba::validateSpec(req.spec, *registry_, site_ ? &*site_ : nullptr,
-          req.platform, req.role_index, req.role_count);
+          req.platform, req.role_index, req.role_count, spec_options_);
         why = v.summary();
         for (const auto & w : v.warnings) {
           res.warnings.push_back(w.code + "：" + w.message + (w.path.empty() ? "" : "（" + w.path + "）"));
+          if (w.code == "PLATFORM_NOT_SUPPORTED") {
+            RCLCPP_WARN(get_logger(), "注入 %s/%s：%s", req.incident_id.c_str(), req.role.c_str(), w.message.c_str());
+          }
         }
         if (approval_policy_ != "none") {
           for (const auto & a : v.high_risk_actions) {
@@ -2396,6 +2422,27 @@ private:
     state_.failed_caps &= ~capBit(*cap);
     RCLCPP_INFO(get_logger(), "能力 %s 恢復：之後可以對需要它的任務出價；可用能力 %s", capabilityName(*cap),
       capabilitiesToString(availableCaps(state_)).c_str());
+    updateSupportedActions(wallNow());
+  }
+
+  // 這台能做的動作（2026-11-20）：註冊表的動作 × 平台實作 × 可用能力（宣告的扣掉故障的）；變了才交給協定層、印 log
+  void updateSupportedActions(double now)
+  {
+    if (!action_registry_) {
+      return;
+    }
+    const std::set<std::string> next = swarm_cbba::supportedActions(*action_registry_, platform_name_,
+        capabilityNames(availableCaps(state_)));
+    if (next == supported_actions_ && comm_->supportedActions()) {
+      return;
+    }
+    supported_actions_ = next;
+    comm_->setSupportedActions(next, now);
+    std::string list;
+    for (const auto & a : next) {
+      list += (list.empty() ? "" : "、") + a;
+    }
+    RCLCPP_INFO(get_logger(), "能做的動作（註冊表推導，%s）：%s", platform_name_.c_str(), list.empty() ? "（無）" : list.c_str());
   }
 
   // optional 角色的自動關閉（閘道，4e）：O1～O3 成立就送 TASK_CLOSE reason 4，log 原因、發 task_orphaned 一次給值班看
@@ -2551,6 +2598,7 @@ private:
       if (active && comm_->agent().tasks().count(active->task) > 0) {
         const Task & t = comm_->agent().tasks().at(active->task);
         msg = toMsg(t);
+        msg.assignment_version = active->version;   // 2026-11-19：執行端用來擋舊的指令（docs/execution_backend_plan.md）
         // TaskSpec（協定版本 4）：正式指派只在收齊後才建立（WAITING_SPEC），這裡一定有
         msg.spec = comm_->taskSpec(t.id).value_or(std::string());
         RCLCPP_INFO(get_logger(), "指派給 BT：%s (%.1f, %.1f, %.1f)", taskName(t.id).c_str(),
@@ -2746,6 +2794,7 @@ private:
   std::unique_ptr<AssignmentManager> assignments_;
   std::vector<std::pair<TaskId, AgentId>> last_lost_;
   bool have_state_{false};
+  bool home_fixed_{false};       // home_position 有給：返航點不跟第一筆 robot_state
   double last_state_{0.0};
   std::uint8_t mode_{RobotStateMsg::AUTO};
 
@@ -2784,6 +2833,11 @@ private:
   std::optional<swarm_cbba::Site> site_;           // 閘道：TaskSpec 的位置、設備實例（site_dir）
   ApprovalQueue approvals_;                        // 閘道：核准（12）
   std::string approval_policy_{"none"};
+  swarm_cbba::ValidateOptions spec_options_;   // 閘道：平台支援只警告（各台由註冊表推導能做的動作）
+  // 這台能做的動作（2026-11-20）：由註冊表推導（updateSupportedActions）；沒有註冊表時不限制
+  std::optional<swarm_cbba::Registry> action_registry_;
+  std::string platform_name_;
+  std::set<std::string> supported_actions_;
   std::string approvals_log_;
   rclcpp::Publisher<ApprovalStateMsg>::SharedPtr approvals_pub_;
   rclcpp::Service<ApproveTaskSrv>::SharedPtr approve_srv_;

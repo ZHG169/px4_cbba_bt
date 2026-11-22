@@ -73,6 +73,7 @@ set(CBBA_CORE_TESTS
   test_wire_incident_update
   test_incident
   test_coop_bidding
+  test_supported_actions
   test_comm
   test_exec_constraints
   test_assignment
