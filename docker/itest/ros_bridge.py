@@ -4,7 +4,8 @@
 sim 容器經線材網路連得到每一台 uav 的 DDS，所以在這裡：
   - 訂閱每台的 assigned、result、new_task（和 PX4 的位置、狀態），每則寫一行到 <dir>/events.jsonl
   - 讀 <dir>/commands.jsonl（itest.py 寫入），發話題、開始／停止週期性的假 robot_state
-  - 假身體（2026-11-16，itest group 的動畫；不用真的 BT）：收到 current_task 就直線走向任務點（速度由 itest 給），
+  - 假身體（2026-11-16，itest group 的動畫；不用真的 BT）：收到 current_task 就走向任務點（速度由 itest 給；
+    2026-11-22 起繞開這個平台不能進的區域：site-config/yard/zones.geojson 的 no_entry，代替真的狗的 Nav2），
     到了發 {"kind": "arrived"}；位置寫成 robot_state（10 Hz）與 {"kind": "pos"}（5 Hz）。task_id = 0 或 CANCELLED → 停下。
     body_hold 讓它停在原地（模擬當機）、body_mode 改 robot_state 的 mode（MANUAL 時 cbba_node 不出價）、
     note 寫一筆說明給動畫（{"kind": "note"}）
@@ -26,6 +27,93 @@ from rosidl_runtime_py.set_message import set_message_fields
 from rosidl_runtime_py.utilities import get_message
 
 
+# ---------- 假身體繞開禁入區（2026-11-22：原本直線走，狗會穿過禁狗區）----------
+ZONES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "site-config", "yard", "zones.geojson")
+ZONE_MARGIN = 1.0          # 離區域邊緣至少這麼遠
+CORNER_MARGIN = 1.3        # 繞過角落的點（比 ZONE_MARGIN 大一點，沿著邊走不會被當成穿過）
+PLATFORM_KEY = {"dog": "quadruped", "uav": "uav"}
+
+
+def load_blocks():
+    """{平台: [(x0, x1, y0, y1)]}：每個平台不能進的區域（外框；yard 的區域都是矩形）"""
+    try:
+        with open(ZONES, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for feat in doc.get("features", []):
+        ring = feat.get("geometry", {}).get("coordinates", [[]])[0]
+        if not ring:
+            continue
+        box = (min(p[0] for p in ring), max(p[0] for p in ring), min(p[1] for p in ring), max(p[1] for p in ring))
+        for plat, key in PLATFORM_KEY.items():
+            if key in feat.get("properties", {}).get("no_entry", []):
+                out.setdefault(plat, []).append(box)
+    return out
+
+
+def _crosses(a, b, box, m):
+    """線段 a→b 有沒有穿過外擴 m 的矩形內部（Liang–Barsky 裁切）"""
+    x0, x1, y0, y1 = box[0] - m, box[1] + m, box[2] - m, box[3] + m
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, a[0] - x0), (dx, x1 - a[0]), (-dy, a[1] - y0), (dy, y1 - a[1])):
+        if abs(p) < 1e-12:
+            if q <= 0:
+                return False
+        else:
+            r = q / p
+            if p < 0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 >= t1:
+                return False
+    return t1 - t0 > 1e-6
+
+
+def _inside(pt, box, m):
+    return box[0] - m < pt[0] < box[1] + m and box[2] - m < pt[1] < box[3] + m
+
+
+def plan_path(start, goal, blocks):
+    """start → goal 繞開 blocks 的最短路（角落的可視圖＋Dijkstra）；回傳要經過的點（含 goal）。
+    起點或終點本來就在某個區域裡（剛重設、或規劃器給錯）就不管那個區域，免得走不出來"""
+    active = [b for b in blocks if not _inside(start, b, ZONE_MARGIN) and not _inside(goal, b, ZONE_MARGIN)]
+    if not any(_crosses(start, goal, b, ZONE_MARGIN) for b in active):
+        return [goal]
+    nodes = [start, goal]
+    for b in active:
+        for x in (b[0] - CORNER_MARGIN, b[1] + CORNER_MARGIN):
+            for y in (b[2] - CORNER_MARGIN, b[3] + CORNER_MARGIN):
+                if not any(_inside((x, y), o, ZONE_MARGIN) for o in active):
+                    nodes.append((x, y))
+    n = len(nodes)
+    dist, prev, done = [float("inf")] * n, [-1] * n, [False] * n
+    dist[0] = 0.0
+    for _ in range(n):
+        u = min((i for i in range(n) if not done[i]), key=lambda i: dist[i], default=None)
+        if u is None or dist[u] == float("inf"):
+            break
+        done[u] = True
+        if u == 1:
+            break
+        for v in range(n):
+            if done[v] or any(_crosses(nodes[u], nodes[v], b, ZONE_MARGIN) for b in active):
+                continue
+            d = dist[u] + ((nodes[u][0] - nodes[v][0]) ** 2 + (nodes[u][1] - nodes[v][1]) ** 2) ** 0.5
+            if d < dist[v]:
+                dist[v], prev[v] = d, u
+    if prev[1] == -1:
+        return [goal]       # 找不到路：照直線（不應該發生，閘道與 CBBA 不會把任務放在走不到的地方）
+    path, i = [], 1
+    while i != 0:
+        path.append(nodes[i])
+        i = prev[i]
+    return path[::-1]
+
+
 def qos_of(spec, depth=20):
     return QoSProfile(
         depth=spec.get("depth", depth),
@@ -45,7 +133,8 @@ class Bridge(Node):
         self.periodic = {}          # key -> (publisher, msg, period, next)
         self.pending = []           # 等訂閱者出現的一次性訊息：(publisher, msg, id, deadline)
         self.last_pos = {}          # 位置每台最多 5 Hz 寫一次
-        self.bodies = {}            # 假身體：機號 -> {x, y, speed, task, target, arrived, frozen, pub, msg, next}
+        self.bodies = {}            # 假身體：機號 -> {x, y, speed, task, target, arrived, frozen, pub, msg, next, platform, path}
+        self.blocks = load_blocks() # 每個平台不能進的區域（假身體繞開，2026-11-22）
         self.last_body = time.time()
         ids = cfg["vehicles"]["ids"]
         topics = cfg["topics"]
@@ -137,7 +226,8 @@ class Bridge(Node):
             else:
                 target = (float(msg.position.x), float(msg.position.y))
                 if tid != b["task"] or target != b["target"]:   # 新任務，或同一個任務改版換了位置
-                    b.update(task=tid, target=target, arrived=False)
+                    b.update(task=tid, target=target, arrived=False,
+                             path=plan_path((b["x"], b["y"]), target, self.blocks.get(b["platform"], [])))
         self.emit({"kind": kind, "uav": vid, "msg": message_to_ordereddict(msg)})
 
     def on_dog(self, dog_id, msg):
@@ -194,7 +284,8 @@ class Bridge(Node):
                 msg = self.build(c["type"], c["fields"])
                 self.bodies[c["vid"]] = dict(x=float(c["x"]), y=float(c["y"]), z=float(c.get("z", 0.0)),
                                              speed=float(c["speed"]), task=0, target=None, arrived=False,
-                                             frozen=False, pub=pub, msg=msg, next=0.0)
+                                             frozen=False, pub=pub, msg=msg, next=0.0,
+                                             platform=c.get("platform", ""), path=[])
                 self.emit({"kind": "body", "uav": c["vid"], "x": c["x"], "y": c["y"], "speed": c["speed"],
                            "platform": c.get("platform", "")})
                 self.emit({"kind": "ack", "id": c["id"]})
@@ -238,13 +329,25 @@ class Bridge(Node):
         self.last_body = now
         for vid, b in self.bodies.items():
             if b["target"] is not None and not b["frozen"]:
+                # 沿著繞路的點走（最後一個是任務點）；這一步走完一個點就接著走下一個
+                left = b["speed"] * dt
+                path = b.get("path") or [b["target"]]
+                while left > 1e-9:
+                    tx, ty = path[0]
+                    dx, dy = tx - b["x"], ty - b["y"]
+                    d = (dx * dx + dy * dy) ** 0.5
+                    step = min(d, left)
+                    if d > 1e-6:
+                        b["x"] += dx / d * step
+                        b["y"] += dy / d * step
+                    left -= step
+                    if d - step <= 1e-6 and len(path) > 1:
+                        path.pop(0)
+                    else:
+                        break
+                b["path"] = path
                 tx, ty = b["target"]
-                dx, dy = tx - b["x"], ty - b["y"]
-                d = (dx * dx + dy * dy) ** 0.5
-                step = min(d, b["speed"] * dt)
-                if d > 1e-6:
-                    b["x"] += dx / d * step
-                    b["y"] += dy / d * step
+                d, step = ((tx - b["x"]) ** 2 + (ty - b["y"]) ** 2) ** 0.5, 0.0
                 if d - step <= 0.3 and not b["arrived"]:
                     b["arrived"] = True
                     self.emit({"kind": "arrived", "uav": vid, "task_id": b["task"], "x": b["x"], "y": b["y"]})

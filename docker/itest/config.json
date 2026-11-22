@@ -86,14 +86,16 @@
 
   "group": {
     "container": "cbba_gcs",
-    "gateway_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/gcs -r __node:=gcs_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_gateway.yaml -p state_dir:={state_dir}",
+    "gateway_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/gcs -r __node:=gcs_cbba_node --params-file $(ros2 pkg prefix swarm_cbba)/share/swarm_cbba/config/cbba_gateway.yaml -p state_dir:={state_dir} -p registry_dir:=/home/ncrl/CBBA_BT/registry -p site_dir:=/home/ncrl/CBBA_BT/site-config/yard",
     "gateway_stop_pattern": "__node:=gcs_cbba_node( |$)",
     "echo_pattern": "ros2 topic echo /gcs/",
-    "uav_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:=uav{id}_cbba_node -p agent_id:={id} -p agent_type:=UAV",
-    "body_speed": {"uav": 0.5, "dog": 1.0},
-    "special_dog": {"id": 52, "capability": "manipulator", "_說明": "G13：這隻狗多宣告一個能力，P3、P0 都要求它 → 只有它能做（其他狗出價 0、原因 capability）"},
-    "dog_positions": {"50": [0.0, 0.0], "51": [25.0, 0.0], "52": [0.0, 25.0]},
-    "_說明": "itest group（CB-4，2026-11-16）：閘道（機號 200）在 cbba_gcs 跑 cbba_node（cbba_gateway.yaml），用 ros2 service call /gcs/inject_task 注入角色組；/gcs/incident_updates、/gcs/fallback_request 用 ros2 topic echo 寫進輸出目錄（gcs 的 DDS 不經 mesh，sim 的 ros_bridge 看不到）。dog_positions 蓋掉 comm.dogs 的狗位置：dog1（50）在原點、dog2、dog3 在 25 m 外（distinct 的案例 1；2026-11-16 從 60 m 拉近，動畫裡走得到）。uav_start：無人機用 cbba_node 的預設參數（w_E 25、0.5 m/s、bundle 上限依平台），不用 comm 的 cruise_speed 5、max_bundle 5。body_speed：ros_bridge 假身體的速度（m/s），和 cbba_node 的速度一致"
+    "uav_start": "ros2 run swarm_cbba cbba_node --ros-args -r __ns:=/{ns} -r __node:=uav{id}_cbba_node -p agent_id:={id} -p agent_type:=UAV -p cruise_speed:=5.0 -p 'platform_speed:=[5.0, 3.0]' -p registry_dir:=/home/ncrl/CBBA_BT/registry -p site_dir:=/home/ncrl/CBBA_BT/site-config/yard",
+    "body_speed": {"uav": 5.0, "dog": 3.0},
+    "special_dog": {"id": 52, "capability": "manipulator", "_說明": "G13：這隻狗多宣告一個能力（2026-11-19 起由 registry/fleet.yaml 宣告：dog3 的 manipulator），P3、P0 都要求它 → 只有它能做（其他狗出價 0、原因 capability）"},
+    "dog_positions": {"50": [-35.0, 7.5], "51": [-35.0, -7.5], "52": [-15.0, 25.0]},
+    "uav_positions": {"1": [-40.0, -30.0], "2": [-40.0, -25.0], "3": [-40.0, -20.0]},
+    "dog_params": " -p cruise_speed:=3.0 -p 'platform_speed:=[5.0, 3.0]' -p registry_dir:=/home/ncrl/CBBA_BT/registry -p site_dir:=/home/ncrl/CBBA_BT/site-config/yard",
+    "_說明": "itest group（CB-4，2026-11-16）：閘道（機號 200）在 cbba_gcs 跑 cbba_node（cbba_gateway.yaml），用 ros2 service call /gcs/inject_task 注入角色組；/gcs/incident_updates、/gcs/fallback_request 用 ros2 topic echo 寫進輸出目錄（gcs 的 DDS 不經 mesh，sim 的 ros_bridge 看不到）。2026-11-19 起改用 yard 座標（site-config/yard）：uav_positions 是起降點 PAD_1～3、dog_positions 是充電樁 DOCK_1～3（蓋掉 comm 的位置；任務點都是相對載具位置算的，跟著落在 yard 裡）。速度（使用者 11/19）：無人機 5 m/s、狗 3 m/s——body_speed（ros_bridge 假身體）、uav_start 與 dog_params 的 cruise_speed（cbba_node 的估計）、platform_speed（協同出價估隊友）三處要一致。註冊表與區域（〈CBBA G0～G21〉P1～P5）：閘道、無人機、狗都給 registry_dir、site_dir（yard）；閘道對還沒實作的動作只警告（各台照執行端宣告的 supported_actions 決定能不能出價，docs/execution_backend_plan.md）。只用在 itest group，程式與 yaml 的預設不變（無人機 0.5 照 BT）。其他照預設參數（w_E 25、bundle 上限依平台），不用 comm 的 max_bundle 5"
   },
 
   "comm": {
