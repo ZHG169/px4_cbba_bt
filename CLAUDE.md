@@ -15,12 +15,16 @@ docker/                     模擬環境（sim、uavN、gcs 容器；mesh_net �
                             gz/：Gazebo 場景 fire_site.sdf（火警 tag 101、誘餌 tag 7、巡檢點）、patrol_site.sdf（3 綠＋5 紅，
                             由 gen_patrol_site.py 從 patrol_site_points.csv 產生）、demo_site.sdf、yard.sdf（伯宇的變電所，
                             yard_env.sdf.inc＋yard_points.csv 產生，2026-10-24）與 tag 0～7、101、mono_cam 模型
-registry/                   2-1b 註冊表（schema 1.0）：tools.yaml（能力＋bit）、platforms.yaml、fleet.yaml；cbba_node 的 registry_dir
+registry/                   2-1b 註冊表（schema 1.0）：tools、platforms、fleet、actions、objects、event_types、task_types；api.md（對外格式）
+site-config/yard/           場域：zones.geojson、devices.csv、pois.csv、docks.csv、event_rules.yaml（L6 事件範本，2026-11-23）
 ros2_ws/src/
-├── swarm_interfaces/       ROS 訊息 v1.6（＝機器狗端的 v1.2＋FireDetection；Task、RobotState、TaskResult、ManualOverride.srv…）
+├── swarm_interfaces/       ROS 介面（2.11.0；Task、RobotState、TaskResult、InjectTask、ExpandIncident、EventIncident…）
 ├── cbba_core/              CBBA 核心、機間封包、協定層、指派流程、離線模擬、測試（不依賴 ROS）；
 │                           狗的文件在 doc/ugv_test.md、doc/ugv_tuning.md
-├── swarm_cbba/             統一版 cbba_node（無人機和狗同一支，agent_type）、launch、yaml：照機器狗端的套件與介面（2026-10-12）
+├── swarm_cbba/             統一版 cbba_node（無人機和狗同一支，agent_type；閘道也是它）、launch、yaml；註冊表載入、TaskSpec 檢查
+│                           （匯出 swarm_cbba_registry）；假 adapter
+├── swarm_events/           L2～L6 事件流水線（2026-11-23）：RuleExpander（範本展開）、IncidentManager（累積、關聯、事件狀態機）、
+│                           GCS 的 event_manager 節點（/gcs/expand_incident、自動派遣、/gcs/incidents）
 ├── px4_waypoint_node/      PX4 端：takeoff_hover 起飛懸停、task_executor（簡易執行器）、px4_state_bridge（PX4 → RobotState）
 ├── uav_px4_bt/             無人機的 BT（正式 uav_task_manager_node＝伯宇骨架、備用 uav_bt_node）、避碰（avoidance：路權＋VO＋二階 CBF）、
 │                           flight_beacon 位置廣播
@@ -40,14 +44,14 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
   source /opt/ros/jazzy/setup.bash && source /home/ncrl/CBBA_BT/ros2_ws/install/setup.bash &&
   cd /home/ncrl/CBBA_BT/ros2_ws &&
   python3 -m colcon --log-base /out/log build --build-base /out/build --install-base /out/install \
-    --packages-select swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector --cmake-args -DCMAKE_BUILD_TYPE=Release &&
+    --packages-select swarm_interfaces cbba_core swarm_cbba swarm_events px4_waypoint_node uav_px4_bt apriltag_fire_detector --cmake-args -DCMAKE_BUILD_TYPE=Release &&
   cd /out/build/cbba_core && for t in test_*; do ./$t; done'
 ```
 
 - 掛載路徑要是 `/home/ncrl/CBBA_BT`（共用 install 裡的 px4_msgs 用絕對路徑）。
 - 容器裡沒有 `colcon` 指令，用 `python3 -m colcon`。
 - 編譯要零警告（`-Wall -Wextra -Wpedantic`）。
-- 使用者自己在 uav 容器編譯：`colcon build --symlink-install --packages-select swarm_interfaces cbba_core swarm_cbba px4_waypoint_node uav_px4_bt apriltag_fire_detector`。
+- 使用者自己在 uav 容器編譯：`colcon build --symlink-install --packages-select swarm_interfaces cbba_core swarm_cbba swarm_events px4_waypoint_node uav_px4_bt apriltag_fire_detector`（swarm_events 2026-11-23 起）。
 - 跑 `uav_px4_bt` 的測試前要 `source` ROS 環境（`test_tree` 要 ament_index）。
 - PX4 SITL 測試步驟：`cbba_core/doc/sitl_test.md`（`cbba_uav.sh`、`cbba_task.sh` 在 `docker/scripts`）。
 - 參數說明：`cbba_core/doc/parameters.md`（全部參數、要互相一致的參數、已知限制）；出價公式的實驗在 `cbba_core/cbba_parameters.md`。
@@ -257,6 +261,21 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 | CBBA 異質（CB-6；2-1a 寫 CB1 宜蓁、CB2 學弟，**使用者 2026-11-11：全部 CB 項目由使用者負責**） | 能力過濾、各平台自己的成本模型、UAV bundle 上限 1～2、precedence、optional 角色 |
 
 **使用者 2026-11-23 統一範圍**：〈2-1〉的 **L1～L8 全部是使用者的**（L1 快速偵測、L2 時序累積、L3 跨攝影機關聯、L4 VLM 驗證、L5 事件狀態機與派遣政策、L6 任務生成、L7 注入、L8 回報），加上下面 2-1b 的項目與全部 CB；伯宇只剩狗的 BT（8 個動作、ExecuteSteps、讀 teammates／回報 progress）、羅凡只剩 2-1c 編輯器。
+
+### L5＋L6 事件流水線（2026-11-23；規劃、決定、實作細節全在 `docs/l5_l6_plan.md`）
+
+```
+偵測 ─/gcs/detections─► event_manager（swarm_events）：L3 關聯 → L2 累積（log-odds）→ L4 VLM（介面）→ L5 狀態機 → L6 展開 ─inject_task─► 閘道 → CBBA
+        閘道的回饋（incident_updates、task_closed、task_reports、assignments、fallback_request、task_orphaned）─► event_manager
+```
+
+| 批 | 內容 | 狀態 |
+|---|---|---|
+| A（L6） | `site-config/yard/event_rules.yaml`（perimeter_intrusion、fire_response、single_dog_verify 和 itest 的範本一樣＋smoke／thermal／left_object）；`RuleExpander`（位置：incident＋偏移、區域觀察點、設備觀察姿態；preflight 移出禁入區、邊線外 0.5 m；TaskSpec 檢查＋機隊可行性 FLEET_INFEASIBLE、續航 ENDURANCE；`changedRoles`、角色 `retarget`）；`/gcs/expand_incident` **只回傳規劃結果、不注入** | ✅ 測過，`7806f3e` |
+| B（L2、L3、L5） | `IncidentManager`：觸發條件（zone_attr、time_rule、上班時段）、關聯（dt、r、track_id）、log-odds 累積（超過 1 s 沒偵測每秒乘 λ 遺忘）、θ_on 持續 min_duration、VLM（`vlm_enabled` 預設關；逾時 P0／P1 用 L2、P2／P3 再送）、θ_low（cost）／θ_high（`dispatch.theta_high` 0.8）→ 完整範本／派 1 隻確認／只記錄、證據變強升級、結案、誤報（E_TARGET_LOST 或值班）、升級派 fallback 子事件、過期、存檔；`event_manager` 節點自動派遣（改版只注入改了的角色、換範本取消多的角色）、`/gcs/incidents`、`/gcs/resolve_incident`、VLM 話題、`operator_notices`；swarm_interfaces 2.11.0 | ✅ 測過（單元、`expand_iface.sh` X1～X6、`incident_iface.sh` N1～N7），`7806f3e` |
+| C | **使用者 2026-11-23 的決定**：① **閘道統一發布角色／任務進度**，event_manager **依有效版本聚合**（只算目前正式指派版本、目前 revision），事件狀態 **DISPATCHED → ON_SITE → EXECUTING → RESOLVED**（多 EXECUTING）；② 補 2-1 階段 1 的 **案例 3（中信心只派 1 隻）、5（兩事件同時、依優先級）、6（移動入侵者、小位移不重新拍賣）、9（告警風暴合併成區域巡查）**；③ itest group 換掉假 Planner（偵測串流 → 閘道 → event_manager → 注入；G5／G7 的降級改由 event_manager 收 fallback_request） | **下一步** |
+
+注意：事件要「分數 ≥ theta_on 持續 min_duration_s」才派遣、超過 1 s 沒偵測就遺忘——測試要**連續送偵測**（`ros2 topic pub -r 2 -t N`），只送一兩筆會消退（`incident_iface.sh` N4 踩過）。編譯的套件清單要加 `swarm_events`。
 **勝翔（文件寫：三人中負荷最重）**：REG-1 註冊表 schema＋載入器、UAV-1 `uav_adapter`＋平台狀態機、UAV-2 SITL 接 Gazebo、PLN-1 範本展開器、PLN-2 九層檢查器、EVT-1 偵測器外掛介面＋`event_types.yaml`、UAV 端協同與 CBBA 介接。伯宇：Action 介面與失敗碼、狗 8 個動作、`ExecuteSteps`、搶佔取消、追蹤交接。羅凡：2-1c 積木編輯器（Node-RED）。
 里程碑：M0 **11/20** schema v1.0 凍結、`/registry` 格式；M1 12/4 UAV 在 SITL 經 uav_adapter 完成 go_to、patrol、inspect、track、return_to_dock（可取消、有回饋）；M2 12/18 展開器、檢查器、EVT-1、`ExecuteSteps`；M3 12/31 Gazebo 2 狗＋1 UAV：入侵範本、空中先到定位、追蹤交接、UAV 缺席降級、CBBA 異質介接；M4 1/8 實機；M5 1/15 驗收。文件的預案：uav_adapter 延誤時，檢查器的「續航」「機隊可行性」移到 M3。
 
@@ -572,7 +591,7 @@ docker/scripts/zenoh_sim.sh`，Dockerfile 那段也在那個 commit）。GCS 插
 - 注意：容器的主程序是 `sleep infinity`，**不要 `pkill -f "sleep infinity"`**（會把容器停掉，10/13 停過 sim 一次）；
   `px4_start` 改用 `tail -f /dev/null | px4_sitl.sh`，itest 結束時清掉。
 
-## 目前狀態（2026-11-20）
+## 目前狀態（2026-11-23）
 
 整體進度與缺失清單：`docs/progress.md`（10/12 更新，舊）；機間通訊的整理（做簡報用）：`docs/cbba_comm_status_20261012.md`（舊）。
 第 5 週的細節見「週計畫」底下的「第 5 週：弱網、100% 斷網」；下一階段見「下一階段：2-1b」。
@@ -625,7 +644,7 @@ yard 座標〔無人機在 PAD_1～3、狗在 DOCK_1～3〕、UAV 5／狗 3 m/s�
 11/17～18（任務欄位補齊）：`1889b71`（第一批）、`dc39cc5`（第二批，協定版本 5）、`c64791e`（第三、四批：改到的檔案重疊，合成一個）、
 第五批（簽章）`653953b`、整理批 `b08162c`（06 時間、09 協同出價）、`fa21c61`（tdr_design 收斂一節）、`21403a9`（README 11/18）；
 11/19：`e233dd0`（ExecuteStep.action 草案與假 adapter）、`c6defc7`（README 11/19）。
-**11/23 commit（測過，itest group 25 項全過）**：`a3dd0a6`（核心與介面）、`e653472`（itest group 三場景）、文件；push 由使用者做。以下是那批的內容：itest group 的 yard 座標、速度、registry／site、安全錨點、G16、G20、範本；`Task.assignment_version`（swarm_interfaces 2.9.0）；
+**11/23 commit（測過，itest group 25 項全過）**：`a3dd0a6`（核心與介面）、`e653472`（itest group 三場景）、`75a08e6`（文件）；之後 `7806f3e`（L5＋L6 A、B 批）＋CLAUDE.md 整理；push 由使用者做。以下是 a3dd0a6 那批的內容：itest group 的 yard 座標、速度、registry／site、安全錨點、G16、G20、範本；`Task.assignment_version`（swarm_interfaces 2.9.0）；
 能做的動作由註冊表推導（`unsupported_action`）；閘道對還沒實作的動作只警告；`fleet.yaml`（dog3 manipulator、三隻狗 speaker）、`task_types.yaml`（itest 角色）；
 `docs/execution_backend_plan.md`（決定紀錄）。
 **push 由使用者自己做**（11/18 起）；GitHub 上的狀態以使用者為準。
@@ -638,21 +657,10 @@ yard 座標〔無人機在 PAD_1～3、狗在 DOCK_1～3〕、UAV 5／狗 3 m/s�
 
 **使用者 11/16 的範圍**：完成 CB-4＋TDR → 用「指令注入＋假 BT／假 Planner」測試，先測到這裡；真的 BT、人機介面（Node-RED）之後再對接。
 
-0. **能做的動作與執行端**（11/19～20，`docs/execution_backend_plan.md` 是決定紀錄）：試做的模擬執行端（execution_bridge、
-   SimExecutionBackend、Gazebo 替身、itest `--exec-backend`）**使用者 11/20 拿掉**（備份在 session 暫存，沒 commit）。保留：
-   `Task.assignment_version`（swarm_interfaces 2.9.0）；**能做的動作由 cbba_node 用註冊表推導**（actions.yaml 的 open＋平台實作
-   ＋fleet.yaml 的能力扣掉故障的；`swarm_cbba::supportedActions`、`updateSupportedActions`），TaskSpec 有不能做的動作就不出價
-   （`unsupported_action`）；`SupportedActions.msg` 拿掉；閘道對還沒實作的動作只警告；fleet.yaml 三隻狗加 speaker（待伯宇確認）。
-   itest group 照原本的做法（yard 座標、5／3 m/s、registry／site、G16、G20、範本照 PDF 第 6 頁）。**11/20 單元＋itest group 測過，還沒 commit**
-1. **itest `group` 補到 G21**（使用者 11/19 的〈CBBA G0～G21 三個模擬場景〉PDF；G0～G16、G20 已有、11/20 過）：
-   **11/20 寫好 G18 核准、G19 回報與證據、G17 協同出價、G21A 搶占遲滯、G21B P0 看門狗；`group --dogs 3` 全部通過（11/20），還沒 commit**（`docker/itest/README.md` 的 group 表）；
-   假身體的成功回報都帶 completed_steps、final_position；閘道多記 approvals、task_reports、task_orphaned、incident_evidence。
-   寫 G17 時發現、改了 cbba_core：新任務第一次出價前就算協同等待（`CbbaComm::coopEtaFor`，原本要等下一次 reevaluate，
-   近的空閒狗先得標、0.4 s 就鎖定），單元 `CoopBidding.FirstBidAlreadyWaits`。
-   11/22 第一次跑 23／25：G8 是判斷讀錯數字（得標者自己的 log 只有第一筆出價，改看別台回報的 winner_bid）；G17 是 cbba_node 重開後返航點變成重開的地方（返航耗電估錯、出價偏低）→ **cbba_node 加參數 `home_position`**（沒給照舊用第一筆 robot_state），itest group 給起降板、充電樁；假身體繞開禁入區（`ros_bridge.plan_path`）；節點 log 改成接在後面（重開不蓋掉）。
-   **11/22 測試本身改成三個連續場景**（使用者：一個場景是一次連續的模擬，在裡面驗證各檢查點；場景一入侵＋火警閉環 14、場景二資源不足＋失聯＋降級 6、場景三禁區＋協同排程＋搶占 5；`GroupSuite.scene1～3`；任務點依 `--seed` 在 yard 隨機；11/23 全過、commit）。
-   **影片 11/20 改成三個場景**（`animate_group.py`：版面照使用者給的監控畫面〔左地圖卡、右任務卡＋相關 Agent 表〕、原速不暫停〔使用者 11/20〕、區域、出價原因、計時器期限、結果頁的量測時間；`docker/itest/README.md`）；之前寫的：影片照 PDF 排成三個場景（正常協同／失聯降級／政策與搶占，105～125 s），畫面參考使用者給的監控圖（左地圖、右任務卡＋Agent 狀態與原因碼）。
-   11/17 的 G0～G15 紀錄：18 項全過，`20261117_015231_group`
+0. **L5＋L6 的 C 批**（見「L5＋L6 事件流水線」）：閘道發布角色進度＋event_manager 依有效版本聚合（ON_SITE、EXECUTING）→ itest group 換掉假 Planner → 補 2-1 案例 3、5、6、9。之後是 L2、L3 的跨攝影機投影、L1 偵測器、L4 VLM 本體
+1. ~~itest group 補到 G21、三個連續場景、影片~~（11/20～23 完成、commit：`a3dd0a6` 核心與介面〔能做的動作由註冊表推導、協同出價第一次就算等待、`home_position`、`Task.assignment_version`〕、`e653472` itest 三場景、`75a08e6` 文件）。
+   三場景：場景一入侵＋火警閉環 14、場景二資源不足＋失聯＋降級 6、場景三禁區＋協同排程＋搶占 5（`GroupSuite.scene1～3`；任務點依 `--seed` 在 yard 隨機；假身體繞開禁入區；影片原速、監控版面）。
+   踩過的：G8 讀錯數字（得標者自己的 log 只有第一筆，改看別台的 winner_bid）；G17 返航點（cbba_node 重開後變成重開的地方 → 參數 `home_position`）；G6 禁區邊線（safe anchor 往外 0.5 m）
 2. **任務欄位補齊**（見「任務欄位補齊」一節）：第一批 01、02、04 測過、commit `1889b71`（11/18）；**第二批 05、08、07 11/18 commit**（協定版本 5、TASK_ANNOUNCE 128 B、swarm_interfaces 2.5.0；`zone_iface.sh`）；**第三批 10、12 11/18 測過、commit**（TaskSpec 檢查、任務 timeout_s、核准；swarm_interfaces 2.6.0；`exec_iface.sh`）；
    **第四批 11、03 11/18 測過、commit**（TASK_REPORT 14／15＋結果 outbox、report_policy、證據紀錄；swarm_interfaces 2.7.0；
    `report_iface.sh`；TaskResult 改了，狗的 BT 要重編）；**第五批 13 簽章 11/18 測過、commit**
