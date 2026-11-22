@@ -8,11 +8,14 @@
 #   detectors      會觸發的偵測器（下面 detectors 的名稱）；open 事件可以沒有
 #   trigger        觸發條件：zone_attr（偵測位置所在區域要有的屬性，zones.geojson 的 properties；any = 不限）、
 #                  time_rule（always／off_hours／on_hours）
-#   accumulate     時序累積（同一個關聯群組）：每一筆偵測 E ← λ·E + score，E ≥ theta_on 而且持續 min_duration_s 才成立；
-#                  E < theta_off 解除（遲滯）
+#   accumulate     時序累積（同一個關聯群組；2026-11-23 起照 2-1 原文用 log-odds）：每一筆偵測 s ← λ·s + log(p/(1−p))
+#                  （p 是偵測的 score，夾在 0.01～0.99）；沒有新偵測時每秒乘 λ 遺忘。s ≥ theta_on 而且持續 min_duration_s
+#                  才成立（往下驗證、派遣）；候選期間 s < theta_off 取消（遲滯）。融合信心 = sigmoid(s)（有 VLM 時用 VLM 的）
 #   associate      跨攝影機／機器人關聯：dt_s 秒內、r_m 公尺內（或同一個 track_id）算同一件事
 #   vlm            VLM 驗證：prompt_id、samples（取幾張）、timeout_s；沒寫 = 不用 VLM
-#   cost           漏報（miss）與誤報（false）的相對代價，決定派遣門檻：事件機率 ≥ false / (miss + false) 才派
+#   cost           漏報（miss）與誤報（false）的相對代價，決定派遣門檻 θ_low：事件機率 ≥ false / (miss + false) 才派
+#   dispatch       （我們加的，L5）theta_high：信心 ≥ 它派完整範本；θ_low ≤ 信心 < 它只派 1 隻確認（範本的 fallback_template）；
+#                  再低只記錄。沒寫 = 0.8
 #   locate         事件位置怎麼來：projection（攝影機投影）／asset（設備清單）／zone（區域）
 #   default_rule   預設範本（event_rules.yaml 的名稱）；open 事件沒有
 #   priority       P0～P3（P0 最高）；展開的任務照這個（CBBA 的搶占、失聯接手看它）
@@ -73,7 +76,7 @@ event_types:
     category: template
     detectors: [apriltag_fire, fire_smoke_yolo]
     trigger: {zone_attr: any, time_rule: always}
-    accumulate: {lambda: 0.8, theta_on: 2.0, theta_off: 0.5, min_duration_s: 1.0}   # apriltag 0.85 連續 3 筆約 2.0
+    accumulate: {lambda: 0.8, theta_on: 2.0, theta_off: 0.5, min_duration_s: 1.0}   # apriltag 0.85（logit 1.73）連續 2 筆約 3.1
     associate: {dt_s: 5, r_m: 2}
     cost: {miss: 20, false: 1}
     locate: projection

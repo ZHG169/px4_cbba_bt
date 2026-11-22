@@ -1,5 +1,8 @@
 # swarm_interfaces — 空地 CBBA 介面規格 v2.0
 
+> **2.11.0（2026-11-23）**：加 `EventIncident.msg`（/gcs/incidents）、`VlmRequest.msg`／`VlmResult.msg`、`ResolveIncident.srv`（L5 事件狀態機，swarm_events 的 event_manager）。只加新型別。
+> **2.10.0（2026-11-23）**：加 `PlannedRole.msg`、`ExpandIncident.srv`（L6 範本展開 `/gcs/expand_incident`，swarm_events；只回傳規劃結果，不注入）。只加新型別，既有的訊息不變。
+
 > **v2.0（2026-11-14，2-1b M0 合約第四節）只加欄位**：舊的 BT 不讀新欄位，**重新編譯就能跑**（型別雜湊變了，全隊含狗的 BT 都要重編）。
 > - `Task`（current_task、task_closed、task_announced）加 `priority`（P0～P3）、`platform`、`required_capabilities`（string[]）、
 >   `group_id`、`role_index`、`role_count`、`optional`、`floor`、`deadline_hard`、`release`、`expires`；舊型任務填對應後的值。

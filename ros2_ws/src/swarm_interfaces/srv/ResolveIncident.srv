@@ -1,0 +1,10 @@
+# 值班結案（2026-11-23；event_manager 的 /gcs/resolve_incident）：RESOLVED 或標誤報 FALSE_ALARM。
+# 只改事件狀態；還在執行的任務要取消的話另外用閘道的 cancel_task
+string event_id
+bool false_alarm
+string operator_name               # 必填
+string note
+---
+bool ok
+string reason
+string state                       # 結案後的狀態

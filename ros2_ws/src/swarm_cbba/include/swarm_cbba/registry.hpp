@@ -182,6 +182,7 @@ struct EventType
   bool has_cost{false};
   double cost_miss{1.0};
   double cost_false{1.0};
+  double theta_high{0.8};      // 我們加的（L5，2026-11-23）：dispatch.theta_high，信心 ≥ 它派完整範本、θ_low～它派 1 隻確認
   std::string locate;          // projection、asset、zone
   std::string default_rule;    // event_rules.yaml 的範本
   int priority{3};             // P0～P3

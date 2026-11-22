@@ -27,6 +27,20 @@ target_include_directories(fake_adapter PRIVATE include)
 target_link_libraries(fake_adapter cbba_core::cbba_core_core rclcpp::rclcpp rclcpp_action::rclcpp_action
   ${geometry_msgs_TARGETS} ${swarm_interfaces_TARGETS} yaml-cpp::yaml-cpp)
 install(TARGETS cbba_node fake_adapter DESTINATION lib/${PROJECT_NAME})
+
+# 給其他套件用的函式庫（2026-11-23，swarm_events 的範本展開器）：註冊表、場域、TaskSpec 檢查（不依賴 ROS）。
+# 上面的執行檔照舊自己編這些原始檔，不受影響
+add_library(swarm_cbba_registry src/registry.cpp src/spec_validator.cpp)
+set_target_properties(swarm_cbba_registry PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(swarm_cbba_registry PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
+target_link_libraries(swarm_cbba_registry PUBLIC cbba_core::cbba_core_core yaml-cpp::yaml-cpp)
+install(TARGETS swarm_cbba_registry EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+install(DIRECTORY include/ DESTINATION include)
+ament_export_include_directories(include)
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(cbba_core yaml-cpp)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)

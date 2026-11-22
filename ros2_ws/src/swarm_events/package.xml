@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>swarm_events</name>
+  <version>0.1.0</version>
+  <description>L5 事件狀態機與 L6 任務生成（event_rules.yaml 範本展開；/gcs/expand_incident）</description>
+  <maintainer email="a0977704724@gmail.com">zhg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>swarm_interfaces</depend>
+  <depend>swarm_cbba</depend>
+  <depend>cbba_core</depend>
+  <depend>yaml_cpp_vendor</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

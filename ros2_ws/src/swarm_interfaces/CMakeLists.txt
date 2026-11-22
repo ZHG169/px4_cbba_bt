@@ -29,9 +29,15 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ApprovalState.msg"
   "msg/TaskReport.msg"
   "msg/IncidentEvidence.msg"
+  "msg/PlannedRole.msg"
+  "msg/EventIncident.msg"
+  "msg/VlmRequest.msg"
+  "msg/VlmResult.msg"
   "srv/ManualOverride.srv"
   "srv/InjectTask.srv"
   "srv/ApproveTask.srv"
+  "srv/ExpandIncident.srv"
+  "srv/ResolveIncident.srv"
   "action/ExecuteStep.action"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
 )

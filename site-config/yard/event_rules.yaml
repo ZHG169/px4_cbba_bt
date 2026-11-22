@@ -1,0 +1,146 @@
+# 事件範本（L6 任務生成，PLN-1；2026-11-23，docs/l5_l6_plan.md 第 3 節）：yard 場域
+#
+# event_types.yaml 的 default_rule 指到這裡的名稱。swarm_events 的 RuleExpander 把一個事件（Event：位置、區域、track_id、
+# 設備…）照規則展開成一組角色（同一個 group），每個角色一個 CBBA 任務；展開完先跑 TaskSpec 檢查（spec_validator）、
+# 機隊可行性、續航，再由呼叫的人注入（/gcs/expand_incident 只回傳規劃結果，不注入）。
+#
+# 規則
+#   requires_approval  沒寫照事件類型（event_types.yaml）
+#   priority           P0～P3；沒寫照事件類型
+#   fallback_template  降級時改用的規則（閘道發 FallbackRequest 時帶這個名稱）
+#   report_policy      寫進每個角色的 TaskSpec（registry/api.md 4.3）
+#   coupling           all_or_nothing、distinct（要不同載具的角色名稱）、sync_window_s、
+#                      precedence（[[A, B], …] = B 等 A 完成；步驟的 wait_for 也會算進去）
+# 角色
+#   role               task_types.yaml 的 roles
+#   platform           uav、quadruped、any（狗和 UAV 都能競標）
+#   required_capabilities  tools.yaml 的能力
+#   optional、skip_satisfies   沒人能做時略過；略過時等它的角色視為滿足
+#   location           角色的觀察點（CBBA 的任務位置；go_to 沒寫 location 時填這個）：
+#                        incident（事件位置）、{poi: <role>}（事件所在區域、這個平台的觀察點，多個取最近；沒有就用 incident）、
+#                        {asset: <設備>}（設備清單的觀察姿態）、{zone: <區域>}（區域中心）、{dock: <id>}
+#   offset             [dx, dy]：加在 incident 位置上（poi 找不到時也用）
+#   value、service_time_s   CBBA 的價值、現場執行時間（預設 100、30 s）
+#   retarget           false：事件位置更新時不跟著改這個角色（追蹤目標的 UAV 靠 track_id 跟著走、遠處的觀察員）；預設 true
+#   steps              2-1b 的通用 steps；wait_for 用角色名稱（{role: aerial_overwatch, milestone: target_localized}），
+#                      展開時換成 role_index。字串裡的 {incident.track_id}、{incident.object}、{incident.asset}、
+#                      {incident.zone}、{incident.event_id} 會代換
+# 位置的可達性（2-1 第三節）：限平台的角色的觀察點落在這個平台的禁入區 → 移到最近的可達點（記在 location_source）；
+# 不限平台（any）的照原位置，能不能進由各台的出價決定
+schema_version: "1.0"
+
+rules:
+  # 周界入侵（itest group 場景一、G14）：空中監看 optional ＋ front／rear 包夾（要不同的狗、會合、等 UAV 定位）＋ 不限平台的觀察員
+  perimeter_intrusion:
+    fallback_template: single_dog_verify
+    coupling: {all_or_nothing: true, distinct: [front, rear], sync_window_s: 15}
+    roles:
+      - role: aerial_overwatch
+        platform: uav
+        required_capabilities: [mobility_air, rgb_camera]
+        optional: true
+        skip_satisfies: true
+        location: incident
+        offset: [0, 0]
+        retarget: false
+        steps:
+          - {action: go_to}
+          - {action: track, object: person, params: {duration_s: 5}}
+      - role: front
+        platform: quadruped
+        required_capabilities: [mobility_ground, rgb_camera]
+        location: {poi: front}
+        offset: [3, 0]
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: person, params: {duration_s: 3},
+             wait_for: [{role: aerial_overwatch, milestone: target_localized}], sync: front_rear}
+          - {action: speak, params: {template: intrusion_warning}}
+      - role: rear
+        platform: quadruped
+        required_capabilities: [mobility_ground, rgb_camera]
+        location: {poi: rear}
+        offset: [-3, 0]
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: person, params: {duration_s: 3},
+             wait_for: [{role: aerial_overwatch, milestone: target_localized}], sync: front_rear}
+      - role: observer
+        platform: any
+        required_capabilities: [rgb_camera]
+        location: incident
+        offset: [0, -6]
+        retarget: false
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: person, params: {duration_s: 3}}
+
+  # 火警（itest group 場景一、G15）：空中盯火 optional ＋ 地面確認；結果回報給 GCS 與值班、要照片
+  fire_response:
+    fallback_template: single_dog_verify
+    report_policy: {channels: [gcs, operator], required_findings: [image]}
+    roles:
+      - role: aerial_overwatch
+        platform: uav
+        required_capabilities: [mobility_air, rgb_camera]
+        optional: true
+        skip_satisfies: true
+        location: incident
+        offset: [0, 2]
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: fire, params: {duration_s: 10, stream: true}}
+      - role: ground_fire_verify
+        platform: quadruped
+        required_capabilities: [mobility_ground, rgb_camera]
+        location: incident
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: fire, params: {duration_s: 3}}
+
+  # 降級：派 1 隻狗確認（中信心事件 NEEDS_CHECK、all-or-nothing 湊不齊、P0 沒人接時的 fallback；itest 場景二 G7）
+  single_dog_verify:
+    roles:
+      - role: verify
+        platform: quadruped
+        required_capabilities: [mobility_ground, rgb_camera]
+        location: incident
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: "{incident.object}", params: {duration_s: 3}}
+
+  # 煙霧：只在區域外的安全距離觀察（2-1：煙會往上飄，不取煙的位置，任務目標設為區域外的安全觀察點）
+  smoke_check:
+    fallback_template: single_dog_verify
+    roles:
+      - role: observer
+        platform: quadruped
+        required_capabilities: [mobility_ground, rgb_camera]
+        location: incident
+        offset: [0, -5]
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: smoke_region, params: {duration_s: 5, standoff_m: 5}}
+
+  # 設備過熱：到設備的觀察姿態用熱像確認（yard 的機隊沒有熱像儀 → 機隊可行性不通過，交給值班）
+  thermal_check:
+    roles:
+      - role: responder
+        platform: quadruped
+        required_capabilities: [mobility_ground, thermal_camera]
+        location: {asset: "{incident.asset}"}
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: "{incident.asset}", params: {mode: thermal, duration_s: 5}}
+
+  # 遺留物：安全距離外近拍，不移動物品
+  left_object_check:
+    roles:
+      - role: observer
+        platform: quadruped
+        required_capabilities: [mobility_ground, rgb_camera]
+        location: incident
+        offset: [3, 0]
+        steps:
+          - {action: go_to}
+          - {action: inspect, object: bag, params: {duration_s: 5, standoff_m: 3}}

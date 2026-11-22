@@ -1,0 +1,22 @@
+# 範本展開（L6 任務生成，2026-11-23；docs/l5_l6_plan.md A 批）：/gcs/expand_incident（swarm_events 的 event_manager）
+# 給一個事件，照 event_rules.yaml 展開成一組角色並檢查（TaskSpec、機隊可行性、續航）。**只回傳規劃結果，不注入 CBBA**：
+# 要派的話由呼叫的人對每個角色呼叫 /gcs/inject_task（incident_id = event_id、role、revision）
+string event_id
+string event_type                  # event_types.yaml 的名稱
+string rule                        # 空 = 事件類型的 default_rule（降級時給 fallback_template 的名稱）
+uint16 incident_revision
+geometry_msgs/Point location       # 事件位置（map ENU）
+float32 radius_m
+string zone                        # 空 = 由位置判斷
+string track_id
+string asset                       # 設備 id（類別:實例）；locate: asset 的事件
+uint16[] available_agents          # 機隊可行性只看這些機號；空 = fleet.yaml 全部
+---
+bool ok
+string code                        # 失敗時：UNKNOWN_EVENT_TYPE、UNKNOWN_RULE、BAD_LOCATION、SPEC_INVALID、FLEET_INFEASIBLE
+string reason
+string rule                        # 實際用的規則
+string zone                        # 事件所在區域
+PlannedRole[] roles                # 失敗時可能帶已展開到一半的角色（給除錯）
+string[] warnings                  # TaskSpec 的警告、ENDURANCE、optional 角色沒有能做的載具
+string plan_json                   # 整組（registry/api.md 第 4 節的格式）

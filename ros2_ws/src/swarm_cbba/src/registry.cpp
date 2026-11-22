@@ -311,6 +311,9 @@ EventType loadEventType(const std::string & name, const YAML::Node & n, const Wh
     e.cost_miss = need<double>(c, "miss", cw);
     e.cost_false = need<double>(c, "false", cw);
   }
+  if (const YAML::Node d = n["dispatch"]) {   // 我們加的（L5，2026-11-23）：信心 ≥ theta_high 派完整範本
+    e.theta_high = optionalField<double>(d, "theta_high", 0.8, w.sub("dispatch"));
+  }
   e.locate = optionalField<std::string>(n, "locate", "", w);
   e.default_rule = optionalField<std::string>(n, "default_rule", "", w);
   e.priority = parsePriority(need<std::string>(n, "priority", w), w);
@@ -987,6 +990,9 @@ std::vector<std::string> checkRegistry(const Registry & reg)
     }
     if (e.has_cost && (!(e.cost_miss > 0.0) || !(e.cost_false > 0.0))) {
       errors.push_back(at + " 的 cost（miss、false）要 > 0");
+    }
+    if (!(e.theta_high > 0.0) || e.theta_high > 1.0) {
+      errors.push_back(at + " 的 dispatch.theta_high 要在 (0, 1]");
     }
     if (!e.locate.empty() && !oneOf(e.locate, {"projection", "asset", "zone"})) {
       errors.push_back(at + " 的 locate " + e.locate + " 要是 projection／asset／zone");

@@ -84,8 +84,9 @@ def forbidden_zone(zones, x, y, platform):
     return None
 
 
-def safe_anchor(zones, x, y, platform, step=0.5, reach=20.0):
-    """離 (x, y) 最近、這個平台可以進的點（由內往外繞圈找）；本來就可以 → 原點"""
+def safe_anchor(zones, x, y, platform, step=0.5, reach=20.0, margin=0.5):
+    """離 (x, y) 最近、這個平台可以進的點（由內往外繞圈找）；本來就可以 → 原點。
+    找到的點再往外推 margin（2026-11-23：原本會停在禁區的邊線上，itest 判在區外、閘道判在區內，G6 被拒絕）"""
     if forbidden_zone(zones, x, y, platform) is None:
         return x, y
     r = step
@@ -94,8 +95,9 @@ def safe_anchor(zones, x, y, platform, step=0.5, reach=20.0):
         for k in range(n):
             a = 2 * math.pi * k / n
             cx, cy = x + r * math.cos(a), y + r * math.sin(a)
-            if forbidden_zone(zones, cx, cy, platform) is None:
-                return round(cx, 2), round(cy, 2)
+            ox, oy = x + (r + margin) * math.cos(a), y + (r + margin) * math.sin(a)
+            if forbidden_zone(zones, cx, cy, platform) is None and forbidden_zone(zones, ox, oy, platform) is None:
+                return round(ox, 2), round(oy, 2)
         r += step
     return x, y
 
