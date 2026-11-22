@@ -27,7 +27,7 @@ python3 docker/itest/itest.py loss --tasks 3                   # 每次 3 個任
 python3 docker/itest/itest.py loss --dogs 3                    # 空地（2026-11-09）：3 架無人機＋3 隻狗，每次 12 個任務（空中 6、火警＋巡檢 6）
 python3 docker/itest/itest.py comm --dogs 3 --only C9          # 100% 斷網，空地各自退化成單機
 python3 docker/itest/itest.py demo --world yard --scenario blackout --seed 7 --dog bt   # 100% 斷網的任務退化（真的 BT，報告 B1～B4）
-python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（CB-4，2026-11-16）：閘道注入角色組＋假身體、假 Planner，G0～G13，約 8～10 分鐘；group.mp4
+python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（CB-4，2026-11-16）：閘道注入角色組＋假身體、假 Planner；2026-11-22 起三個連續場景驗證 G0～G21（25 項），--seed 重現；group.mp4
 ```
 
 容器裡已經有在跑的節點、PX4、Gazebo 時會停下來，避免打斷你正在做的事；加 `--kill-existing` 先關掉再跑。
@@ -55,36 +55,35 @@ python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（C
 其他台照 comm 的方式啟動、假 robot_state；BT 用 `task_progress`、`incident_update` 話題假裝；Planner 由 itest 自己扮演（讀 `gcs_incident_updates.txt`、`gcs_fallback_request.txt` 後 `inject_task`）。`/gcs/incident_updates`、`/gcs/fallback_request`
 用 `ros2 topic echo` 寫進輸出目錄的 `gcs_*.txt`，閘道的 log 是 `node_gcs.log`。要 `--dogs 2` 以上，`--dogs 3` 才跑得到 G5 的「角色比狗多」）
 
-載具是 ros_bridge 的**假身體**（2026-11-16，不用真的 BT）：收到 current_task 就直線走過去（無人機 0.5、狗 1.0 m/s，`group.body_speed`），
+每一項開始時，沒有載具手上有任務就把假身體放回出發點（和 Gazebo yard 一樣：無人機起降板、狗的充電樁；2026-11-20）。**任務點依種子在整個 yard 隨機**（2026-11-20，`--seed N` 重現，沒給就用時間；種子記在 G0 的結果與 `group_plan.json`）：圍牆內、不在設備上（`worlds.yard.demo.keep_out`）、平台可以進；同一組的角色彼此 3～10 m；G13、G21A 的低優先級任務離狗 25～45 m（注入高優先級時還在路上）；G17 的協同任務點離巡檢點 15～35 m、比空閒的狗近 6 m 以上；G16 在禁區裡隨機。載具是 ros_bridge 的**假身體**（2026-11-16，不用真的 BT）：收到 current_task 就直線走過去（無人機 0.5、狗 1.0 m/s，`group.body_speed`），
 到了才回報 progress／完成；`body_hold` 模擬斷線（同時停掉 cbba_node）、`body_mode` 改 mode（MANUAL 時不出價）。無人機的 cbba_node 用
 **預設參數**（`group.uav_start`：w_E 25、half_life 60/120/300/600 s、0.5 m/s、bundle 上限依平台）。結束後 `animate_group.py`
 （sim 容器畫每一格）＋主機 ffmpeg → **`group.mp4`**（4 倍速；每段測試一個標題，右邊列角色的執行者、狀態、gate 與事件）；`group_plan.json` 記每段的時間與角色。
 
-| 項目 | 測什麼 | 通過的條件 |
-|---|---|---|
-| G0 | 節點、閘道上線 | 每台的 assigned 收得到、閘道在跑 |
-| G1 | precedence | 空中角色（UAV）＋地面角色（step 1 wait_for target_localized）：狗的 gate WAITING；UAV 回報定位 → 10 s 內 OPEN（記時間） |
-| G2 | incident | UAV 發 incident_update＋宣告定位 → `/gcs/incident_updates` revision 1、狗的 teammates incident revision 1、gate 照樣 OPEN |
-| G3 | 會合點 | 兩個地面角色 step 1 sync "meet"：只有一隻到時 WAITING，兩隻都到後都 OPEN |
-| G4 | distinct 案例 1 | dog1 靠近 front、rear，其他狗遠：兩個角色由不同的狗拿 |
-| G5 | distinct 案例 2 | all-or-nothing、角色比狗多一個：不發 current_task；10 s（group_recovery_timeout_s）後整組取消、`fallback_request`（failure_version 1） |
-| G6 | 假 Planner：incident 更新後重新展開 | 只對 TaskSpec 改了的地面角色 `inject_task` 改版（revision 2、incident_revision 1）：閘道 REVISED、執行中的狗收到 revision 2 的 current_task；空中角色維持 revision 1 |
-| G7 | 假 Planner：fallback | 讀 `fallback_request`，展開 single_dog_verify（一個地面角色、新的事件）注入 → 15 s 內有狗接 |
-| G8 | 異質分工 | 限無人機、限狗、不限平台三個角色：限定的只給對的平台；不限平台的得標者在出價表（cbba_node log）裡出價最高 |
-| G9 | 失聯接手成功（做法 A） | 執行中的狗斷線 → ≥ 10 s（P0 接手時限）後別隻狗接手；25 s 內沒有 fallback、任務沒被關閉 |
-| G10 | 接手逾時才 fallback | 其他狗 MANUAL、只有一隻能做；它斷線後 19 s 內沒有取消，20～30 s（規則 ≈ 21.5 s）出現 fallback_request，地面角色和依賴它的空中角色都取消 |
-| G11 | 非 all-or-nothing 連鎖撤銷 | 取消 A → 依賴 A 的 B 在 6 s 內取消、fallback_request；不依賴的 C 照做 |
-| G12 | optional 略過 | 無人機都 MANUAL：optional 的空中角色 30 s 內被關閉、閘道 log「optional 角色 … 略過」；必要的地面角色照做 |
-| G13 | 優先級搶占 | 只有一台能做：dog3 多宣告 `manipulator`（`group.special_dog`），P3、P0 都要求它 → dog3 前往 P3 途中注入 P0：10 s 內中斷 P3 換成 P0，做完 40 s 內接回 P3；P3 沒被關閉、別台沒拿過 |
-| G14 | 狗偵測到人 → 入侵範本 | dog1 發 `detection`（person）→ `/gcs/detections`（來源、位置正確）→ 假 Planner（寫死）展開 perimeter_intrusion：aerial_overwatch（UAV、optional、skip_satisfies）＋front＋rear（狗、all-or-nothing、distinct、sync_window 15、inspect 等 target_localized）→ overwatch 給 UAV、front／rear 不同的狗；current_task 的 spec、group_id 一致；UAV 定位、兩隻狗到位後 gate 都 OPEN；全部完成 |
-| G14D | 去重 | 同一個偵測再給假 Planner 一次 → 閘道回 duplicate、同一組 task_id、group_id |
-| G15 | UAV 偵測到火 → 狗接手 | uav1 發 `detection`（fire）→ 假 Planner 展開 fire_response：air_fire_watch（UAV、optional）＋ground_fire_verify（狗）→ 地面角色給狗、每台 UAV 對它出價 0（出價表）；全部完成 |
-| G15R | 補發 | dog3 在建組前離線、建組後回來 → 15 s 內認得兩個角色（task_announced） |
+**2026-11-22 起照三個場景跑**（使用者：一個場景是一次連續的模擬，在裡面驗證各檢查點，不是每項做完再剪成影片）。
+場景開始時假身體放回出發點，之後整個場景連續跑。`--only S1`（或其中任一個檢查點）會跑整個場景。
 
-**影片 `group.mp4`**（2026-11-17，照〈CBBA G0～G15 測試與影片規劃〉第 8 頁）：約 80～90 s，章節順序：測試架構（4 s）→ ① 異質可行性 G8 → ② 必要角色完整性 G4＋G5 →
-③ Optional 降級 G12 → ④ 時序協同 G1＋G3 → ⑤ 一致與恢復 G9、G10、G11、G13 → G14 → G15 → 結論（G0～G15 狀態，沒跑的不標 PASS）。每段先顯示 Expected、
-關鍵狀態（itest 的 `key`）凍結 1.5 s 顯示 PASS／FAIL 證據、倍速依章節長度自動算（最多 8 倍，右上角顯示）、斷線後顯示計時器、G14／G15 用星號標偵測來源。
-圖示和 demo 一樣（無人機、狗、旗子；旗子顏色 = 優先級，空心 = optional，做完灰）；文字是英文（容器沒有中文字型）。
+| 場景 | 一次模擬的劇情 | 檢查點（通過的條件） |
+|---|---|---|
+| 場景一 入侵＋火警完整閉環（14） | dog1 偵測到人 → 閘道 → 入侵範本（UAV 空中監看 optional、front、rear、不限平台的 observer）→ CBBA 組隊 → 兩隻狗到會合點 → UAV 定位 → 人移動、UAV 更新事件 → Planner 改版 → 完成；UAV 看到反光（誤報，值班拒絕）→ UAV 看到火 → Planner 第一次 spec 錯 → 改正、要核准 → 核准 → 狗確認、回報 | **G0** 6 台＋閘道上線；**G14D** 同一個偵測重送 → 同一組；**G4** front、rear 不同的狗；**G8** overwatch 給 UAV、front／rear 給狗、observer 給 TDR 出價最高者；**G3** 先到的狗 gate 在等 `sync`；**G1** 兩隻都到了還在等 `target_localized`、定位後 10 s 內都 OPEN；**G2** 閘道接受更新、狗的 incident revision 1、gate 仍 OPEN；**G6** 只有 front／rear 改版到 2、overwatch／observer 仍 1；**G14** 入侵閉環完成；**G20** UNKNOWN_ACTION、PARAM_OUT_OF_RANGE 被擋、機器人沒收到；**G18** 等核准時機器人收不到、核准後注入有狗接、誤報拒絕不建任務；**G15** 地面角色給狗、無人機出價 0、火警閉環完成；**G15R** 建組前離線的狗回來 15 s 內認得角色；**G19** incident_evidence 有整筆、spec 只帶 uri＋信心值、回報 completed_steps 2、2 個附件、最後位置、channels gcs＋operator |
+| 場景二 資源不足＋失聯＋降級恢復（6） | 無人機停飛 → optional 空中角色 → 要 4 隻狗的事件 → fallback 單狗確認 → 那隻斷線 → 無人機恢復、兩隻狗被人工接管、剩下那隻也斷線 → 值班取消一個角色 | **G12** optional 空中角色 30 s 內略過、地面角色照做；**G5** 4 個角色 3 隻狗：沒發 current_task、fallback_request、整組取消；**G7** Planner 注入 single_dog_verify、有狗接；**G9** 那隻斷線 ≥ 10 s 後別隻接手、25 s 內沒有 fallback；**G10** 斷線後 19 s 內不取消、20～30 s fallback、兩個角色都取消；**G11** 取消 A → B 取消、C 照做、fallback |
+| 場景三 禁區＋協同排程＋優先級搶占（5） | 禁狗區的觀察點 → 巡檢中的狗遇到協同任務 → 唯一能做的狗在 P3 巡檢中來了 P0 → 同級任務 B1、B2 → 狗都被人工接管時來了 P0 | **G16** 狗 zone_forbidden、無人機接，限狗的被拒（ZONE_FORBIDDEN）；**G17** 地面角色排在巡檢中那隻狗的巡檢後面、巡檢做完才前往、UAV 觀測完 gate 才 OPEN；**G13** 10 s 內換成 P0、P3 沒被關閉、做完接回；**G21A** B1（margin 100 %）排在後面、B2（價值 400、margin 20 %）10 s 內搶占；**G21B** 8～14 s FallbackRequest（P0_UNASSIGNED）＋task_orphaned、恢復後有狗接 |
+
+**影片 `group.mp4`**（2026-11-20，照〈CBBA G0～G21 三個模擬場景〉第 3～7 頁）：25 個項目分在三個場景，**原速播放、中間不暫停**
+（使用者 11/20），長度約等於測試實際的時間（約 5 分鐘）＋片頭 8 s、結果頁 10 s。順序：場景 1 正常協同（G14、G1、G3、G4、G2、G6、G8、G15、
+G18、G19、G20）→ 場景 2 失聯降級（G5、G7、G9、G10、G11、G12）→ 場景 3 政策排程（G16、G17、G13、G21A、G21B）。G15R 在 G15 那段裡。
+版面照使用者給的「CBBA 即時任務與 Agent 監控」：左邊地圖卡（標題是場景・階段・項目；固定看整個 yard、方位和 Gazebo 一樣〔起降板在左下〕、正方形格線；
+只有遇到禁區的段落才畫禁區〔禁狗紅、禁飛紫〕；紅旗＋優先級、移動方向箭頭、圖例；標籤自動避開彼此）；右邊三個數字（進行中、已指派、不可接）、
+P0～P3 四張任務卡常駐（英文事件名稱；沒有就是灰色空卡）、目前任務的**相關 Agent 表**
+（角色、狀態、電量〔假身體固定 90 %〕、原因：node log 的出價表 WINNER、LOWER_BID、ZONE_FORBIDDEN…或 ETA）；右下平常是 Expected，
+關鍵狀態發生後 4 s 顯示 PASS／FAIL 證據（不停畫面）；計時器旁顯示期限。`--slow 1.5` 可以再放慢。
+只重畫影片（不重跑測試）：
+
+```bash
+R=docker/itest/out/<執行>_group
+docker exec cbba_sim python3 /home/ncrl/CBBA_BT/docker/itest/animate_group.py /home/ncrl/CBBA_BT/$R --frames /home/ncrl/CBBA_BT/$R/frames
+ffmpeg -y -framerate 10 -i $R/frames/%05d.png -c:v libx264 -pix_fmt yuv420p -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" $R/group.mp4 && rm -r $R/frames
+```
 
 **uav：UAV 整串**（`fire_site` 場景）
 

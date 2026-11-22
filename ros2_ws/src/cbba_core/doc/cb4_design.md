@@ -292,6 +292,7 @@ NO_WINNER、HOLDER_LOST；中途換成別的原因不改、不重新計時）。
 | 估別台的時刻 | 前置角色的持有者（正式指派，沒有就用得標者）到它的任務：直線距離 / (`platform_speed`[平台] × speed_margin)；accepted、en_route ≈ 現在，arrived、started、target_*、sync_reached ≈ 到達（已回報 arrived 就是現在），has_observation、completed ≈ 到達 + 執行時間。**不看它路徑上排在前面的任務**（AGENT_STATE 的 path 有，之後需要再加） |
 | 會合 | 自己和同組其他 `sync_window_s` > 0 的角色（A 層的近似：spec 的會合點名稱只在執行端分）：隊友最早、最晚的預估到達；開始 = max(自己, min(最晚, 第一個到的 + sync_window_s))，和執行端的 `evaluateSync` 一樣逾時照樣開始。已回報 sync_reached／arrived 的算現在到；已結束、取消、過期的不等 |
 | 不知道時 | 還沒有得標者、得標者是自己（自己的路徑順序在出價裡算）、不知道位置或平台速度：不加限制（樂觀，和第一階段一樣） |
+| 第一次出價（2026-11-20） | 新任務在 `CbbaComm::addTask` 交給核心之前就算好等待（`coopEtaFor`，和 `updateCoopEta` 共用）。原本只在 reevaluate 更新：第一次出價當成「到了就能開始」，近的空閒載具先得標、`assign_hold` 0.4 s 後就鎖定，之後的預估改不了得標者（itest G17 發現）。測試 `CoopBidding.FirstBidAlreadyWaits` |
 | 抖動 | 預估變動超過 `coop_eta_tolerance`（2 s）才更新；各台用同樣的來源（得標者、AGENT_STATE 的位置），同一個任務看到的大致一樣：等待對所有出價者一樣，近的還是比較省電（同分時照舊），主要的差別是**等待期間先做別的任務**、出價不再高估 |
 | 收斂 | 等待只依賴「別的角色」的得標者，前置角色自己的出價不受影響；會合的角色互相依賴，但每台只用隊友的位置估，不用隊友的出價；`coop_bidding: false` 退回第一階段 |
 | 參數 | cbba_node：`coop_bidding`（true）、`coop_eta_tolerance`（2 s）、`platform_speed`（[uav, quadruped]，預設 [0.5, 1.0]；有註冊表時用 platforms.yaml 的 cruise_speed）。全隊要一樣 |
@@ -299,4 +300,4 @@ NO_WINNER、HOLDER_LOST；中途換成別的原因不改、不重新計時）。
 
 PDF 的四個驗收項目（第一階段，已經有測試）對照在 `test_coop_bidding.cpp` 開頭。第二階段的測試：`test_coop_bidding`
 （`CoopScoring` 2 項：等待時先做別的任務、會合最多等 window；`CoopBidding` 5 項：前置角色的預估、spec 的 wait_for、沒有得標者不加限制、
-前置完成後清掉、會合看到隊友的預估到達）。
+前置完成後清掉、會合看到隊友的預估到達、第一次出價就有等待）。
