@@ -10,6 +10,16 @@
 //   輸出：incidents（EventIncident，內容變了才發）、vlm_request、operator_notices（給值班，std_msgs/String）、
 //   服務 resolve_incident（值班結案、標誤報）。
 //
+// C 批（2026-11-23）：
+//   進度：閘道的 assignments 帶角色進度（swarm_interfaces 2.12.0）；只算 progress_assign_version == assign_version、
+//     progress_revision == revision、assign_state RESERVED／ACTIVE 的（換人、改版後的舊進度不算）→ 角色 ASSIGNED／ACTIVE／
+//     ARRIVED（arrived 或 phase ARRIVED、ARRIVED_WAITING）／EXECUTING（started）；phase EN_ROUTE、ACCEPTED 一律不算到場
+//     （同一次指派改版後重新出發）。事件依角色聚合 DISPATCHED → ON_SITE → EXECUTING → RESOLVED（IncidentManager）
+//   核准：訂 approvals：INJECTED → 記角色的 task_id（要核准的角色注入時 task_id 是 0）；REJECTED → 值班判定誤報（FALSE_ALARM）
+//   誤報、拒絕：事件變成 FALSE_ALARM／REJECTED 時取消它還開著的角色任務
+//   證據：偵測的 attrs（JSON）帶 snapshot_uri、clip_uri、evidence_uri → 注入時帶給閘道（evidence_uri、camera_ids…）
+//   告警風暴（2-1 案例 9）：storm_max_per_zone（3；0 = 不合併）、storm_rule（zone_patrol）
+//   approval_event_types：這些事件類型的派遣一律要值班核准（場域政策；例如 itest 的 fire；注入時才讀，可以 ros2 param set）
 // 參數：registry_dir、site_dir（必填，和閘道同一份）、rules_file（預設 <site_dir>/event_rules.yaml）；
 //   auto_dispatch（true；false = 只判斷、不注入，派遣交給值班）、vlm_enabled（false：沒有 VLM 時直接用 L2 的信心）、
 //   on_hours_start／on_hours_end（8／18，time_rule 的上班時段）、retarget_m（3.0）、
@@ -37,6 +47,7 @@
 #include "swarm_events/event_rules.hpp"
 #include "swarm_events/expander.hpp"
 #include "swarm_events/incident_manager.hpp"
+#include "swarm_interfaces/msg/approval_state.hpp"
 #include "swarm_interfaces/msg/detection.hpp"
 #include "swarm_interfaces/msg/event_incident.hpp"
 #include "swarm_interfaces/msg/fallback_request.hpp"
@@ -44,6 +55,7 @@
 #include "swarm_interfaces/msg/task.hpp"
 #include "swarm_interfaces/msg/task_assignments.hpp"
 #include "swarm_interfaces/msg/task_orphaned.hpp"
+#include "swarm_interfaces/msg/task_progress.hpp"
 #include "swarm_interfaces/msg/task_report.hpp"
 #include "swarm_interfaces/msg/vlm_request.hpp"
 #include "swarm_interfaces/msg/vlm_result.hpp"
@@ -109,6 +121,10 @@ public:
     cfg.retarget_m = declare_parameter<double>("retarget_m", 3.0);
     retarget_m_ = cfg.retarget_m;
     cfg.id_prefix = declare_parameter<std::string>("id_prefix", "");
+    cfg.storm_max_per_zone = static_cast<int>(declare_parameter<int64_t>("storm_max_per_zone", 3));
+    cfg.storm_rule = declare_parameter<std::string>("storm_rule", "zone_patrol");
+    // 注入時才讀（可以用 ros2 param set 改；要清空時給一個不存在的名稱，例如 ['none']）
+    declare_parameter<std::vector<std::string>>("approval_event_types", std::vector<std::string>{});
     if (registry_dir.empty() || site_dir.empty()) {
       throw std::invalid_argument("event_manager 要 registry_dir、site_dir");
     }
@@ -127,6 +143,10 @@ public:
     }
     if (!bad.empty()) {
       throw std::runtime_error("註冊表或事件範本有錯，拒絕啟動：" + bad);
+    }
+    if (cfg.storm_max_per_zone > 0 && rules_.rule(cfg.storm_rule) == nullptr) {
+      RCLCPP_WARN(get_logger(), "沒有告警風暴的範本 %s：不合併（storm_max_per_zone 當成 0）", cfg.storm_rule.c_str());
+      cfg.storm_max_per_zone = 0;
     }
     if (cfg.id_prefix.empty()) {
       // 沒有存檔時事件編號要和重開前不同（閘道的冪等鍵用 incident_id）；有存檔時編號計數會讀回來
@@ -172,6 +192,8 @@ public:
         [this](const swarm_interfaces::msg::FallbackRequest & m) {onFallback(m);});
     orphan_sub_ = create_subscription<swarm_interfaces::msg::TaskOrphaned>("task_orphaned", reliable,
         [this](const swarm_interfaces::msg::TaskOrphaned & m) {onOrphaned(m);});
+    approval_sub_ = create_subscription<swarm_interfaces::msg::ApprovalState>("approvals", reliable,
+        [this](const swarm_interfaces::msg::ApprovalState & m) {onApproval(m);});
     vlm_sub_ = create_subscription<swarm_interfaces::msg::VlmResult>("vlm_result", reliable,
         [this](const swarm_interfaces::msg::VlmResult & m) {
           RCLCPP_INFO(get_logger(), "VLM %s：%s %.2f %s", m.event_id.c_str(), m.verdict.c_str(), m.confidence,
@@ -179,9 +201,10 @@ public:
           handle(manager_->onVlmResult(m.event_id, m.verdict, m.confidence, nowSec()));
         });
     timer_ = create_wall_timer(std::chrono::milliseconds(200), [this]() {handle(manager_->step(nowSec()));});
-    RCLCPP_INFO(get_logger(), "事件範本 %s：%zu 條規則；自動派遣 %s、VLM %s、上班時段 %d～%d 時%s",
+    RCLCPP_INFO(get_logger(), "事件範本 %s：%zu 條規則；自動派遣 %s、VLM %s、上班時段 %d～%d 時、告警風暴上限 %d%s",
       rules_file.c_str(), rules_.rules.size(), auto_dispatch_ ? "開" : "關", cfg.vlm_enabled ? "開" : "關",
-      cfg.on_hours_start, cfg.on_hours_end, state_dir_.empty() ? "" : ("；存檔 " + state_dir_).c_str());
+      cfg.on_hours_start, cfg.on_hours_end, cfg.storm_max_per_zone,
+      state_dir_.empty() ? "" : ("；存檔 " + state_dir_).c_str());
   }
 
 private:
@@ -256,6 +279,18 @@ private:
     d.x = m.position.x;
     d.y = m.position.y;
     d.z = m.position.z;
+    if (!m.attrs.empty()) {
+      // attrs 是 JSON（YAML 的子集）：只取證據的參照，其他不管；壞掉的忽略
+      try {
+        const YAML::Node a = YAML::Load(m.attrs);
+        if (a.IsMap()) {
+          d.snapshot_uri = a["snapshot_uri"] ? a["snapshot_uri"].as<std::string>() : std::string();
+          d.clip_uri = a["clip_uri"] ? a["clip_uri"].as<std::string>() : std::string();
+          d.evidence_uri = a["evidence_uri"] ? a["evidence_uri"].as<std::string>() : std::string();
+        }
+      } catch (const std::exception &) {
+      }
+    }
     handle(manager_->onDetection(d, nowSec()));
   }
 
@@ -286,14 +321,18 @@ private:
       if (it == task_role_.end()) {
         continue;
       }
-      RoleState st = RoleState::PLANNED;
-      if (t.assign_state == swarm_interfaces::msg::TaskAssignment::ACTIVE) {
-        st = RoleState::ACTIVE;
-      } else if (t.assign_state != swarm_interfaces::msg::TaskAssignment::NONE) {
-        st = RoleState::ASSIGNED;
+      // 已經結束的角色（task_closed 先到）不再被晚到的 assignments 改回去
+      if (const auto * rec = manager_->find(it->second.first)) {
+        const auto rs = rec->roles.find(it->second.second);
+        if (rs != rec->roles.end() && (rs->second.state == RoleState::DONE ||
+          rs->second.state == RoleState::CANCELLED || rs->second.state == RoleState::SKIPPED))
+        {
+          continue;
+        }
       }
-      auto & last = assign_state_[t.task_id];
-      if (st == RoleState::PLANNED || last == st) {
+      const RoleState st = roleOf(t);
+      auto & last = assign_state_[t.task_id];   // 一開始 PLANNED：還沒指派的不用報
+      if (last == st) {
         continue;
       }
       last = st;
@@ -301,6 +340,56 @@ private:
       acts.insert(acts.end(), more.begin(), more.end());
     }
     handle(acts);
+  }
+
+  // 一筆分配（含進度）→ 角色狀態；進度只算目前正式指派版本、目前 revision 的
+  static RoleState roleOf(const swarm_interfaces::msg::TaskAssignment & t)
+  {
+    using TA = swarm_interfaces::msg::TaskAssignment;
+    using TP = swarm_interfaces::msg::TaskProgress;
+    if (t.assign_state == TA::NONE) {
+      return RoleState::PLANNED;
+    }
+    const bool accepted = t.assign_state == TA::RESERVED || t.assign_state == TA::ACTIVE;
+    const RoleState base = t.assign_state == TA::ACTIVE ? RoleState::ACTIVE : RoleState::ASSIGNED;
+    const bool valid = accepted && t.progress_assign_version != 0 && t.progress_assign_version == t.assign_version &&
+      t.progress_revision == t.revision;
+    if (!valid || t.phase == TP::PHASE_EN_ROUTE || t.phase == TP::PHASE_ACCEPTED) {
+      return base;
+    }
+    const auto has = [&t](const char * name) {
+        return std::find(t.milestones.begin(), t.milestones.end(), name) != t.milestones.end();
+      };
+    if (has("started")) {
+      return RoleState::EXECUTING;
+    }
+    if (has("arrived") || t.phase == TP::PHASE_ARRIVED || t.phase == TP::PHASE_ARRIVED_WAITING) {
+      return RoleState::ARRIVED;
+    }
+    return base;
+  }
+
+  void onApproval(const swarm_interfaces::msg::ApprovalState & m)
+  {
+    using AS = swarm_interfaces::msg::ApprovalState;
+    const auto inj = injected_.find(m.incident_id);
+    if (inj == injected_.end()) {
+      return;   // 不是這裡派的
+    }
+    if (m.state == AS::INJECTED && m.task_id != 0) {
+      RoleInj & ri = inj->second.roles[m.role];
+      if (ri.task_id != m.task_id) {
+        ri.task_id = m.task_id;
+        task_role_[m.task_id] = {m.incident_id, m.role};
+        RCLCPP_INFO(get_logger(), "%s 角色 %s 核准後注入 → 任務 %llu", m.incident_id.c_str(), m.role.c_str(),
+          static_cast<unsigned long long>(m.task_id));
+        publishChanged();
+        saveState();
+      }
+    } else if (m.state == AS::REJECTED) {
+      handle(manager_->resolve(m.incident_id, true, "拒絕核准（" + m.operator_name +
+        (m.note.empty() ? "" : "：" + m.note) + "）", nowSec()));
+    }
   }
 
   void onFallback(const swarm_interfaces::msg::FallbackRequest & m)
@@ -390,8 +479,35 @@ private:
       }
     }
     flushLog();
+    cancelClosedEvents();
     publishChanged();
     saveState();
+  }
+
+  // 誤報、拒絕的事件：還開著的角色任務取消（RESOLVED 的都做完了；EXPIRED 由閘道的過期關閉）
+  void cancelClosedEvents()
+  {
+    for (const auto & [id, r] : manager_->events()) {
+      if ((r.state != EventState::FALSE_ALARM && r.state != EventState::REJECTED) || !cancelled_.insert(id).second) {
+        continue;
+      }
+      const auto inj = injected_.find(id);
+      if (inj == injected_.end()) {
+        continue;
+      }
+      for (const auto & [role, ri] : inj->second.roles) {
+        const auto st = r.roles.find(role);
+        const bool open = st == r.roles.end() || (st->second.state != RoleState::DONE &&
+          st->second.state != RoleState::CANCELLED && st->second.state != RoleState::SKIPPED);
+        if (ri.task_id != 0 && open) {
+          swarm_interfaces::msg::Task t;
+          t.task_id = ri.task_id;
+          cancel_pub_->publish(t);
+          RCLCPP_INFO(get_logger(), "%s %s：取消角色 %s（任務 %llu）", id.c_str(), swarm_events::stateName(r.state),
+            role.c_str(), static_cast<unsigned long long>(ri.task_id));
+        }
+      }
+    }
   }
 
   void requestVlm(const Action & a)
@@ -482,6 +598,7 @@ private:
     handle(manager_->onDispatchResult(a.event_id, true, roles, "", now));
     RCLCPP_INFO(get_logger(), "%s %s %s（plan %u）：注入 %zu／%zu 個角色", a.event_id.c_str(),
       swarm_events::actionName(a.kind), a.rule.c_str(), a.plan_version, to_inject.size(), plan.roles.size());
+    const auto approval_types = get_parameter("approval_event_types").as_string_array();
     for (const auto & r : plan.roles) {
       if (std::find(to_inject.begin(), to_inject.end(), r.role) == to_inject.end()) {
         continue;
@@ -513,7 +630,14 @@ private:
       req->fallback_template = r.fallback_template;
       req->spec = r.spec;
       req->event_type = rec->event_type;
-      req->requires_approval = r.requires_approval;
+      req->requires_approval = r.requires_approval ||
+        std::find(approval_types.begin(), approval_types.end(), rec->event_type) != approval_types.end();
+      const swarm_events::Evidence & ev = rec->evidence;
+      req->evidence_uri = ev.evidence_uri.empty() ? ev.snapshot_uri : ev.evidence_uri;
+      req->evidence_confidence = static_cast<float>(rec->confidence);
+      req->snapshot_uri = ev.snapshot_uri;
+      req->clip_uri = ev.clip_uri;
+      req->camera_ids.assign(ev.cameras.begin(), ev.cameras.end());
       req->description = a.rule + " " + r.role;
       ri.has_fallback = !r.fallback_template.empty();
       const std::string event_id = a.event_id;
@@ -587,8 +711,9 @@ private:
       m.track_id = r.track_id;
       m.sources.assign(r.sources.begin(), r.sources.end());
       m.detections = static_cast<std::uint32_t>(r.detections);
-      m.parent = r.parent;
+      m.parent = r.parent.empty() ? r.merged_into : r.parent;
       m.children = r.children;
+      m.children.insert(m.children.end(), r.merged.begin(), r.merged.end());
       const auto inj = injected_.find(id);
       for (const auto & [role, st] : r.roles) {
         m.roles.push_back(role);
@@ -686,6 +811,7 @@ private:
   std::map<std::uint64_t, RoleState> assign_state_;
   std::set<std::string> fallback_seen_;
   std::set<std::string> orphan_seen_;
+  std::set<std::string> cancelled_;          // 已經取消過角色的誤報、拒絕事件
   std::map<std::string, std::string> published_;
 
   rclcpp::Service<ExpandIncident>::SharedPtr expand_srv_;
@@ -703,6 +829,7 @@ private:
   rclcpp::Subscription<swarm_interfaces::msg::FallbackRequest>::SharedPtr fallback_sub_;
   rclcpp::Subscription<swarm_interfaces::msg::TaskOrphaned>::SharedPtr orphan_sub_;
   rclcpp::Subscription<swarm_interfaces::msg::VlmResult>::SharedPtr vlm_sub_;
+  rclcpp::Subscription<swarm_interfaces::msg::ApprovalState>::SharedPtr approval_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

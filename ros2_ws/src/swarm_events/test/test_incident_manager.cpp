@@ -1,5 +1,6 @@
 // L2 累積、L3 關聯、L5 事件狀態機（2026-11-23，docs/l5_l6_plan.md B 批）的單元測試：用 repo 的 registry/、site-config/yard。
-// 對照 2-1 第五節階段 1 的案例：2（同一事件連續告警只有 1 個事件）、3（中信心只派 1 隻確認）、10（無人可得標 → 升級、fallback）
+// 對照 2-1 第五節階段 1 的案例：2（同一事件連續告警只有 1 個事件）、3（中信心只派 1 隻確認）、10（無人可得標 → 升級、fallback）、
+// 9（告警風暴合併成區域巡查，C 批）；C 批的進度聚合（DISPATCHED → ON_SITE → EXECUTING，換人、改版後退回）
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -92,6 +93,21 @@ std::string confirmedFire(IncidentManager & m, double x = 0.0, double y = -25.0)
   return m.events().begin()->first;
 }
 
+// 從 t0 開始在 (x, y) 確認一個火警，回傳這次的動作；id 放新事件的編號
+std::vector<Action> fireAt(IncidentManager & m, double x, double y, double t0, std::string * id)
+{
+  // 一個一個呼叫：函式引數的求值順序沒有規定（gcc 從右邊算），寫在同一個 join(...) 裡時間會倒過來
+  auto acts = m.onDetection(fire(x, y), t0);
+  acts = join(acts, m.onDetection(fire(x, y), t0 + 0.8));
+  acts = join(acts, m.step(t0 + 1.1));
+  for (const auto & [eid, r] : m.events()) {
+    if (!r.storm && r.x == x && r.y == y) {
+      *id = eid;
+    }
+  }
+  return acts;
+}
+
 }  // namespace
 
 TEST(Incident, FireConfirmsAfterMinDuration)
@@ -175,7 +191,8 @@ TEST(Incident, VlmMediumConfidenceSendsOneDog)
   EXPECT_TRUE(has(acts, Action::Kind::DISPATCH, "single_dog_verify"));
   EXPECT_EQ(m.find(id)->rule, "single_dog_verify");
   // 之後證據變強（L2 的信心 ≥ theta_high）→ 升級成完整範本
-  const auto up = join(m.onDetection(person(-10.0, 15.0), 3.0), m.onDetection(person(-10.0, 15.0), 3.5));
+  auto up = m.onDetection(person(-10.0, 15.0), 3.0);   // 依序呼叫（引數的求值順序沒有規定）
+  up = join(up, m.onDetection(person(-10.0, 15.0), 3.5));
   EXPECT_TRUE(has(up, Action::Kind::DISPATCH, "perimeter_intrusion"));
   EXPECT_EQ(m.find(id)->rule, "perimeter_intrusion");
 }
@@ -335,4 +352,93 @@ TEST(Incident, SaveAndLoadKeepOpenEvents)
   EXPECT_EQ(back.events().size(), 2u);   // 新的事件編號不和讀回的重複
   back.onRoleState(id, "ground_fire_verify", RoleState::DONE, "", 11.0);
   EXPECT_EQ(back.find(id)->state, EventState::RESOLVED);
+}
+
+TEST(Incident, ProgressAggregatesAndFallsBack)
+{
+  // C 批：DISPATCHED → 有角色到場 ON_SITE → 有必要角色開始執行 EXECUTING → 必要角色都完成 RESOLVED；
+  // optional 角色開始執行只算到場；換人（節點只算目前指派版本的進度）→ 角色退回 ASSIGNED，事件跟著退回
+  IncidentManager m(fx().registry, fx().site, fx().rules, config());
+  const std::string id = confirmedFire(m);
+  m.onDispatchResult(id, true, {{"aerial_overwatch", true}, {"ground_fire_verify", false}}, "", 1.2);
+  m.onRoleState(id, "ground_fire_verify", RoleState::ACTIVE, "", 2.0);
+  EXPECT_EQ(m.find(id)->state, EventState::DISPATCHED);
+  m.onRoleState(id, "aerial_overwatch", RoleState::EXECUTING, "", 3.0);
+  EXPECT_EQ(m.find(id)->state, EventState::ON_SITE);
+  m.onRoleState(id, "ground_fire_verify", RoleState::ARRIVED, "", 4.0);
+  EXPECT_EQ(m.find(id)->state, EventState::ON_SITE);
+  m.onRoleState(id, "ground_fire_verify", RoleState::EXECUTING, "", 5.0);
+  EXPECT_EQ(m.find(id)->state, EventState::EXECUTING);
+  // 換人：空中角色也換（兩個都沒有有效進度）→ 退回 DISPATCHED，原因寫舊進度不算
+  m.onRoleState(id, "ground_fire_verify", RoleState::ASSIGNED, "", 6.0);
+  m.onRoleState(id, "aerial_overwatch", RoleState::ASSIGNED, "", 6.1);
+  EXPECT_EQ(m.find(id)->state, EventState::DISPATCHED);
+  EXPECT_NE(m.find(id)->reason.find("舊進度不算"), std::string::npos) << m.find(id)->reason;
+  m.onRoleState(id, "ground_fire_verify", RoleState::EXECUTING, "", 8.0);
+  EXPECT_EQ(m.find(id)->state, EventState::EXECUTING);
+  // 改版重新展開：狀態不變（角色的進度由下一份 assignments 決定）
+  m.onIncidentUpdate(id, 1, true, 1.0, -25.0, 9.0);
+  m.onDispatchResult(id, true, {{"aerial_overwatch", true}, {"ground_fire_verify", false}}, "", 9.1);
+  EXPECT_EQ(m.find(id)->state, EventState::EXECUTING);
+  m.onRoleState(id, "ground_fire_verify", RoleState::DONE, "", 12.0);
+  EXPECT_EQ(m.find(id)->state, EventState::RESOLVED);
+  // 失敗碼留著：之後重新指派不清掉
+  IncidentManager f(fx().registry, fx().site, fx().rules, config());
+  const std::string id2 = confirmedFire(f);
+  f.onDispatchResult(id2, true, {{"ground_fire_verify", false}}, "", 1.2);
+  f.onRoleState(id2, "ground_fire_verify", RoleState::FAILED, "E_TIMEOUT", 3.0);
+  f.onRoleState(id2, "ground_fire_verify", RoleState::PLANNED, "", 3.5);
+  EXPECT_EQ(f.find(id2)->roles.at("ground_fire_verify").failure_code, "E_TIMEOUT");
+  EXPECT_EQ(f.find(id2)->state, EventState::DISPATCHED);
+}
+
+TEST(Incident, AlarmStormMergesIntoZonePatrol)
+{
+  // 2-1 案例 9：Z_YARD 同時 3 件派遣中（上限 3）→ 第 4 件起不各自派，合併成一次區域巡查（zone_patrol）、通知值班；
+  // 之後同區的告警併進同一個巡查；巡查結案 → 併進來的事件一起結案。別區（Z_HV_A）不受影響
+  IncidentManager m(fx().registry, fx().site, fx().rules, config());
+  std::string a, b, c, d, e, hv;
+  EXPECT_TRUE(has(fireAt(m, 0.0, -25.0, 0.0, &a), Action::Kind::DISPATCH, "fire_response"));
+  EXPECT_TRUE(has(fireAt(m, 10.0, -25.0, 2.0, &b), Action::Kind::DISPATCH, "fire_response"));
+  EXPECT_TRUE(has(fireAt(m, 20.0, -25.0, 4.0, &c), Action::Kind::DISPATCH, "fire_response"));
+  const auto acts = fireAt(m, 0.0, -32.0, 6.0, &d);
+  EXPECT_TRUE(has(acts, Action::Kind::DISPATCH, "zone_patrol"));
+  EXPECT_FALSE(has(acts, Action::Kind::DISPATCH, "fire_response"));
+  EXPECT_TRUE(has(acts, Action::Kind::NOTIFY));
+  ASSERT_EQ(m.find(d)->state, EventState::MERGED);
+  const std::string storm = m.find(d)->merged_into;
+  ASSERT_NE(m.find(storm), nullptr);
+  EXPECT_TRUE(m.find(storm)->storm);
+  EXPECT_EQ(m.find(storm)->zone, "Z_YARD");
+  EXPECT_EQ(m.find(storm)->rule, "zone_patrol");
+  EXPECT_EQ(m.find(storm)->state, EventState::DISPATCHED);
+  // 同區再來一件：併進同一個巡查，不再派
+  const auto more = fireAt(m, 15.0, -32.0, 8.0, &e);
+  EXPECT_FALSE(has(more, Action::Kind::DISPATCH));
+  EXPECT_EQ(m.find(e)->merged_into, storm);
+  EXPECT_EQ(m.find(storm)->merged.size(), 2u);
+  // 別區照常
+  EXPECT_TRUE(has(fireAt(m, -10.0, 15.0, 10.0, &hv), Action::Kind::DISPATCH, "fire_response"));
+  EXPECT_EQ(m.find(hv)->zone, "Z_HV_A");
+  // 存檔讀回：合併關係還在
+  IncidentManager back(fx().registry, fx().site, fx().rules, config());
+  back.load(m.save());
+  EXPECT_TRUE(back.find(storm)->storm);
+  EXPECT_EQ(back.find(d)->merged_into, storm);
+  EXPECT_EQ(back.find(storm)->merged.size(), 2u);
+  // 巡查完成 → 併進來的都結案；原本 3 件不受影響
+  m.onDispatchResult(storm, true, {{"area_patroller", false}}, "", 11.0);
+  m.onRoleState(storm, "area_patroller", RoleState::DONE, "", 30.0);
+  EXPECT_EQ(m.find(storm)->state, EventState::RESOLVED);
+  EXPECT_EQ(m.find(d)->state, EventState::RESOLVED);
+  EXPECT_EQ(m.find(e)->state, EventState::RESOLVED);
+  EXPECT_EQ(m.find(a)->state, EventState::DISPATCHED);
+  // 上限 0 = 不合併
+  ManagerConfig off = config();
+  off.storm_max_per_zone = 0;
+  IncidentManager n(fx().registry, fx().site, fx().rules, off);
+  std::string id;
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(has(fireAt(n, 6.0 * i, -25.0, 2.0 * i, &id), Action::Kind::DISPATCH, "fire_response")) << i;
+  }
 }

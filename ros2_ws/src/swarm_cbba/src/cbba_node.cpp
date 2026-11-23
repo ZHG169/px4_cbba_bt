@@ -2490,6 +2490,16 @@ private:
       a.assignee_id = as.assignee;
       a.assign_state = static_cast<std::uint8_t>(as.state);
       a.spec_ready = comm_->specReady(id);
+      // 角色進度（L5＋L6 C 批）：原樣帶這份進度屬於哪一次指派、哪一個 revision，由使用的人判斷是否有效
+      a.step_index = TaskProgressMsg::STEP_UNKNOWN;
+      if (const ProgressRecord * p = comm_->progress(id)) {
+        a.progress_assign_version = p->assign_version;
+        a.progress_revision = p->task_revision;
+        a.progress_executor = p->executor;
+        a.phase = static_cast<std::uint8_t>(p->phase);
+        a.step_index = p->step_index;
+        a.milestones = milestoneNames(comm_->milestones(id, now));
+      }
       if (gateway_) {
         if (const auto * known = gateway_->findTask(id)) {
           const TaskMeta & m = known->meta;

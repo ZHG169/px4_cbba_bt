@@ -81,7 +81,7 @@ T=""
 for i in $(seq 1 15); do T=$(current); [ -n "$T" ] && [ "$T" != "0" ] && break; sleep 1; done
 if [ -n "$T" ] && [ "$T" != "0" ]; then
   timeout 10 ros2 topic pub --once -w 1 /v60/task_result swarm_interfaces/msg/TaskResult "{task_id: $T, success: true}" > /dev/null 2>&1
-  wait_has $L/events.log "$FIRE DISPATCHED -> RESOLVED\|$FIRE ON_SITE -> RESOLVED" 10 &&
+  wait_has $L/events.log "$FIRE [A-Z_]* -> RESOLVED" 10 &&
     ok "N3 狗回報完成 → $FIRE RESOLVED" || bad "N3 沒有結案（看 $L/events.log、$L/dog.log）"
 else
   bad "N3 狗沒拿到任務（看 $L/dog.log）"

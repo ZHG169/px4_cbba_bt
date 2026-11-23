@@ -1,5 +1,6 @@
 # swarm_interfaces — 空地 CBBA 介面規格 v2.0
 
+> **2.12.0（2026-11-23）**：`TaskAssignment.msg` 加角色進度（progress_assign_version、progress_revision、progress_executor、phase、step_index、milestones；L5＋L6 C 批：閘道統一發布，event_manager 依有效版本聚合）。只加欄位；狗的 BT 不用 assignments，但型別雜湊變了，照例全隊重編。
 > **2.11.0（2026-11-23）**：加 `EventIncident.msg`（/gcs/incidents）、`VlmRequest.msg`／`VlmResult.msg`、`ResolveIncident.srv`（L5 事件狀態機，swarm_events 的 event_manager）。只加新型別。
 > **2.10.0（2026-11-23）**：加 `PlannedRole.msg`、`ExpandIncident.srv`（L6 範本展開 `/gcs/expand_incident`，swarm_events；只回傳規劃結果，不注入）。只加新型別，既有的訊息不變。
 

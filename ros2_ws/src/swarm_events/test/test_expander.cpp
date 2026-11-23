@@ -80,7 +80,7 @@ TEST(EventRules, YardRulesLoadClean)
   const auto errors = swarm_events::checkEventRules(fx().rules, fx().registry, &fx().site);
   EXPECT_TRUE(errors.empty()) << errors.front();
   for (const char * name : {"perimeter_intrusion", "fire_response", "single_dog_verify", "smoke_check",
-      "thermal_check", "left_object_check"})
+      "thermal_check", "left_object_check", "zone_patrol"})
   {
     EXPECT_NE(fx().rules.rule(name), nullptr) << name;
   }
@@ -337,4 +337,21 @@ TEST(Expander, PlanJsonParses)
   EXPECT_EQ(doc["roles"].size(), 4u);
   EXPECT_EQ(doc["rule"].as<std::string>(), "perimeter_intrusion");
   EXPECT_EQ(doc["coupling"]["distinct_agent_set"].as<int>(), 6);
+}
+
+TEST(Expander, ZonePatrolUsesIncidentZone)
+{
+  // 告警風暴的區域巡查（C 批）：{incident.zone} 代換成事件所在區域；位置是區域中心；不限平台（高壓區狗不能進，不做 preflight）
+  Incident inc = incident("fire", -10.0, 0.5);   // Z_HV_B
+  ExpandOptions opt;
+  opt.rule = "zone_patrol";
+  const Plan plan = swarm_events::expand(inc, fx().rules, fx().registry, fx().site, opt);
+  ASSERT_TRUE(plan.ok) << plan.code << " " << plan.reason;
+  ASSERT_EQ(plan.roles.size(), 1u);
+  const PlannedRole & r = role(plan, "area_patroller");
+  EXPECT_EQ(r.location_source, "zone:Z_HV_B");
+  EXPECT_EQ(r.priority, 1);
+  EXPECT_EQ(r.platform_code, 0);
+  EXPECT_NEAR(r.y, 0.0, 0.5);
+  EXPECT_EQ(steps(r)[1]["params"]["area"].as<std::string>(), "Z_HV_B");
 }

@@ -8,9 +8,14 @@
 //   θ_low（cost：false/(miss+false)）≤ 信心 < theta_high → NEEDS_CHECK → DISPATCH 範本的 fallback_template（派 1 隻確認）
 //   信心 < θ_low → LOGGED（只記錄；之後證據變強會再決定）
 // 候選期間 s < theta_off → 取消（REJECTED，原因「證據消退」）。
-// 派遣之後：DISPATCHED → 有角色到場 ON_SITE → 必要角色都完成 RESOLVED；確認角色回報 E_TARGET_LOST 或值班判定 → FALSE_ALARM；
-// 閘道 P0 沒人接、整組失效、fallback_request → ESCALATED（有 fallback 範本就派子事件）；expires_s 到了 → EXPIRED。
+// 派遣之後（C 批，2026-11-23 使用者決定 1）：依角色的有效進度聚合（閘道的 assignments 帶進度，節點只算目前正式指派版本、
+//   目前 revision 的）：DISPATCHED → 有角色到場 ON_SITE → 有必要角色開始第一個非移動的步驟 EXECUTING → 必要角色都完成 RESOLVED；
+//   換人、改版後舊進度不算，事件狀態跟著退回（例如 EXECUTING → DISPATCHED）。確認角色回報 E_TARGET_LOST 或值班判定 → FALSE_ALARM；
+// 閘道 P0 沒人接、整組失效、fallback_request → ESCALATED（有 fallback 範本就派子事件）；expires_s 到了 → EXPIRED；
+// 值班拒絕核准（閘道的 approvals）→ 節點當成值班判定誤報（resolve）。
 // 閘道接受的 incident 更新（UAV 定位、位置）、已派遣事件的新偵測移動超過 retarget_m → REPLAN（重新展開，只注入改了的角色）。
+// 告警風暴（2-1 案例 9，C 批）：同一區已有 storm_max_per_zone 件派遣中的事件時，新決定要派遣的事件不各自派，
+//   改成合併進那一區的區域巡查（storm_rule，一個新的事件）→ MERGED，並通知值班；巡查結案時合併的事件一起結案。
 //
 // 這個類別不依賴 ROS、不注入：每個 on*／step 回傳要做的事（Action），由 event_manager 節點執行
 // （DISPATCH／REPLAN：expand → inject_task；VLM_REQUEST：發請求；NOTIFY：通知值班），結果再用 onDispatchResult 告訴它。
@@ -33,15 +38,21 @@ namespace swarm_events
 
 enum class EventState : std::uint8_t
 {
-  CANDIDATE, VERIFYING, CONFIRMED, NEEDS_CHECK, LOGGED, REJECTED, DISPATCHED, ON_SITE, RESOLVED, FALSE_ALARM,
-  ESCALATED, EXPIRED
+  CANDIDATE, VERIFYING, CONFIRMED, NEEDS_CHECK, LOGGED, REJECTED, DISPATCHED, ON_SITE, EXECUTING, RESOLVED,
+  FALSE_ALARM, ESCALATED, MERGED, EXPIRED
 };
 const char * stateName(EventState state);
 std::optional<EventState> stateFromName(const std::string & name);
 bool isTerminal(EventState state);   // REJECTED、RESOLVED、FALSE_ALARM、EXPIRED
+bool isDispatched(EventState state);  // DISPATCHED、ON_SITE、EXECUTING（有角色在處理）
 
-enum class RoleState : std::uint8_t {PLANNED, ASSIGNED, ACTIVE, ARRIVED, DONE, FAILED, CANCELLED, SKIPPED};
+// ARRIVED：有效進度有 arrived；EXECUTING：有效進度有 started（開始第一個非移動的步驟）
+enum class RoleState : std::uint8_t
+{
+  PLANNED, ASSIGNED, ACTIVE, ARRIVED, EXECUTING, DONE, FAILED, CANCELLED, SKIPPED
+};
 const char * roleStateName(RoleState state);
+std::optional<RoleState> roleStateFromName(const std::string & name);
 
 // 一筆偵測（swarm_interfaces/Detection 裡事件流程要的部分）
 struct DetectionIn
@@ -55,6 +66,20 @@ struct DetectionIn
   std::uint32_t track_id{0};   // 0 = 沒有
   bool position_valid{false};
   double x{0.0}, y{0.0}, z{0.0};
+  // 證據（偵測的 attrs 帶的參照，C 批）：注入時帶給閘道（InjectTask 的 evidence_uri、snapshot_uri、clip_uri）
+  std::string snapshot_uri;
+  std::string clip_uri;
+  std::string evidence_uri;
+};
+
+// 事件的證據：分數最高、有參照的那筆偵測＋各來源的相機
+struct Evidence
+{
+  std::string snapshot_uri;
+  std::string clip_uri;
+  std::string evidence_uri;     // 空 = 用 snapshot_uri
+  double score{0.0};
+  std::set<std::string> cameras;   // 偵測的 source
 };
 
 struct RoleStatus
@@ -92,6 +117,10 @@ struct EventRecord
   std::map<std::string, RoleStatus> roles;
   std::string parent;                   // fallback 派出的子事件：原本的事件
   std::vector<std::string> children;
+  bool storm{false};                    // 告警風暴合併出來的區域巡查
+  std::string merged_into;              // MERGED：併進哪一個區域巡查
+  std::vector<std::string> merged;      // 區域巡查：併進來的事件
+  Evidence evidence;
   std::string reason;                   // 最近一次轉換的原因
 };
 
@@ -115,6 +144,9 @@ struct ManagerConfig
   int on_hours_end{18};
   std::function<int(double)> hour_of;   // 時刻 → 當地小時；空 = localtime
   std::string id_prefix{"ev"};          // 事件編號的前綴（節點用啟動時刻區分重開前後）
+  // 告警風暴（2-1 案例 9）：同一區（zoneAt 的最小區域）同時派遣中的事件上限；0 = 不合併
+  int storm_max_per_zone{3};
+  std::string storm_rule{"zone_patrol"};   // 合併成的區域巡查範本（event_rules.yaml）
 };
 
 class IncidentManager
@@ -133,7 +165,8 @@ public:
   // 閘道接受的 incident 更新（/gcs/incident_updates）：revision 變大就重新展開
   std::vector<Action> onIncidentUpdate(const std::string & event_id, std::uint16_t revision, bool position_valid,
     double x, double y, double now);
-  // 角色的狀態（閘道的 assignments、task_reports）；FAILED 帶 failure_code
+  // 角色的狀態（閘道的 assignments〔含有效進度〕、task_closed、task_reports）；FAILED 帶 failure_code。
+  // 事件的 DISPATCHED／ON_SITE／EXECUTING 由全部角色重新聚合（可以退回：換人、改版後舊進度不算）
   std::vector<Action> onRoleState(const std::string & event_id, const std::string & role, RoleState state,
     const std::string & failure_code, double now);
   // 升級：閘道的 P0 看門狗、整組失效、fallback_request。fallback_rule 空 = 用派遣規則的 fallback_template
@@ -166,6 +199,11 @@ private:
   void decide(EventRecord & rec, const swarm_cbba::EventType & et, double p, double now, std::vector<Action> & out);
   void dispatch(EventRecord & rec, const std::string & rule, double now, std::vector<Action> & out);
   void finish(EventRecord & rec, EventState state, const std::string & reason, double now, std::vector<Action> & out);
+  // 角色狀態 → 事件的 DISPATCHED／ON_SITE／EXECUTING
+  void aggregate(EventRecord & rec, const std::string & role, double now);
+  // 告警風暴：要派遣的事件改併進區域巡查；true = 已處理（不要各自派）
+  bool absorbIntoStorm(EventRecord & rec, double now, std::vector<Action> & out);
+  std::string newId() {return config_.id_prefix + "_" + std::to_string(next_id_++);}
 
   const swarm_cbba::Registry & registry_;
   const swarm_cbba::Site & site_;

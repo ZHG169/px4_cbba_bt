@@ -62,9 +62,11 @@ const char * stateName(EventState state)
     case EventState::REJECTED: return "REJECTED";
     case EventState::DISPATCHED: return "DISPATCHED";
     case EventState::ON_SITE: return "ON_SITE";
+    case EventState::EXECUTING: return "EXECUTING";
     case EventState::RESOLVED: return "RESOLVED";
     case EventState::FALSE_ALARM: return "FALSE_ALARM";
     case EventState::ESCALATED: return "ESCALATED";
+    case EventState::MERGED: return "MERGED";
     case EventState::EXPIRED: return "EXPIRED";
   }
   return "?";
@@ -87,6 +89,11 @@ bool isTerminal(EventState state)
          state == EventState::EXPIRED;
 }
 
+bool isDispatched(EventState state)
+{
+  return state == EventState::DISPATCHED || state == EventState::ON_SITE || state == EventState::EXECUTING;
+}
+
 const char * roleStateName(RoleState state)
 {
   switch (state) {
@@ -94,12 +101,24 @@ const char * roleStateName(RoleState state)
     case RoleState::ASSIGNED: return "ASSIGNED";
     case RoleState::ACTIVE: return "ACTIVE";
     case RoleState::ARRIVED: return "ARRIVED";
+    case RoleState::EXECUTING: return "EXECUTING";
     case RoleState::DONE: return "DONE";
     case RoleState::FAILED: return "FAILED";
     case RoleState::CANCELLED: return "CANCELLED";
     case RoleState::SKIPPED: return "SKIPPED";
   }
   return "?";
+}
+
+std::optional<RoleState> roleStateFromName(const std::string & name)
+{
+  for (int i = 0; i <= static_cast<int>(RoleState::SKIPPED); ++i) {
+    const auto s = static_cast<RoleState>(i);
+    if (name == roleStateName(s)) {
+      return s;
+    }
+  }
+  return std::nullopt;
 }
 
 const char * actionName(Action::Kind kind)
@@ -240,6 +259,9 @@ void IncidentManager::decide(EventRecord & rec, const swarm_cbba::EventType & et
   const std::string why = "信心 " + fmt(p) + "（θ_low " + fmt(low) + "、θ_high " + fmt(et.theta_high) + "）";
   if (p >= et.theta_high) {
     setState(rec, EventState::CONFIRMED, why, now);
+    if (absorbIntoStorm(rec, now, out)) {
+      return;
+    }
     out.push_back(action(Action::Kind::NOTIFY, rec, "", et.name + " 確認，派完整範本 " + et.default_rule));
     dispatch(rec, et.default_rule, now, out);
     return;
@@ -250,6 +272,9 @@ void IncidentManager::decide(EventRecord & rec, const swarm_cbba::EventType & et
     const std::string verify = full ? full->fallback_template : std::string();
     if (verify.empty()) {
       out.push_back(action(Action::Kind::NOTIFY, rec, "", et.name + " 中信心、範本沒有確認任務：請值班判斷"));
+      return;
+    }
+    if (absorbIntoStorm(rec, now, out)) {
       return;
     }
     out.push_back(action(Action::Kind::NOTIFY, rec, "", et.name + " 中信心，先派 1 隻確認（" + verify + "）"));
@@ -274,6 +299,13 @@ void IncidentManager::finish(EventRecord & rec, EventState state, const std::str
 {
   setState(rec, state, reason, now);
   out.push_back(action(Action::Kind::NOTIFY, rec, "", rec.event_id + " " + stateName(state) + "：" + reason));
+  // 區域巡查結案 → 併進來的事件跟著結案
+  for (const auto & id : rec.merged) {
+    const auto it = events_.find(id);
+    if (it != events_.end() && !isTerminal(it->second.state)) {
+      finish(it->second, state, "合併的區域巡查 " + rec.event_id + " " + stateName(state), now, out);
+    }
+  }
   // fallback 子事件結案 → 原本的事件跟著結案
   if (!rec.parent.empty()) {
     const auto it = events_.find(rec.parent);
@@ -281,6 +313,85 @@ void IncidentManager::finish(EventRecord & rec, EventState state, const std::str
       finish(it->second, state, "降級的 " + rec.event_id + " " + stateName(state), now, out);
     }
   }
+}
+
+void IncidentManager::aggregate(EventRecord & rec, const std::string & role, double now)
+{
+  if (!isDispatched(rec.state)) {
+    return;
+  }
+  bool on_site = false;
+  bool executing = false;
+  for (const auto & [name, st] : rec.roles) {
+    const bool started = st.state == RoleState::EXECUTING || st.state == RoleState::DONE;
+    on_site = on_site || started || st.state == RoleState::ARRIVED;
+    executing = executing || (!st.optional && started);
+  }
+  const EventState next = executing ? EventState::EXECUTING : on_site ? EventState::ON_SITE : EventState::DISPATCHED;
+  if (next == rec.state) {
+    return;
+  }
+  const auto rank = [](EventState s) {
+      return s == EventState::EXECUTING ? 2 : s == EventState::ON_SITE ? 1 : 0;
+    };
+  const auto it = rec.roles.find(role);
+  const std::string rs = it != rec.roles.end() ? roleStateName(it->second.state) : "?";
+  setState(rec, next, rank(next) > rank(rec.state) ? "角色 " + role + " " + rs :
+    "角色 " + role + " " + rs + "：換人或改版，舊進度不算", now);
+}
+
+bool IncidentManager::absorbIntoStorm(EventRecord & rec, double now, std::vector<Action> & out)
+{
+  // 已經派過的（中信心先派 1 隻、證據變強要升級）不併：它的角色已經在做了
+  if (config_.storm_max_per_zone <= 0 || rec.zone.empty() || rec.storm || !rec.parent.empty() || !rec.rule.empty() ||
+    rules_.rule(config_.storm_rule) == nullptr)
+  {
+    return false;
+  }
+  EventRecord * storm = nullptr;
+  int active = 0;
+  for (auto & [id, r] : events_) {
+    if (id == rec.event_id || r.zone != rec.zone || isTerminal(r.state)) {
+      continue;
+    }
+    if (r.storm) {
+      storm = &r;
+    } else if (r.parent.empty() && isDispatched(r.state)) {
+      ++active;
+    }
+  }
+  if (storm == nullptr && active < config_.storm_max_per_zone) {
+    return false;
+  }
+  if (storm == nullptr) {
+    EventRecord fresh;
+    fresh.event_id = newId();
+    fresh.event_type = rec.event_type;
+    fresh.storm = true;
+    fresh.first_t = now;
+    fresh.s_t = now;
+    fresh.last_t = now;
+    fresh.decided_t = now;
+    fresh.x = rec.x;
+    fresh.y = rec.y;
+    fresh.z = rec.z;
+    fresh.zone = rec.zone;
+    fresh.confidence = rec.confidence;
+    storm = &events_.emplace(fresh.event_id, fresh).first->second;
+    log_.push_back(fmt(now, 3) + " " + storm->event_id + " 告警風暴：" + rec.zone + " 已有 " + std::to_string(active) +
+      " 件派遣中（上限 " + std::to_string(config_.storm_max_per_zone) + "）→ 合併成區域巡查");
+    out.push_back(action(Action::Kind::NOTIFY, *storm, "", rec.zone + " 同時 " + std::to_string(active + 1) +
+      " 件告警，超過上限 " + std::to_string(config_.storm_max_per_zone) + "：合併成區域巡查 " + storm->event_id +
+      "（" + config_.storm_rule + "），請值班注意"));
+    dispatch(*storm, config_.storm_rule, now, out);
+  }
+  storm->merged.push_back(rec.event_id);
+  storm->sources.insert(rec.sources.begin(), rec.sources.end());
+  rec.merged_into = storm->event_id;
+  setState(rec, EventState::MERGED, "告警風暴：併進區域巡查 " + storm->event_id, now);
+  out.push_back(action(Action::Kind::NOTIFY, rec, "", rec.event_id + "（" + rec.event_type + "）併進 " + rec.zone +
+    " 的區域巡查 " + storm->event_id));
+  return true;
 }
 
 std::vector<Action> IncidentManager::onDetection(const DetectionIn & det, double now)
@@ -307,7 +418,7 @@ std::vector<Action> IncidentManager::onDetection(const DetectionIn & det, double
     // ---- L3 關聯 ----
     EventRecord * rec = nullptr;
     for (auto & [id, r] : events_) {
-      if (r.event_type != et.name || isTerminal(r.state) || !r.parent.empty()) {
+      if (r.event_type != et.name || isTerminal(r.state) || !r.parent.empty() || r.storm) {
         continue;
       }
       const bool same_track = det.track_id != 0 && det.track_id == r.track_id;
@@ -320,7 +431,7 @@ std::vector<Action> IncidentManager::onDetection(const DetectionIn & det, double
     }
     if (rec == nullptr) {
       EventRecord fresh;
-      fresh.event_id = config_.id_prefix + "_" + std::to_string(next_id_++);
+      fresh.event_id = newId();
       fresh.event_type = et.name;
       fresh.first_t = now;
       fresh.s_t = now;
@@ -341,6 +452,15 @@ std::vector<Action> IncidentManager::onDetection(const DetectionIn & det, double
     if (det.track_id != 0) {
       rec->track_id = det.track_id;
     }
+    if (!det.source.empty()) {
+      rec->evidence.cameras.insert(det.source);
+    }
+    if ((!det.snapshot_uri.empty() || !det.evidence_uri.empty()) && det.score >= rec->evidence.score) {
+      rec->evidence.score = det.score;
+      rec->evidence.snapshot_uri = det.snapshot_uri;
+      rec->evidence.clip_uri = det.clip_uri;
+      rec->evidence.evidence_uri = det.evidence_uri;
+    }
     if (det.position_valid) {
       rec->x = det.x;
       rec->y = det.y;
@@ -360,6 +480,7 @@ std::vector<Action> IncidentManager::onDetection(const DetectionIn & det, double
         break;
       case EventState::DISPATCHED:
       case EventState::ON_SITE:
+      case EventState::EXECUTING:
         if (std::hypot(rec->x - rec->dispatched_x, rec->y - rec->dispatched_y) > config_.retarget_m) {
           // 中信心派的確認任務：證據夠了直接升級成完整範本；否則照新位置重新展開
           if (rec->rule != et.default_rule && sigmoid(rec->s) >= et.theta_high) {
@@ -434,6 +555,7 @@ std::vector<Action> IncidentManager::onDispatchResult(const std::string & event_
     next[role] = st;
   }
   rec.roles = std::move(next);
+  aggregate(rec, roles.empty() ? std::string() : roles.front().first, now);
   return out;
 }
 
@@ -452,7 +574,7 @@ std::vector<Action> IncidentManager::onIncidentUpdate(const std::string & event_
     rec.y = y;
     rec.zone = zoneAt(site_, x, y);
   }
-  if ((rec.state == EventState::DISPATCHED || rec.state == EventState::ON_SITE) && !rec.rule.empty()) {
+  if (isDispatched(rec.state) && !rec.rule.empty()) {
     rec.plan_version = static_cast<std::uint16_t>(rec.plan_version + 1);
     rec.dispatched_x = rec.x;
     rec.dispatched_y = rec.y;
@@ -474,14 +596,14 @@ std::vector<Action> IncidentManager::onRoleState(const std::string & event_id, c
   EventRecord & rec = it->second;
   RoleStatus & rs = rec.roles[role];
   rs.state = state;
-  rs.failure_code = failure_code;
+  if (state == RoleState::FAILED) {
+    rs.failure_code = failure_code;   // 之後重新指派也留著最近一次的失敗碼
+  }
   if (state == RoleState::FAILED && failure_code == "E_TARGET_LOST") {
     finish(rec, EventState::FALSE_ALARM, "角色 " + role + " 到場沒有看到目標（E_TARGET_LOST）", now, out);
     return out;
   }
-  if (state == RoleState::ARRIVED && rec.state == EventState::DISPATCHED) {
-    setState(rec, EventState::ON_SITE, "角色 " + role + " 到場", now);
-  }
+  aggregate(rec, role, now);
   bool any_mandatory = false;
   bool all_done = true;
   for (const auto & [name, st] : rec.roles) {
@@ -616,6 +738,11 @@ std::string IncidentManager::save() const
     e << YAML::Key << "decided_t" << YAML::Value << r.decided_t;
     e << YAML::Key << "rule" << YAML::Value << r.rule;
     e << YAML::Key << "parent" << YAML::Value << r.parent;
+    e << YAML::Key << "storm" << YAML::Value << r.storm;
+    e << YAML::Key << "merged_into" << YAML::Value << r.merged_into;
+    e << YAML::Key << "merged" << YAML::Value << YAML::Flow << r.merged;
+    e << YAML::Key << "evidence" << YAML::Value << YAML::Flow << YAML::BeginSeq << r.evidence.snapshot_uri <<
+      r.evidence.clip_uri << r.evidence.evidence_uri << r.evidence.score << YAML::EndSeq;
     e << YAML::Key << "roles" << YAML::Value << YAML::BeginMap;
     for (const auto & [name, st] : r.roles) {
       e << YAML::Key << name << YAML::Value << YAML::Flow << YAML::BeginSeq << st.optional
@@ -659,16 +786,23 @@ void IncidentManager::load(const std::string & yaml)
     r.decided_t = n["decided_t"].as<double>();
     r.rule = n["rule"].as<std::string>();
     r.parent = n["parent"].as<std::string>();
+    // C 批加的欄位（B 批的存檔沒有）
+    r.storm = n["storm"] && n["storm"].as<bool>();
+    r.merged_into = n["merged_into"] ? n["merged_into"].as<std::string>() : std::string();
+    if (n["merged"]) {
+      r.merged = n["merged"].as<std::vector<std::string>>();
+    }
+    if (const auto ev = n["evidence"]; ev && ev.size() == 4) {
+      r.evidence.snapshot_uri = ev[0].as<std::string>();
+      r.evidence.clip_uri = ev[1].as<std::string>();
+      r.evidence.evidence_uri = ev[2].as<std::string>();
+      r.evidence.score = ev[3].as<double>();
+    }
     if (const auto roles = n["roles"]) {
       for (const auto & kv : roles) {
         RoleStatus st;
         st.optional = kv.second[0].as<bool>();
-        const std::string name = kv.second[1].as<std::string>();
-        for (int i = 0; i <= static_cast<int>(RoleState::SKIPPED); ++i) {
-          if (name == roleStateName(static_cast<RoleState>(i))) {
-            st.state = static_cast<RoleState>(i);
-          }
-        }
+        st.state = roleStateFromName(kv.second[1].as<std::string>()).value_or(RoleState::PLANNED);
         r.roles[kv.first.as<std::string>()] = st;
       }
     }

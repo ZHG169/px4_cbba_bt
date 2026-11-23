@@ -144,3 +144,18 @@ rules:
         steps:
           - {action: go_to}
           - {action: inspect, object: bag, params: {duration_s: 5, standoff_m: 3}}
+
+  # 告警風暴（2-1 案例 9，C 批）：同一區同時派遣中的事件到了上限（event_manager 的 storm_max_per_zone，預設 3），
+  # 之後的告警不各自派，合併成一次區域巡查（event_manager 的 storm_rule），並通知值班。區域是事件所在的區域（{incident.zone}）；
+  # 不限平台：高壓區狗不能進，無人機也能巡
+  zone_patrol:
+    priority: P1
+    roles:
+      - role: area_patroller
+        platform: any
+        required_capabilities: [rgb_camera]
+        location: {zone: "{incident.zone}"}
+        service_time_s: 60
+        steps:
+          - {action: go_to}
+          - {action: patrol, params: {area: "{incident.zone}", loops: 1}}

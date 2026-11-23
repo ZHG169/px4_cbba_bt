@@ -24,3 +24,13 @@ string task_type
 uint16 task_type_id
 string role
 uint16 role_id
+# 角色的執行進度（L5＋L6 C 批，2026-11-23 使用者決定：閘道統一發布）：閘道收到的 TASK_PROGRESS 合併後的最新一份。
+# progress_assign_version／progress_revision 是這份進度屬於哪一次正式指派、哪一個任務 revision；使用的人（event_manager）
+# 只算 progress_assign_version == assign_version、progress_revision == revision、assign_state 是 RESERVED／ACTIVE 的
+# （換人、改版之後舊的進度不算）。機器人發的 assignments 也照樣填
+uint64 progress_assign_version     # 0 = 還沒有進度
+uint16 progress_revision
+uint16 progress_executor           # 回報的執行者
+uint8 phase                        # TaskProgress 的 PHASE_*
+uint8 step_index                   # TaskProgress 的 STEP_UNKNOWN = 255
+string[] milestones                # 有效的里程碑（cbba_node 依目前的指派版本、incident revision 判斷過；completed 不會出現：結束的任務不列）

@@ -25,6 +25,7 @@ task_types:
   fire_verify:         {id: 8, description: 火情確認}
   left_object_check:   {id: 9, description: 遺留物確認}
   track_target:        {id: 10, description: 追蹤目標}
+  zone_patrol:         {id: 11, description: 區域巡查（告警風暴合併，2-1 案例 9）}
 
 roles:
   aerial_overwatch:    {id: 1, description: 空中監看（無人機，通常 optional）}
@@ -57,3 +58,4 @@ roles:
   task_A:              {id: 27, description: 搶占遲滯的 A（itest group G21A）}
   task_B1:             {id: 28, description: 沒超過 margin 的 B1（itest group G21A）}
   task_B2:             {id: 29, description: 超過 margin 的 B2（itest group G21A）}
+  area_patroller:      {id: 30, description: 區域巡查（event_rules 的 zone_patrol：告警風暴合併，2-1 案例 9）}

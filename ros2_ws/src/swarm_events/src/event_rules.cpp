@@ -237,7 +237,8 @@ std::vector<std::string> checkEventRules(const EventRules & rules, const swarm_c
       static const std::set<std::string> kinds{"incident", "poi", "asset", "zone", "dock"};
       if (!kinds.count(r.location.kind)) {
         errors.push_back(rw + "：location 的種類 " + r.location.kind + " 不認得（incident、poi、asset、zone、dock）");
-      } else if (site != nullptr) {
+      } else if (site != nullptr && r.location.value.find("{incident.") == std::string::npos) {
+        // {incident.zone} 這類代換值展開時才知道，這裡不檢查
         if (r.location.kind == "poi" &&
           std::none_of(site->pois.begin(), site->pois.end(), [&r](const swarm_cbba::Poi & p) {
             return p.role == r.location.value;}))
