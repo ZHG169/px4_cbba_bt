@@ -27,7 +27,7 @@ python3 docker/itest/itest.py loss --tasks 3                   # 每次 3 個任
 python3 docker/itest/itest.py loss --dogs 3                    # 空地（2026-11-09）：3 架無人機＋3 隻狗，每次 12 個任務（空中 6、火警＋巡檢 6）
 python3 docker/itest/itest.py comm --dogs 3 --only C9          # 100% 斷網，空地各自退化成單機
 python3 docker/itest/itest.py demo --world yard --scenario blackout --seed 7 --dog bt   # 100% 斷網的任務退化（真的 BT，報告 B1～B4）
-python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（CB-4，2026-11-16）：閘道注入角色組＋假身體、假 Planner；2026-11-22 起三個連續場景驗證 G0～G21（25 項），--seed 重現；group.mp4
+python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（CB-4，2026-11-16）：閘道注入角色組＋假身體；2026-11-22 起連續場景驗證 G0～G21，11-23 起偵測走 event_manager、加場景四（31 項），--seed 重現；group.mp4
 ```
 
 容器裡已經有在跑的節點、PX4、Gazebo 時會停下來，避免打斷你正在做的事；加 `--kill-existing` 先關掉再跑。
@@ -54,6 +54,15 @@ python3 docker/itest/itest.py group --dogs 3                   # 團隊 CBBA（C
 **group：角色組（CB-4，2026-11-16）**（不開 PX4、BT；閘道 200 在 `cbba_gcs` 跑 cbba_node，`ros2 service call /gcs/inject_task` 注入角色組；
 其他台照 comm 的方式啟動、假 robot_state；BT 用 `task_progress`、`incident_update` 話題假裝；Planner 由 itest 自己扮演（讀 `gcs_incident_updates.txt`、`gcs_fallback_request.txt` 後 `inject_task`）。`/gcs/incident_updates`、`/gcs/fallback_request`
 用 `ros2 topic echo` 寫進輸出目錄的 `gcs_*.txt`，閘道的 log 是 `node_gcs.log`。要 `--dogs 2` 以上，`--dogs 3` 才跑得到 G5 的「角色比狗多」）
+
+**2026-11-23 起（L5＋L6 C 批）偵測走正式的 event_manager**，取代上面說的假 Planner：`cbba_gcs` 另外跑 `swarm_events` 的
+`event_manager`（`group.events_start`：上班時段 0～0 = 一律下班、`vlm_enabled`）和假 VLM `fake_vlm.py`（回覆照輸出目錄的
+`vlm_overrides.json`，預設 confirmed 0.95）。偵測要用**串流**送（`detect_stream`，每秒 2 筆；事件要分數 ≥ theta_on 持續
+min_duration_s 才派遣）。輸出多了 `gcs_incidents.txt`（`/gcs/incidents`）、`gcs_operator_notices.txt`、`node_events.log`、
+`fake_vlm.log`。火警的核准由測試切換 `approval_event_types`（`ros2 param set`）。新增的檢查：E6（小位移不重新拍賣）、
+EP1、EP2（事件依有效進度聚合：DISPATCHED → ON_SITE → EXECUTING → RESOLVED，改版、接手後舊進度不算），場景四 E3（VLM 中信心只派 1 隻）、
+E5（P0 火和 P2 遺留物同時、只剩 1 隻狗）、E9（告警風暴合併成區域巡查）。G5 改成「入侵事件只剩 1 隻狗」→ 閘道整組取消＋FallbackRequest
+→ event_manager 派降級子事件（G7）。單純測閘道、CBBA 的項目照舊直接注入。
 
 每一項開始時，沒有載具手上有任務就把假身體放回出發點（和 Gazebo yard 一樣：無人機起降板、狗的充電樁；2026-11-20）。**任務點依種子在整個 yard 隨機**（2026-11-20，`--seed N` 重現，沒給就用時間；種子記在 G0 的結果與 `group_plan.json`）：圍牆內、不在設備上（`worlds.yard.demo.keep_out`）、平台可以進；同一組的角色彼此 3～10 m；G13、G21A 的低優先級任務離狗 25～45 m（注入高優先級時還在路上）；G17 的協同任務點離巡檢點 15～35 m、比空閒的狗近 6 m 以上；G16 在禁區裡隨機。載具是 ros_bridge 的**假身體**（2026-11-16，不用真的 BT）：收到 current_task 就直線走過去（無人機 0.5、狗 1.0 m/s，`group.body_speed`），
 到了才回報 progress／完成；`body_hold` 模擬斷線（同時停掉 cbba_node）、`body_mode` 改 mode（MANUAL 時不出價）。無人機的 cbba_node 用

@@ -47,7 +47,7 @@ FAIL_RED = "#c62828"
 
 # 三個場景（〈CBBA G0～G21〉第 3～6 頁）：(標題, 說明, [(階段, 段落 id)])；25 個項目都在這三個場景裡
 # 三個場景（2026-11-22 使用者：一個場景是一次連續的模擬，在裡面驗證各檢查點；不是每項做完再剪）。
-# itest group 每個場景一段（S1、S2、S3），檢查點記在 group_plan.json 的 checkpoints
+# itest group 每個場景一段（S1～S4），檢查點記在 group_plan.json 的 checkpoints
 SCENES = [
     ("Scene 1  Intrusion + fire: full closed loop", "one simulation: intrusion team, localize, revise, done; fire, "
      "approval, verify, report", [("", "S1")]),
@@ -55,9 +55,14 @@ SCENES = [
      "fallback, takeover, last dog lost, cascade cancel", [("", "S2")]),
     ("Scene 3  Zone policy, coordinated scheduling, priority preemption", "one simulation: no-dog zone, coordinated "
      "task while patrolling, P0 preemption, preempt margin, P0 watchdog", [("", "S3")]),
+    # 2026-11-23 L5＋L6 C 批：2-1 階段 1 的案例 3、5、9（偵測 → event_manager）
+    ("Scene 4  Event pipeline: confidence, priority, alarm storm", "one simulation: medium confidence -> one dog, "
+     "fire and left object at once, alarm storm -> one area patrol", [("", "S4")]),
 ]
-SCENE_CODES = {"S1": ["G0", "G14", "G14D", "G8", "G4", "G1", "G3", "G2", "G6", "G20", "G18", "G15", "G15R", "G19"],
-               "S2": ["G12", "G5", "G7", "G9", "G10", "G11"], "S3": ["G16", "G17", "G13", "G21A", "G21B"]}
+SCENE_CODES = {"S1": ["G0", "G14", "G14D", "G8", "G4", "E6", "G1", "G3", "G2", "G6", "EP1", "G20", "G18", "G15", "G15R",
+                      "G19"],
+               "S2": ["G12", "G5", "G7", "G9", "EP2", "G10", "G11"], "S3": ["G16", "G17", "G13", "G21A", "G21B"],
+               "S4": ["E3", "E5", "E9"]}
 TITLE_SEC = 8.0
 SCENE_CARD_SEC = 0.0
 RESULT_SEC = 10.0
@@ -70,6 +75,8 @@ NAMES = {
     "G15R": "Repair after rejoin", "G16": "Zone: dogs kept out", "G20": "Bad TaskSpec rejected",
     "G17": "Coop bid: patrol while waiting", "G18": "Approval before inject", "G19": "Report + evidence",
     "G21A": "Preempt margin", "G21B": "P0 watchdog",
+    "E6": "Small move: no re-plan", "EP1": "Incident progress (valid version)", "EP2": "Takeover resets progress",
+    "E3": "Medium confidence: one dog", "E5": "Two incidents: P0 first", "E9": "Alarm storm -> area patrol",
 }
 # 2026-11-20 使用者：用原速、中間不要有任何暫停。Expected、關鍵狀態都不凍結畫面（關鍵狀態在右下顯示 KEY_SHOW 秒）、
 # 場景之間不插卡片（場景名稱在地圖卡標題）；只有片頭標題、片尾結果頁
@@ -378,16 +385,16 @@ def draw_card(fig, plan, report, scene, info):
         ax.text(0.5, 0.46, "covers  " + "  ".join(dict.fromkeys(info["ids"])), ha="center", fontsize=14,
                 family="monospace")
         return
-    ax.text(0.5, 0.93, "Results  G0 - G21", ha="center", fontsize=24, fontweight="bold")
+    ax.text(0.5, 0.93, "Results  G0 - G21, events", ha="center", fontsize=24, fontweight="bold")
     res = {c: v[0] for c, v in report.items()} or plan.get("results", {})
     codes = ["G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9", "G10", "G11", "G12", "G13", "G14", "G14D",
-             "G15", "G15R", "G16", "G17", "G18", "G19", "G20", "G21A", "G21B"]
+             "G15", "G15R", "G16", "G17", "G18", "G19", "G20", "G21A", "G21B", "E3", "E5", "E6", "E9", "EP1", "EP2"]
     for i, c in enumerate(codes):
-        col, row = i // 9, i % 9
+        col, row = i // 11, i % 11
         st = res.get(c, "not run")
         lat = report.get(c, (None, None))[1]
         color = PASS_GREEN if st == "PASS" else FAIL_RED if st == "FAIL" else "#777777"
-        x, y = 0.02 + col * 0.33, 0.82 - row * 0.068
+        x, y = 0.02 + col * 0.33, 0.82 - row * 0.058
         ax.text(x, y, c, fontsize=11, fontweight="bold", family="monospace")
         ax.text(x + 0.045, y, NAMES.get(c, ""), fontsize=9)
         ax.text(x + 0.215, y, st, fontsize=11, color=color, fontweight="bold")

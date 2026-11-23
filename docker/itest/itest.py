@@ -39,6 +39,8 @@ import sys
 import threading
 import time
 
+import yaml   # /gcs/incidents 的 echo（itest group，L5＋L6 C 批）
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import dog_patrol  # noqa: E402  狗巡檢點的進度（2026-11-07）
@@ -1241,7 +1243,10 @@ class LossSuite(CommSuite):
 # =============================================================================
 class GroupSuite(CommSuite):
     """團隊 CBBA（CB-4 與任務欄位補齊）的整合測試：閘道（cbba_gcs，機號 200）＋無人機＋狗（--dogs N）的 cbba_node，
-    載具是 ros_bridge 的假身體（不用真的 BT），Planner、BT 的回報由測試代替。
+    載具是 ros_bridge 的假身體（不用真的 BT），BT 的回報由測試代替。
+    2026-11-23 起（L5＋L6 C 批）偵測走正式的 event_manager（cbba_gcs，swarm_events）：偵測串流 → 閘道 → 事件（L2 累積、
+    L3 關聯、L4 假 VLM fake_vlm.py、L5 狀態機）→ 範本展開（event_rules.yaml）→ inject_task；降級（fallback_request）也由
+    event_manager 派子事件。單純測閘道、CBBA 行為的項目（G10～G13、G16、G17、G20、G21）照舊直接注入。
 
     2026-11-22 起照使用者的三個場景：**每個場景是一次連續的模擬**，主要事件照劇情發生，檢查點在同一次模擬裡依序驗證
     （不是每一項各自做完、歸位，再剪成影片）。場景開始時假身體放回出發點（和 Gazebo yard 一樣），之後不再重設。
@@ -1256,7 +1261,10 @@ class GroupSuite(CommSuite):
         fallback G10 → 值班取消一個角色、連鎖撤銷 G11
       場景三 禁區＋協同排程＋優先級搶占（5）：禁狗區的觀察點由無人機接、限狗的被拒 G16 → 巡檢中的狗接下要等 UAV 觀測的地面角色
         G17 → 唯一能做的狗被 P0 搶占、做完接回 P3 G13 → 同級搶占遲滯 G21A → 狗都被接管時的 P0 看門狗 G21B
-    任務點依 --seed 在整個 yard 隨機（spot()）。--only 給場景（S1、S2、S3）或其中的檢查點，會跑整個場景。
+      場景四 事件流水線（3，2-1 階段 1）：VLM 中信心只派 1 隻 E3 → 遺留物（P2）和火（P0）同時、只剩 1 隻狗先做火 E5 →
+        同一區 5 件火警、上限 3 → 合併成區域巡查 E9
+      L5＋L6 C 批另外加在場景一、二：小位移不重新拍賣 E6、事件依有效進度聚合 EP1（改版後退回）、EP2（接手後退回）
+    任務點依 --seed 在整個 yard 隨機（spot()）。--only 給場景（S1～S4）或其中的檢查點，會跑整個場景。
     結束後畫 group.mp4（animate_group.py：原速，三個場景各一段，標題列顯示檢查點進度）"""
 
     def __init__(self, env, run, only, seed=0):
@@ -1285,6 +1293,11 @@ class GroupSuite(CommSuite):
         self.orphan_file = os.path.join(run.out, "gcs_task_orphaned.txt")
         self.evidence_file = os.path.join(run.out, "gcs_incident_evidence.txt")
         self.pending_approval = {}
+        # L5＋L6 C 批（2026-11-23）：event_manager 的輸出、值班通知、假 VLM 的回覆表
+        self.incidents_file = os.path.join(run.out, "gcs_incidents.txt")
+        self.notices_file = os.path.join(run.out, "gcs_operator_notices.txt")
+        self.vlm_file = os.path.join(run.out, "vlm_overrides.json")
+        self.set_vlm({})
 
     # ---------- 隨機任務點（2026-11-20） ----------
     def spot(self, platform, near=None, rmin=12.0, rmax=45.0, away=(), gap=5.0, check=None, obstacles=True):
@@ -1388,10 +1401,13 @@ class GroupSuite(CommSuite):
         self.note(f"{code} {title}", segment=code)
 
     # 三個場景（2026-11-22 使用者：用三種場景驗證全部項目，一個場景是一次連續的模擬，不是每項做完再剪成影片）
+    # 2026-11-23 L5＋L6 C 批：偵測改走 event_manager（取代假 Planner）；加 EP1、EP2（事件依有效進度聚合）、E6（2-1 案例 6），
+    # 場景四是 2-1 階段 1 的案例 3、5、9
     SCENE_CODES = {
-        "S1": ["G0", "G14", "G14D", "G8", "G4", "G1", "G3", "G2", "G6", "G20", "G18", "G15", "G15R", "G19"],
-        "S2": ["G12", "G5", "G7", "G9", "G10", "G11"],
+        "S1": ["G0", "G14", "G14D", "G8", "G4", "E6", "G1", "G3", "G2", "G6", "EP1", "G20", "G18", "G15", "G15R", "G19"],
+        "S2": ["G12", "G5", "G7", "G9", "EP2", "G10", "G11"],
         "S3": ["G16", "G17", "G13", "G21A", "G21B"],
+        "S4": ["E3", "E5", "E9"],
     }
 
     def scene_wanted(self, sid):
@@ -1544,12 +1560,17 @@ class GroupSuite(CommSuite):
             left.discard(found[0])
         return left
 
-    def finish_role(self, tid, timeout=60.0):
-        """目前持有者走到任務點後回報完成（動畫看得到做完）；回傳持有者"""
-        h, _ = self.wait_holder(tid, 10)
+    def finish_role(self, tid, timeout=60.0, started=False, hold_timeout=10.0):
+        """目前持有者走到任務點後回報完成（動畫看得到做完）；回傳持有者。
+        started：先回報到場、開始執行（task_progress 的 arrived、started；event_manager 的事件經過 ON_SITE、EXECUTING），
+        等閘道的 assignments 帶出去（約 1 s）再回報完成；hold_timeout：等有人拿到的時間"""
+        h, _ = self.wait_holder(tid, hold_timeout)
         if h is None:
             return None
         self.wait_arrived(h, tid, timeout)
+        if started:
+            self.progress(h, tid, 4, 1, ["arrived", "started"])
+            self.run.sleep(1.2)
         self.report(h, tid, True)
         self.wait_released(h, tid, 5.0)
         return h
@@ -1594,16 +1615,31 @@ class GroupSuite(CommSuite):
                 pass
         return best[1]
 
-    # ---------- 偵測與假規劃器（G14、G15，2026-11-17；照〈CBBA G0～G15 測試與影片規劃〉）----------
-    def detect(self, vid, detector, label, x, y, track_id, score=0.92, det=None, shown=None):
+    # ---------- 偵測（G14、G15，2026-11-17；11-23 起由 event_manager 規劃）----------
+    def detect(self, vid, detector, label, x, y, track_id, score=0.92, det=None, shown=None, attrs=None, note=True):
         """機器人的偵測器發 detection（cbba_node 補 agent_id、流水號，送 DETECTION 給閘道）。
-        det：動畫用的偵測編號（之後可以移動、標成誤報）；shown：畫面上的名稱（預設 label）"""
+        det：動畫用的偵測編號（之後可以移動、標成誤報）；shown：畫面上的名稱（預設 label）；
+        attrs：Detection.attrs（JSON；event_manager 讀證據的 snapshot_uri 等）"""
         fields = {"detector": detector, "source": f"{self.env.name(vid)}/camera", "label": label, "score": score,
                   "track_id": int(track_id), "position_valid": True, "position": {"x": float(x), "y": float(y), "z": 0.0},
-                  "attrs": "{}"}
+                  "attrs": json.dumps(attrs or {}, separators=(",", ":"))}
         self.run.publish("detection", vid, fields)
-        self.note(f"{self.env.name(vid)} detects {shown or label}", event="detection", vehicle=vid, x=float(x),
-                  y=float(y), label=shown or label, det=det or f"{vid}:{track_id}")
+        if note:
+            self.note(f"{self.env.name(vid)} detects {shown or label}", event="detection", vehicle=vid, x=float(x),
+                      y=float(y), label=shown or label, det=det or f"{vid}:{track_id}")
+
+    def detect_stream(self, streams, seconds, hz=2.0):
+        """偵測器的串流（L5＋L6 C 批）：event_manager 要「分數 ≥ theta_on 持續 min_duration_s」才派遣、超過 1 s 沒有新偵測就
+        開始遺忘，只送一筆撐不住。streams：[(vid, detector, label, x, y, track_id, {detect 的其他參數})]，同時送；
+        每 1/hz 秒各一筆、共 seconds 秒（頭尾都送：2 Hz、1 s = 3 筆）；回傳第一筆的時刻"""
+        n = int(round(seconds * hz)) + 1
+        t0 = time.time()
+        for k in range(n):
+            for vid, detector, label, x, y, track, kw in streams:
+                self.detect(vid, detector, label, x, y, track, note=(k == 0), **kw)
+            if k < n - 1:
+                self.run.sleep(1.0 / hz)
+        return t0
 
     def det_status(self, det, status, text):
         """動畫：偵測的狀態（rejected = 誤報被拒絕，畫面上標 3 s 後消失）"""
@@ -1648,62 +1684,8 @@ class GroupSuite(CommSuite):
         t = self.run.until(seen, timeout)
         return (t, found[-1]) if t else (None, None)
 
-    # 寫死的假規劃器（PLN-1 之前）：事件種類 → 固定範本 → InjectTask[]。只決定角色與 TaskSpec，不指定哪一台
-    WAIT_LOC = {"role_index": 0, "milestone": "target_localized"}
-    # 範本（2026-11-20 照〈CBBA 模擬先行架構〉第 6 頁）：協同等待寫在 coupling（wait_for、sync、sync_window），不寫死 wait；
-    # alert_operator 移到閘道／GCS 的通知設定（report_policy 的 operator 頻道）。track 只能追 person（actions.yaml）
-    TEMPLATES = {
-        "perimeter_intrusion": {"labels": ("person", "perimeter_intrusion"), "roles": [
-            {"role": "aerial_overwatch", "platform": 1, "caps": "AIR", "optional": True, "skip_satisfies": True,
-             "dx": 0.0, "dy": 0.0, "steps": [{"action": "go_to"},
-                                             {"action": "track", "object": "person", "params": {"duration_s": 5}}]},
-            {"role": "front", "platform": 2, "caps": "GROUND", "dx": 3.0, "dy": 0.0, "precedence": 1,
-             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", "params": {"duration_s": 3},
-                                              "wait_for": [WAIT_LOC], "sync": "front_rear"},
-                       {"action": "speak", "params": {"template": "intrusion_warning"}}]},
-            {"role": "rear", "platform": 2, "caps": "GROUND", "dx": -3.0, "dy": 0.0, "precedence": 1,
-             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", "params": {"duration_s": 3},
-                                              "wait_for": [WAIT_LOC], "sync": "front_rear"}]},
-            # 不限平台的觀察角色（2026-11-22，場景一的 G8：限無人機、限狗、不限平台三種角色在同一個事件裡）
-            {"role": "observer", "platform": 0, "caps": "ANY", "dx": 0.0, "dy": -6.0,
-             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "person", "params": {"duration_s": 3}}]}],
-         "group": {"all_or_nothing": True, "distinct": 0b110, "sync_window": 15}},
-        "fire_response": {"labels": ("fire", "smoke"),
-                          "report_policy": {"channels": ["gcs", "operator"], "required_findings": ["image"]}, "roles": [
-            {"role": "aerial_overwatch", "platform": 1, "caps": "AIR", "optional": True, "skip_satisfies": True,
-             "dx": 0.0, "dy": 2.0, "steps": [{"action": "go_to"},
-                                             {"action": "inspect", "object": "fire",
-                                              "params": {"duration_s": 10, "stream": True}}]},
-            {"role": "ground_fire_verify", "platform": 2, "caps": "GROUND", "dx": 0.0, "dy": 0.0,
-             "steps": [{"action": "go_to"}, {"action": "inspect", "object": "fire", "params": {"duration_s": 3}}]}],
-         "group": {}},
-    }
-
-    def plan_from_detection(self, det, caps, **kw):
-        """假 Planner：Detection → 範本 → inject_task。incident_id 由偵測決定（同一個偵測重送 → 同一組，閘道冪等）。
-        kw：給每個角色的 inject（requires_approval、extra〔證據〕…）。
-        回傳 (範本名稱, incident_id, {角色: task_id〔要核准時是 0〕}, group_id, 全部都是 duplicate)"""
-        name = next(k for k, t in self.TEMPLATES.items() if det["label"] in t["labels"])
-        inc = f"det-{det['agent_id']}-{det['seq']}"
-        out, dups, gid = {}, [], 0
-        for i, r in enumerate(self.TEMPLATES[name]["roles"]):
-            out[r["role"]] = self.inject_role(name, i, inc, det["x"], det["y"], caps, **kw)
-            dups.append(self.last_inject.get("duplicate", False))
-            gid = self.last_inject.get("group_id", 0)
-        return name, inc, out, gid, all(dups)
-
-    def inject_role(self, name, i, inc, x, y, caps, **kw):
-        """範本 name 的第 i 個角色，目標在 (x, y)（Planner 重新展開、改版時也用這個）"""
-        tpl = self.TEMPLATES[name]
-        r, g, roles = tpl["roles"][i], tpl["group"], tpl["roles"]
-        doc = {"template": name, "role": r["role"], "steps": r["steps"]}
-        if tpl.get("report_policy"):
-            doc["report_policy"] = tpl["report_policy"]   # 通知操作員（取代 alert_operator 動作）
-        spec = json.dumps(doc, separators=(",", ":"))
-        return self.inject(inc, r["role"], i, len(roles), r["platform"], caps[r["caps"]], x + r["dx"], y + r["dy"],
-                           spec=spec, precedence=r.get("precedence", 0), all_or_nothing=g.get("all_or_nothing", False),
-                           distinct=g.get("distinct", 0), sync_window=g.get("sync_window", 0),
-                           optional=r.get("optional", False), skip_satisfies=r.get("skip_satisfies", False), **kw)
+    # 寫死的假規劃器（TEMPLATES、plan_from_detection）2026-11-23 拿掉：偵測改走 event_manager（L5＋L6 C 批），
+    # 範本在 site-config/yard/event_rules.yaml（swarm_events 的 test_expander 確認展開結果和原本的範本一樣）
 
     def assigned_msg(self, vid, tid):
         """這台最近一則 current_task（tid）的完整訊息"""
@@ -1741,13 +1723,125 @@ class GroupSuite(CommSuite):
                                  ("/gcs/approvals", "swarm_interfaces/msg/ApprovalState", self.approval_file),
                                  ("/gcs/task_reports", "swarm_interfaces/msg/TaskReport", self.report_file),
                                  ("/gcs/task_orphaned", "swarm_interfaces/msg/TaskOrphaned", self.orphan_file),
-                                 ("/gcs/incident_evidence", "swarm_interfaces/msg/IncidentEvidence", self.evidence_file)):
+                                 ("/gcs/incident_evidence", "swarm_interfaces/msg/IncidentEvidence", self.evidence_file),
+                                 ("/gcs/incidents", "swarm_interfaces/msg/EventIncident", self.incidents_file),
+                                 ("/gcs/operator_notices", "std_msgs/msg/String", self.notices_file)):
             self.env.exec(self.gcs, f"exec ros2 topic echo {topic} {typ}", detach=True,
                           log=self.env.to_container(path))
+        # L5＋L6 C 批（2026-11-23）：event_manager（取代原本的假 Planner）＋假 VLM
+        ev_state = f"{self.run.cout}/ev_state"
+        self.env.exec(self.gcs, f"mkdir -p {ev_state}; exec " + self.g["events_start"].format(state_dir=ev_state),
+                      detach=True, log=f"{self.run.cout}/node_events.log")
+        self.env.exec(self.gcs, "exec " + self.g["vlm_start"].format(repo=self.env.repo,
+                                                                     overrides=self.env.to_container(self.vlm_file)),
+                      detach=True, log=f"{self.run.cout}/fake_vlm.log")
 
     def stop_gateway(self):
         self.env.pkill(self.gcs, self.g["gateway_stop_pattern"])
+        self.env.pkill(self.gcs, self.g["events_stop_pattern"])
+        self.env.pkill(self.gcs, self.g["vlm_stop_pattern"])
         self.env.pkill(self.gcs, self.g["echo_pattern"])
+
+    # ---------- event_manager（L5＋L6 C 批，2026-11-23）----------
+    def set_vlm(self, table):
+        """假 VLM 的回覆表（事件類型 → {verdict, confidence}；"*" 是其他）：fake_vlm.py 每次收到請求都重讀"""
+        with open(self.vlm_file, "w", encoding="utf-8") as f:
+            json.dump(table, f)
+
+    def set_approval_types(self, types):
+        """event_manager 的 approval_event_types（這些事件類型的派遣要值班核准）；空的給 ['none']（參數要維持字串陣列）"""
+        v = "[" + ", ".join(f"'{t}'" for t in (types or ["none"])) + "]"
+        self.env.exec(self.gcs, "ros2 param set /gcs/gcs_event_manager approval_event_types " + shlex.quote(v))
+
+    def read_incidents(self):
+        """/gcs/incidents（EventIncident，ros2 topic echo 的 YAML）→ [每一則的 dict]，照時間順序"""
+        try:
+            with open(self.incidents_file, encoding="utf-8", errors="replace") as f:
+                docs = f.read().split("\n---")
+        except OSError:
+            return []
+        out = []
+        for d in docs:
+            try:
+                doc = yaml.safe_load(d)
+            except yaml.YAMLError:
+                continue   # 寫到一半的最後一則
+            if isinstance(doc, dict) and doc.get("event_id"):
+                doc["event_id"] = str(doc["event_id"])
+                out.append(doc)
+        return out
+
+    def events_now(self):
+        """每個事件最新的一則：{event_id: dict}"""
+        out = {}
+        for d in self.read_incidents():
+            out[d["event_id"]] = d
+        return out
+
+    def wait_event(self, pred, timeout):
+        """等到有事件（最新的一則）pred 成立；回傳那一則或 None"""
+        found = []
+
+        def seen():
+            found[:] = [d for d in self.events_now().values() if pred(d)]
+            return bool(found)
+        self.run.until(seen, timeout, step=0.2)
+        return found[0] if found else None
+
+    def event(self, eid):
+        return self.events_now().get(eid)
+
+    def event_roles(self, eid):
+        """事件目前的角色 → task_id（還沒注入、等核准的是 0）"""
+        d = self.event(eid) or {}
+        return {str(r): int(t) for r, t in zip(d.get("roles") or [], d.get("task_ids") or [])}
+
+    def wait_event_roles(self, eid, timeout, count=None):
+        """等到事件的角色都有 task_id（count：角色數）；回傳 {角色: task_id}（沒等到回傳目前的）"""
+        def ready():
+            r = self.event_roles(eid)
+            return r and all(r.values()) and (count is None or len(r) == count)
+        self.run.until(ready, timeout, step=0.2)
+        return self.event_roles(eid)
+
+    def event_states(self, eid):
+        """事件經過的狀態（照順序，連續相同的合併）：[(狀態, 原因)]"""
+        out = []
+        for d in self.read_incidents():
+            if d["event_id"] == eid and (not out or out[-1][0] != d.get("state")):
+                out.append((d.get("state"), str(d.get("reason") or "")))
+        return out
+
+    @staticmethod
+    def in_order(seq, wanted):
+        """wanted 依序出現在 seq 裡（中間可以有別的）"""
+        it = iter(seq)
+        return all(any(x == w for x in it) for w in wanted)
+
+    def wait_event_state(self, eid, states, timeout):
+        return self.run.until(lambda: (self.event(eid) or {}).get("state") in states, timeout, step=0.2)
+
+    def resolve_event(self, eid, false_alarm, note=""):
+        req = f"{{event_id: '{eid}', false_alarm: {str(false_alarm).lower()}, operator_name: 'itest_op', note: '{note}'}}"
+        r = self.env.exec(self.gcs, "ros2 service call /gcs/resolve_incident swarm_interfaces/srv/ResolveIncident " +
+                          shlex.quote(req))
+        return "ok=True" in r.stdout
+
+    def track_roles(self, eid, roles):
+        """動畫要畫的任務（event_manager 注入的角色）：位置照最新的 current_task 或 task_announced"""
+        for role, tid in roles.items():
+            if not tid:
+                continue
+            msg = None
+            for e in reversed(self.run.events):
+                if e["kind"] in ("assigned", "announced") and e["msg"].get("task_id") == tid:
+                    msg = e["msg"]
+                    break
+            if msg is None:
+                continue
+            pos = msg.get("position") or {}
+            self.remember(tid, eid, role, float(pos.get("x", 0.0)), float(pos.get("y", 0.0)), msg.get("priority", 0),
+                          msg.get("platform", 0), bool(msg.get("optional", False)))
 
     @staticmethod
     def spec_field(spec, key):
@@ -1926,8 +2020,11 @@ class GroupSuite(CommSuite):
         t = run.until(lambda: all(v in run.assigned for v in ids), self.cfg["comm"]["warmup"] + 15)
         run.sleep(4.0)    # 閘道的 membership_ready（lost_timeout ＋ status_period）、開機同步
         missing = [env.name(v) for v in ids if v not in run.assigned]
-        res.add("G0", "節點、閘道上線", "PASS" if t and not missing and env.running(self.gcs, self.g["gateway_stop_pattern"])
-                else "FAIL", "沒上線：" + "、".join(missing) if missing else f"{len(ids)} 台＋閘道；任務點種子 {self.seed}")
+        if not env.running(self.gcs, self.g["events_stop_pattern"]):
+            missing.append("event_manager（看 node_events.log）")
+        res.add("G0", "節點、閘道、event_manager 上線", "PASS" if t and not missing and
+                env.running(self.gcs, self.g["gateway_stop_pattern"]) else "FAIL",
+                "沒上線：" + "、".join(missing) if missing else f"{len(ids)} 台＋閘道＋event_manager；任務點種子 {self.seed}")
         print(f"  任務點種子 {self.seed}（--seed {self.seed} 重現）")
         if missing:
             return
@@ -1941,6 +2038,8 @@ class GroupSuite(CommSuite):
             self.scene2(dogs, uavs, GROUND, AIR)
         if self.scene_wanted("S3"):
             self.scene3(dogs, uavs, GROUND, AIR)
+        if self.scene_wanted("S4"):
+            self.scene4(dogs, uavs)
         self.animate()
 
     # =========================================================================
@@ -1956,32 +2055,48 @@ class GroupSuite(CommSuite):
         self.note(f"G0 {self.g0[0]}: {self.g0[1]}", key="S1")
         caps = {"AIR": AIR, "GROUND": GROUND, "ANY": ["rgb_camera"]}
 
-        # ---------- 入侵：偵測 → 閘道 → 範本 → CBBA 組隊 ----------
+        # ---------- 入侵：偵測串流 → 閘道 → event_manager（L5 事件、L6 範本展開）→ 注入 → CBBA 組隊 ----------
+        # 入侵的觸發條件是 restricted 區域、下班時段（event_manager 的上班時段設成空的）：入侵者放在 Z_HV_B，
+        # 之後走到 Z_HV_C（兩區的 front／rear 觀察點都不同，G6 看得到改版）
         src = dogs[0]
-        sx, sy = self.here(src)
-        px, py = self.spot(2, near=(sx, sy), rmin=8, rmax=30)
+        px, py = self.spot_in_zone("Z_HV_B")
         t_d = time.time()
-        self.detect(src, "person_yolo_v1", "person", px, py, track_id=77, det="intruder", shown="intruder")
+        self.detect_stream([(src, "person_yolo_v1", "person", px, py, 77, dict(det="intruder", shown="intruder"))], 3.0)
         t_g, det = self.wait_detection(src, "person", t_d, 10)
         if det is None:
-            for c in ("G14", "G14D", "G8", "G4", "G1", "G3", "G2", "G6"):
+            for c in ("G14", "G14D", "G8", "G4", "E6", "G1", "G3", "G2", "G6", "EP1"):
                 self.check(c, "入侵事件", False, f"10 s 內閘道沒收到 {env.name(src)} 的偵測")
         else:
-            self.intrusion(src, det, px, py, t_d, t_g, caps)
+            self.intrusion(src, det, px, py, t_d, t_g)
         # ---------- 火警 ----------
         self.fire(dogs, uavs, caps, GROUND)
 
-    def intrusion(self, src, det, px, py, t_d, t_g, caps):
+    def intrusion(self, src, det, px, py, t_d, t_g):
         env, run = self.env, self.run
         pos_ok = det["x"] is not None and math.dist((det["x"], det["y"]), (px, py)) < 0.1
-        name, inc, roles, gid, _ = self.plan_from_detection(det, caps)
-        _, _, roles2, gid2, dup = self.plan_from_detection(det, caps)       # 同一個偵測重送給規劃器
-        self.check("G14D", "去重：同一個偵測重送給規劃器 → 閘道回同一組、不建第二組", dup and roles2 == roles and gid2 == gid,
-                   f"incident {inc}、group {gid}；重送 duplicate {dup}、task_id {'相同' if roles2 == roles else '不同'}",
-                   "same detection re-planned -> same group, no second team")
+        ev = self.wait_event(lambda d: d.get("event_type") == "perimeter_intrusion" and d.get("rule") ==
+                             "perimeter_intrusion" and d.get("state") in ("DISPATCHED", "ON_SITE", "EXECUTING"), 15)
+        if ev is None:
+            for c in ("G14", "G14D", "G8", "G4", "E6", "G1", "G3", "G2", "G6", "EP1"):
+                self.check(c, "入侵事件", False, "15 s 內 event_manager 沒有派 perimeter_intrusion（看 node_events.log）")
+            return
+        inc = ev["event_id"]
+        roles = self.wait_event_roles(inc, 10, count=4)
+        self.track_roles(inc, roles)
+        # G14D：同一個入侵者的偵測繼續送（2-1 案例 2）→ 還是同一個事件、閘道沒有多注入
+        self.detect_stream([(src, "person_yolo_v1", "person", px, py, 77, dict(det="intruder"))], 2.0)
+        run.sleep(1.5)
+        same = [e for e in self.events_now().values() if e.get("event_type") == "perimeter_intrusion" and
+                not e.get("parent")]
+        again = self.event(inc) or {}
+        dup = len(same) == 1 and again.get("plan_version") == 1 and self.event_roles(inc) == roles
+        self.check("G14D", "去重：同一個入侵者的偵測繼續送 → event_manager 還是同一個事件，閘道沒有多注入", dup,
+                   f"事件 {inc}（入侵事件共 {len(same)} 個）、plan_version {again.get('plan_version')}、"
+                   f"角色任務{'不變' if self.event_roles(inc) == roles else '變了'}",
+                   "repeated detections -> same incident, no second injection")
         hold = {r: self.wait_holder(t, 25) for r, t in roles.items()}
         h = {r: v[0] for r, v in hold.items()}
-        ha, hf, hr, ho = h["aerial_overwatch"], h["front"], h["rear"], h["observer"]
+        ha, hf, hr, ho = h.get("aerial_overwatch"), h.get("front"), h.get("rear"), h.get("observer")
         t_team = max((v[1] for v in hold.values() if v[1]), default=None)
         # G4：front／rear 不同的狗
         self.check("G4", "distinct：front、rear 由不同的狗執行", hf is not None and hr is not None and env.is_dog(hf) and
@@ -2007,10 +2122,25 @@ class GroupSuite(CommSuite):
                    f"overwatch -> {env.name(ha) if ha else '-'} (UAV only), observer -> {env.name(ho) if ho else '-'} "
                    f"(highest TDR bid {win_bid if win_bid is None else round(win_bid, 1)})")
         if not (ha and hf and hr and ho):
-            for c in ("G1", "G3", "G2", "G6", "G14"):
+            for c in ("E6", "G1", "G3", "G2", "G6", "G14", "EP1"):
                 self.check(c, "入侵事件", False, "組隊不完整，後面沒辦法驗證")
             return
         tf, tr, ta = roles["front"], roles["rear"], roles["aerial_overwatch"]
+        # E6（2-1 案例 6）：入侵者小幅移動（< retarget 3 m）→ 不重新展開、不改版、持有者不變
+        sx, sy = self.spot(None, near=(px, py), rmin=1.0, rmax=2.0, obstacles=False,
+                           check=lambda x, y: forbidden_zone(self.zones, x, y, 2) == "Z_HV_B")
+        self.note("intruder shuffles 1-2 m")
+        self.walk_target("intruder", (px, py), (sx, sy), seconds=1.5)
+        self.detect_stream([(src, "person_yolo_v1", "person", sx, sy, 77, dict(det="intruder"))], 2.0)
+        run.sleep(2.0)
+        e6 = self.event(inc) or {}
+        revs = {r: self.assigned_revision(h[r], t) for r, t in roles.items()}
+        kept = all(self.run.assigned.get(h[r], (None,))[0] == t for r, t in roles.items())
+        self.check("E6", "移動入侵者：小位移（< 3 m）不重新展開、不重新拍賣", e6.get("plan_version") == 1 and
+                   all(v == 1 for v in revs.values()) and kept,
+                   f"移動 {math.dist((px, py), (sx, sy)):.1f} m；plan_version {e6.get('plan_version')}、角色 revision {revs}、"
+                   f"持有者{'不變' if kept else '變了'}", "intruder moved < 3 m: no re-plan, no re-auction")
+        px, py = sx, sy
         # G3、G1：先到的狗在會合點等同伴；兩隻都到了還在等 UAV 定位；UAV 定位後一起 OPEN
         run.until(lambda: (hf, tf) in run.arrived or (hr, tr) in run.arrived, 60)
         d1, t1_, d2, t2_ = (hf, tf, hr, tr) if (hf, tf) in run.arrived else (hr, tr, hf, tf)
@@ -2029,6 +2159,7 @@ class GroupSuite(CommSuite):
         self.progress(ha, ta, 4, 1, ["target_localized"])
         t0 = time.time()
         t_open = run.until(lambda: self.gate(hf, 1) == 0 and self.gate(hr, 1) == 0, 10)
+        on_site = (self.event(inc) or {}).get("state")
         self.check("G3", "會合點：先到的狗等同伴，兩隻都到才解除會合的等待", sync_wait and loc_wait,
                    f"{env.name(d1)} 先到時 waiting_for {w1}；兩隻都到後 {ws}",
                    f"{env.name(d1)} waited at the sync point until {env.name(d2)} arrived")
@@ -2036,8 +2167,8 @@ class GroupSuite(CommSuite):
                    f"定位前 waiting_for {ws}；定位後 " + (f"{t_open - t0:.2f} s 都 OPEN" if t_open else "10 s 內沒有都 OPEN"),
                    f"gates OPEN {t_open - t0:.2f} s after {env.name(ha)} localized" if t_open else "gates did not open",
                    latency=round(t_open - t0, 3) if t_open else None)
-        # G2：人移動 → UAV 更新事件位置 → 閘道接受、全隊 incident revision 1
-        nx, ny = self.spot(2, near=(px, py), rmin=6, rmax=12)
+        # G2：人移動到 Z_HV_C → UAV 更新事件位置 → 閘道接受、全隊 incident revision 1
+        nx, ny = self.spot_in_zone("Z_HV_C")
         self.note("intruder moves", vehicle=ha)
         self.walk_target("intruder", (px, py), (nx, ny))     # 入侵者走到新位置（畫面上看得到），UAV 才回報新位置
         upd = {"task_id": ta, "position_valid": True, "position": {"x": float(nx), "y": float(ny), "z": 0.0},
@@ -2051,97 +2182,119 @@ class GroupSuite(CommSuite):
                    f"incident_updates {'有' if acc else '沒有'}、狗的 revision "
                    f"{[run.teammates.get(v, ({}, 0))[0].get('incident_revision') for v in (hf, hr)]}、gate "
                    f"{[self.gate(v, 1) for v in (hf, hr)]}", "gateway accepted the update: incident revision 1 for the team")
-        # G6：Planner 依新位置重新展開：只有 front、rear（觀察點跟著目標）改版，空中、observer 不改
-        try:
-            for i, role in ((1, "front"), (2, "rear")):
-                self.inject_role(name, i, inc, nx, ny, caps, revision=2, incident_revision=1, want="revised")
-            revised = run.until(lambda: self.assigned_revision(hf, tf) == 2 and self.assigned_revision(hr, tr) == 2, 10)
-            others = (self.assigned_revision(ha, ta), self.assigned_revision(ho, roles["observer"]))
-            self.check("G6", "假 Planner：incident 更新後只改版 TaskSpec 改了的角色", bool(revised) and others == (1, 1),
-                       f"front／rear revision {self.assigned_revision(hf, tf)}／{self.assigned_revision(hr, tr)}（要 2）、"
-                       f"overwatch／observer {others}（要 1）", "planner revised only front/rear (revision 2)")
-        except RuntimeError as e:
-            self.check("G6", "假 Planner：incident 更新後改版", False, str(e)[:300])
+        # G6：event_manager 收到 incident_updates → 依新位置重新展開：只有 front、rear（觀察點跟著目標換區）改版，
+        # 空中（追蹤，retarget false）、observer（retarget false）不改
+        revised = run.until(lambda: self.assigned_revision(hf, tf) == 2 and self.assigned_revision(hr, tr) == 2, 15)
+        others = (self.assigned_revision(ha, ta), self.assigned_revision(ho, roles["observer"]))
+        pv = (self.event(inc) or {}).get("plan_version")
+        self.check("G6", "event_manager：incident 更新後重新展開，只改版 TaskSpec、位置改了的角色", bool(revised) and
+                   others == (1, 1) and pv == 2,
+                   f"plan_version {pv}；front／rear revision {self.assigned_revision(hf, tf)}／{self.assigned_revision(hr, tr)}"
+                   f"（要 2）、overwatch／observer {others}（要 1）", "event_manager re-planned: only front/rear revised")
+        self.track_roles(inc, roles)
         # 完成：狗走到新的觀察點，各角色做完 → 入侵閉環
         for v, t in ((hf, tf), (hr, tr)):
             f = self.plan["tasks"].get(str(t), {})
             self.wait_near(v, f.get("x", 0.0), f.get("y", 0.0), 40)
         for t in roles.values():
-            self.finish_role(t)
+            self.finish_role(t, started=True)
         done = run.until(lambda: all(self.closed_anywhere(t) for t in roles.values()), 10)
-        self.check("G14", "狗偵測到人 → 閘道 → Planner 入侵範本 → CBBA 組隊 → 執行完成（入侵閉環）",
-                   pos_ok and done is not None,
+        resolved = self.wait_event_state(inc, ("RESOLVED",), 10)
+        # EP1：事件狀態依有效進度聚合：到場 ON_SITE → 改版後舊進度不算、退回 DISPATCHED → 開始執行 EXECUTING → RESOLVED
+        states = self.event_states(inc)
+        names = [x for x, _ in states]
+        fell_back = any(x == "DISPATCHED" and "舊進度不算" in why for x, why in states)
+        self.check("EP1", "事件狀態依有效進度聚合：ON_SITE → 改版後舊進度不算（退回）→ EXECUTING → RESOLVED",
+                   self.in_order(names, ["DISPATCHED", "ON_SITE", "DISPATCHED", "EXECUTING", "RESOLVED"]) and fell_back,
+                   "狀態 " + " → ".join(names), "incident: DISPATCHED -> ON_SITE -> (revised: back) -> EXECUTING -> RESOLVED")
+        self.check("G14", "狗偵測到人 → 閘道 → event_manager 入侵範本 → CBBA 組隊 → 執行完成、事件結案（入侵閉環）",
+                   pos_ok and done is not None and resolved is not None,
                    f"來源 {env.name(src)}（位置{'正確' if pos_ok else '不對'}）、偵測到閘道 {t_g - t_d:.2f} s、"
-                   + (f"偵測到組隊 {t_team - t_d:.1f} s；" if t_team else "") + ("全部完成" if done else "沒有全部完成"),
-                   "intrusion loop closed: detection -> team -> localize -> revise -> all roles DONE",
+                   + (f"偵測到組隊 {t_team - t_d:.1f} s；" if t_team else "") + ("全部完成" if done else "沒有全部完成") +
+                   f"；事件 {inc} {'RESOLVED' if resolved else (self.event(inc) or {}).get('state')}",
+                   "intrusion loop closed: detection -> incident -> team -> localize -> revise -> RESOLVED",
                    latency=round(t_team - t_d, 2) if t_team else None)
 
     def fire(self, dogs, uavs, caps, GROUND):
         env, run = self.env, self.run
         src = uavs[-1]
         sx, sy = self.here(src)
-        # 誤報：UAV 看到反光，Planner 要求核准，值班拒絕 → 不建任務（G18 的拒絕那一半）
+        self.set_approval_types(["fire"])     # 場域政策：火警的派遣要值班核准（G18）
+        # 誤報：UAV 看到反光 → event_manager 派火警範本、要核准 → 值班拒絕 → 不建任務、事件 FALSE_ALARM（G18 的拒絕那一半）
         ax_, ay_ = self.spot(2, near=(sx, sy), rmin=10, rmax=40)
-        self.detect(src, "apriltag_fire", "fire", ax_, ay_, track_id=102, det="false_alarm", shown="fire? (reflection)")
-        _, fdet = self.wait_detection(src, "fire", time.time() - 0.5, 10)
-        rejected_ok, rej_inc = False, None
-        if fdet:
-            before = {t for k in run.known.values() for t in k}
-            _, rej_inc, _, _, _ = self.plan_from_detection(fdet, caps, requires_approval=True)
+        before = {t for k in run.known.values() for t in k}
+        self.detect_stream([(src, "apriltag_fire", "fire", ax_, ay_, 102,
+                             dict(det="false_alarm", shown="fire? (reflection)"))], 2.0)
+        fa = self.wait_event(lambda d: d.get("event_type") == "fire" and self.event_near(d, ax_, ay_) and
+                             d.get("state") == "DISPATCHED", 15)
+        rejected_ok, rej_detail = False, "event_manager 沒有派遣"
+        if fa:
+            rej_inc = fa["event_id"]
+            _, w0 = self.wait_echo(self.approval_file, lambda f, _: f.get("incident_id") == rej_inc and
+                                   f.get("state") == "1", 10)
+            run.sleep(1.0)
             self.note("operator: false alarm (reflection) -> reject")
-            ok_r, got = self.approve_incident(rej_inc, False, "false alarm")
+            ok_r, _ = self.approve_incident(rej_inc, False, "false alarm")
             self.det_status("false_alarm", "rejected", "operator: false alarm (reflection) - rejected, no task")
             _, rdoc = self.wait_echo(self.approval_file, lambda f, _: f.get("incident_id") == rej_inc and
                                      f.get("state") == "4", 5)
+            fa_state = self.wait_event_state(rej_inc, ("FALSE_ALARM",), 5)
             run.sleep(2.0)
-            rejected_ok = ok_r and not got and rdoc is not None and not ({t for k in run.known.values() for t in k} - before)
-        # 真的火
+            leak = {t for k in run.known.values() for t in k} - before
+            rejected_ok = ok_r and w0 is not None and rdoc is not None and fa_state is not None and not leak
+            rej_detail = (f"{rej_inc} 等核准{'有' if w0 else '沒有'}、拒絕{'成功' if ok_r else '失敗'}、事件 "
+                          f"{(self.event(rej_inc) or {}).get('state')}、{'多出任務（錯）' if leak else '沒建任務'}")
+        # G20：外部規劃器（例如之後的 VLM 提案）給了錯誤的 spec → 閘道拒絕，機器人收不到（event_manager 自己的展開先檢查過）
+        bad_inc = self.incident_name("badspec")
         fx, fy = self.spot(2, near=(sx, sy), rmin=10, rmax=40, away=[(ax_, ay_)], gap=8)
-        t_d = time.time()
-        self.detect(src, "apriltag_fire", "fire", fx, fy, track_id=101, det="fire")
-        t_g, det = self.wait_detection(src, "fire", t_d, 10)
-        if det is None:
-            for c in ("G20", "G18", "G15", "G15R", "G19"):
-                self.check(c, "火警事件", False, f"10 s 內閘道沒收到 {env.name(src)} 的偵測")
-            return
-        inc = f"det-{det['agent_id']}-{det['seq']}"
-        # G20：Planner 第一次展開的 spec 有錯 → 閘道拒絕，機器人收不到
         before = {t for k in run.known.values() for t in k}
         got = {}
         for code, bad in (("UNKNOWN_ACTION", '{"steps": [{"action": "extinguish_now"}]}'),
                           ("PARAM_OUT_OF_RANGE", '{"steps": [{"action": "inspect", "object": "fire", '
                                                  '"params": {"duration_s": 1000}}]}')):
-            self.inject(inc, "ground_fire_verify", 1, 2, 2, GROUND, fx, fy, spec=bad, expect_reject=True)
+            self.inject(bad_inc, "ground_fire_verify", 1, 2, 2, GROUND, fx, fy, spec=bad, expect_reject=True)
             got[code] = code in self.last_reject
         run.sleep(2.0)
         leaked = ({t for k in run.known.values() for t in k}) - before
-        self.check("G20", "TaskSpec 檢查：Planner 的錯誤 spec 被閘道拒絕（錯誤碼），機器人收不到", all(got.values()) and not leaked,
+        self.check("G20", "TaskSpec 檢查：外部規劃器的錯誤 spec 被閘道拒絕（錯誤碼），機器人收不到", all(got.values()) and not leaked,
                    "、".join(f"{c} {'拒絕' if v else '沒擋到'}" for c, v in got.items()) +
                    (f"；多出 {len(leaked)} 個任務（錯）" if leaked else "；機器人沒有收到"),
                    "bad TaskSpec rejected (UNKNOWN_ACTION, PARAM_OUT_OF_RANGE); no robot saw it")
         # G15R：一隻狗在建組前離線
         late = dogs[-1]
         self.crash(late)
-        # G18：改正的 spec，火警要核准；等待中機器人收不到 → 核准才注入
-        ev = f"evidence://{inc}/snapshot/cam_uav.jpg"
-        vlm = f"evidence://{inc}/vlm/1.json"
-        extra = (f", evidence_uri: '{ev}', evidence_confidence: 0.92, camera_ids: ['{env.name(src)}-down'], "
-                 f"snapshot_uri: '{ev}', vlm_result_uri: '{vlm}'")
+        # 真的火：偵測串流帶截圖的參照（attrs）→ event_manager 派火警範本、證據一起注入；要核准 → 等待中機器人收不到 → 核准才注入
+        ev = f"evidence://{env.name(src)}/fire_101/snapshot.jpg"
+        t_d = time.time()
+        self.detect_stream([(src, "apriltag_fire", "fire", fx, fy, 101, dict(det="fire", attrs={"snapshot_uri": ev}))], 2.0)
+        t_g, det = self.wait_detection(src, "fire", t_d, 10)
+        fe = self.wait_event(lambda d: d.get("event_type") == "fire" and self.event_near(d, fx, fy) and
+                             d.get("state") == "DISPATCHED", 15) if det else None
+        if fe is None:
+            self.check("G18", "核准", False, ("沒有派遣" if det else "閘道沒收到偵測") + f"；誤報：{rej_detail}")
+            for c in ("G15", "G15R", "G19"):
+                self.check(c, "火警事件", False, "event_manager 沒有派火警範本（看 node_events.log）")
+            self.revive(late)
+            self.set_approval_types([])
+            return
+        inc = fe["event_id"]
         before = {t for k in run.known.values() for t in k}
-        name, inc, roles0, _, _ = self.plan_from_detection(det, caps, requires_approval=True, extra=extra)
-        _, wdoc = self.wait_echo(self.approval_file, lambda f, _: f.get("incident_id") == inc and f.get("state") == "1", 5)
+        _, wdoc = self.wait_echo(self.approval_file, lambda f, _: f.get("incident_id") == inc and f.get("state") == "1", 10)
         run.sleep(3.0)
         waiting_leak = ({t for k in run.known.values() for t in k}) - before
         self.note("operator approves the fire response")
-        ok_a, roles = self.approve_incident(inc, True, "confirmed")
+        ok_a, _ = self.approve_incident(inc, True, "confirmed")
         _, idoc = self.wait_echo(self.approval_file, lambda f, _: f.get("incident_id") == inc and f.get("state") == "3", 5)
+        roles = self.wait_event_roles(inc, 10, count=2)
+        self.track_roles(inc, roles)
+        self.set_approval_types([])
         gv = roles.get("ground_fire_verify")
         hg, tg = self.wait_holder(gv, 25) if gv else (None, None)
-        self.check("G18", "核准：要核准的先等（機器人收不到）、核准後才注入；誤報被拒絕的不建任務",
+        self.check("G18", "核准：要核准的先等（機器人收不到）、核准後才注入；誤報被拒絕的不建任務、事件標誤報",
                    wdoc is not None and not waiting_leak and ok_a and gv and hg is not None and idoc is not None and
                    rejected_ok,
                    f"等待 {'有' if wdoc else '沒有'}、等待中{'多出任務（錯）' if waiting_leak else '沒有任務'}；核准 → "
-                   f"{'注入、' + env.name(hg) + ' 接手' if hg else '沒人接'}；誤報 {'拒絕、沒建任務' if rejected_ok else '不對'}",
+                   f"{'注入、' + env.name(hg) + ' 接手' if hg else '沒人接'}；誤報：{rej_detail}",
                    f"approved -> injected, {env.name(hg) if hg else '-'} takes it; false alarm rejected")
         # G15：地面角色給狗、無人機出價 0
         run.sleep(1.0)
@@ -2155,15 +2308,16 @@ class GroupSuite(CommSuite):
         self.check("G15R", "補發：建組時離線的狗回來後補到任務定義", repaired is not None,
                    f"{env.name(late)} 回來 " + (f"{repaired - t_r:.1f} s 後認得 {len(roles)} 個角色" if repaired else "15 s 內沒補到"),
                    f"{env.name(late)} back online: missing task definitions repaired")
-        # G19：證據隨任務、完成回報帶步數、附件、最後位置
-        _, edoc = self.wait_echo(self.evidence_file, lambda f, raw: f.get("incident_id") == inc and vlm in raw, 5)
+        # G19：證據（偵測帶的截圖參照）隨任務、完成回報帶步數、附件、最後位置
+        _, edoc = self.wait_echo(self.evidence_file, lambda f, raw: f.get("incident_id") == inc and ev in raw, 5)
         m = self.assigned_msg(hg, gv) if hg else None
         spec_ev = self.spec_field(m.get("spec") if m else "", "evidence")
-        spec_ok = isinstance(spec_ev, dict) and spec_ev.get("uri") == ev and "confidence" in spec_ev and \
-            vlm not in ((m or {}).get("spec") or "")
+        spec_ok = isinstance(spec_ev, dict) and spec_ev.get("uri") == ev and "confidence" in spec_ev
         rep_ok, fx2, fy2 = False, 0.0, 0.0
         if hg is not None:
             self.wait_arrived(hg, gv, 60)
+            self.progress(hg, gv, 4, 1, ["arrived", "started"])
+            run.sleep(1.2)
             fx2, fy2 = self.here(hg)
             atts = [f"evidence://{inc}/snapshot/{env.name(hg)}_{k}.jpg" for k in (1, 2)]
             self.report(hg, gv, True, findings_uri=f"evidence://{inc}/findings/{env.name(hg)}.json", attachments=atts)
@@ -2175,20 +2329,27 @@ class GroupSuite(CommSuite):
                 rep_ok = (f.get("success") == "true" and f.get("completed_steps") == "2" and all(a in raw for a in atts)
                           and pxy is not None and math.dist((float(pxy.group(1)), float(pxy.group(2))), (fx2, fy2)) < 0.5
                           and f.get("missing_findings") == "false" and "- gcs" in raw and "- operator" in raw)
-        self.check("G19", "回報與證據：證據 URI 隨任務、完成回報帶步數、附件、最後位置", edoc is not None and spec_ok and rep_ok,
-                   f"incident_evidence {'有' if edoc else '沒有'}；spec 的 evidence {'只有 uri、信心值' if spec_ok else spec_ev}；"
+        self.check("G19", "回報與證據：偵測的證據參照隨任務、完成回報帶步數、附件、最後位置", edoc is not None and spec_ok and rep_ok,
+                   f"incident_evidence {'有' if edoc else '沒有'}；spec 的 evidence {'uri、信心值' if spec_ok else spec_ev}；"
                    f"回報 {'completed_steps 2、2 個附件、最後位置、channels gcs＋operator' if rep_ok else '不對或沒有'}",
                    f"{env.name(hg) if hg else '-'} reported 2 steps, 2 attachments, final ({fx2:.1f}, {fy2:.1f}); evidence linked")
         for t in roles.values():
             if t != gv:
-                self.finish_role(t)
+                self.finish_role(t, started=True)
         done = run.until(lambda: all(self.closed_anywhere(t) for t in roles.values()), 10)
-        self.check("G15", "UAV 偵測到火 → 閘道 → Planner 火警範本 → 狗接手地面角色（無人機出價 0）→ 火警閉環",
-                   hg is not None and env.is_dog(hg) and uav_zero and done is not None,
+        resolved = self.wait_event_state(inc, ("RESOLVED",), 10)
+        self.check("G15", "UAV 偵測到火 → 閘道 → event_manager 火警範本 → 狗接手地面角色（無人機出價 0）→ 火警閉環、事件結案",
+                   hg is not None and env.is_dog(hg) and uav_zero and done is not None and resolved is not None,
                    f"ground_fire_verify → {env.name(hg) if hg else '無'}；無人機出價 " +
                    "、".join(f"{env.name(v)} {b:.0f}" for v, b in sorted(uav_bids.items())) +
-                   f"；{'全部完成' if done else '沒有全部完成'}", "fire loop closed: a dog verified the fire; UAVs bid 0",
+                   f"；{'全部完成' if done else '沒有全部完成'}；事件 {inc} {(self.event(inc) or {}).get('state')}",
+                   "fire loop closed: a dog verified the fire; UAVs bid 0; incident RESOLVED",
                    latency=round(tg - t_d, 2) if tg else None)
+
+    @staticmethod
+    def event_near(d, x, y, r=3.0):
+        p = d.get("position") or {}
+        return math.dist((float(p.get("x", 1e9)), float(p.get("y", 1e9))), (x, y)) <= r
 
     # =========================================================================
     # 場景二：資源不足＋失聯＋降級恢復（G12、G5、G7、G9、G10、G11），一次連續的模擬
@@ -2196,8 +2357,9 @@ class GroupSuite(CommSuite):
     def scene2(self, dogs, uavs, GROUND, AIR):
         env, run = self.env, self.run
         self.scene_start("S2", "Scene 2  Resource shortage, lost agents, degraded recovery",
-                         "UAVs grounded -> optional overwatch skipped; 4-dog event with 3 dogs -> fallback to one dog; "
-                         "that dog goes offline -> takeover; last capable dog lost -> fallback; operator cancel -> cascade")
+                         "UAVs grounded -> optional overwatch skipped; intrusion with one dog left -> incident escalated, "
+                         "one-dog verify; that dog goes offline -> takeover (progress resets); last capable dog lost -> "
+                         "fallback; operator cancel -> cascade")
         # ---------- 無人機停飛：optional 空中角色略過（G12） ----------
         for u in uavs:
             self.set_mode(u, 1)
@@ -2218,52 +2380,67 @@ class GroupSuite(CommSuite):
         if g_alive:
             self.finish_role(g)
 
-        # ---------- 要 4 隻狗的事件、只有 3 隻 → 整組取消＋fallback（G5）→ Planner 改成單狗確認（G7） ----------
-        inc = self.incident_name("aon")
-        n = len(dogs) + 1
-        mask = (1 << n) - 1
+        # ---------- 入侵事件、只剩 1 隻狗能用 → 整組湊不齊、取消＋fallback（G5）→ event_manager 降級派單狗確認（G7） ----------
+        # 入侵範本要 front、rear 兩隻不同的狗（all-or-nothing）；其他狗被人工接管、無人機停飛 → 湊不齊 → 閘道 10 s 後整組取消、
+        # FallbackRequest（single_dog_verify）→ event_manager 升級原事件、派降級的子事件（L5＋L6 C 批：原本是假 Planner）
+        d0 = dogs[0]
+        for d in dogs[1:]:
+            self.set_mode(d, 1)
+        self.note("operators take over " + ", ".join(env.name(d) for d in dogs[1:]) + ": only " + env.name(d0) + " left")
+        run.sleep(2.0)
         since = time.time()
-        base = self.spot(2)
-        pts = [base]
-        while len(pts) < n:
-            pts.append(self.spot(2, near=base, rmin=3, rmax=10, away=pts, gap=2.5))
-        tids = [self.inject(inc, f"role{i}", i, n, 2, GROUND, *pts[i], all_or_nothing=True, distinct=mask,
-                            fallback="single_dog_verify") for i in range(n)]
+        ix, iy = self.spot_in_zone("Z_HV_A")
+        self.detect_stream([(d0, "person_yolo_v1", "person", ix, iy, 55, dict(det="intruder2", shown="intruder"))], 3.0)
+        ev2 = self.wait_event(lambda d: d.get("event_type") == "perimeter_intrusion" and self.event_near(d, ix, iy) and
+                              not d.get("parent") and d.get("rule") == "perimeter_intrusion", 15)
+        inc = ev2["event_id"] if ev2 else None
+        tids = list(self.wait_event_roles(inc, 10, count=4).values()) if inc else []
+        if inc:
+            self.track_roles(inc, self.event_roles(inc))
         self.timer("since group injected", "group recovery 10 s")
         run.sleep(6.0)
         assigned_early = [t for t in tids if run.ever_held(t, since)]
-        fb = self.wait_file(self.fallback_file, ["fallback_template: single_dog_verify", "failure_version: 1"], 15)
-        closed = run.until(lambda: all(self.closed_anywhere(t) for t in tids), 5)
+        fb = inc is not None and self.wait_file(self.fallback_file, [f"incident_id: {inc}",
+                                                                     "fallback_template: single_dog_verify"], 15)
+        closed = run.until(lambda: all(self.closed_anywhere(t) for t in tids), 5) if tids else None
         self.check("G5", "all-or-nothing 湊不齊：不發任務，10 s 後整組取消、FallbackRequest",
-                   not assigned_early and fb and closed is not None,
-                   f"{n} 個角色、{len(dogs)} 隻狗；發過 current_task 的 {len(assigned_early)} 個；"
-                   f"fallback_request {'有' if fb else '沒有'}；整組 {'已' if closed else '沒有'}取消",
-                   f"{n} roles but {len(dogs)} dogs: nothing assigned; group cancelled + fallback")
-        if not closed:
+                   inc is not None and not assigned_early and fb and closed is not None,
+                   (f"事件 {inc}：4 個角色、能用的狗 1 隻；發過 current_task 的 {len(assigned_early)} 個；"
+                    f"fallback_request {'有' if fb else '沒有'}；整組 {'已' if closed else '沒有'}取消") if inc else
+                   "event_manager 沒有派入侵範本", "team needs 2 distinct dogs, only 1 left: nothing assigned; group cancelled")
+        if tids and not closed:
             self.cancel(tids)
-        req = self.read_fallback() if fb else None
-        h = None
-        if req:
-            fb_inc = f"{req.get('incident_id', inc)}-fallback-{req.get('failure_version', '1')}"
-            t_f = time.time()
-            verify = self.inject(fb_inc, "verify", 0, 1, 2, GROUND, *self.spot(2, near=base, rmin=0, rmax=6),
-                                 fallback="fb_takeover")
-            h, t = self.wait_holder(verify, 15)
-        self.check("G7", "假 Planner：收到 fallback_request → 注入單狗確認、有狗接", h is not None,
-                   (f"範本 {req.get('fallback_template')}；{env.name(h)} {t - t_f:.1f} s 拿到" if h is not None else
-                    "沒有 fallback_request" if not req else "15 s 內沒人接"),
-                   f"planner injects single_dog_verify -> {env.name(h) if h else '-'}")
+        child = f"{inc}-fb1" if inc else None
+        h, verify, t_f = None, None, time.time()
+        if fb:
+            ce = self.wait_event(lambda d: d.get("event_id") == child and d.get("rule") == "single_dog_verify", 10)
+            if ce:
+                verify = self.wait_event_roles(child, 10, count=1).get("verify")
+                self.track_roles(child, {"verify": verify})
+                h, t = self.wait_holder(verify, 15) if verify else (None, None)
+        parent_state = (self.event(inc) or {}).get("state") if inc else None
+        self.check("G7", "event_manager：收到 fallback_request → 原事件升級、派降級子事件 single_dog_verify、有狗接",
+                   h is not None and parent_state == "ESCALATED",
+                   (f"{inc} {parent_state}；子事件 {child}（single_dog_verify）→ {env.name(h)} {t - t_f:.1f} s 拿到"
+                    if h is not None else "沒有 fallback_request" if not fb else f"子事件 {child} 15 s 內沒人接"),
+                   f"event_manager: {inc} ESCALATED -> {child} single_dog_verify -> {env.name(h) if h else '-'}")
+        for d in dogs[1:]:
+            self.set_mode(d, 0)
+        self.note("all dogs back in service")
 
-        # ---------- 單狗確認的那隻斷線 → 等 P0 接手時限後別隻接手（G9） ----------
+        # ---------- 單狗確認的那隻到場、開始執行後斷線 → 等 P0 接手時限後別隻接手（G9）；事件的進度依有效版本退回（EP2） ----------
         if h is None:
             self.check("G9", "失聯接手", False, "沒有 fallback 任務可以測")
+            self.check("EP2", "換人後舊進度不算", False, "沒有 fallback 任務可以測")
         else:
             self.wait_arrived(h, verify, 60)
+            self.progress(h, verify, 4, 1, ["arrived", "started"])
+            executing = self.wait_event_state(child, ("EXECUTING",), 5)
             t_k = self.crash(h)
             self.timer("since offline", "takeover P0 10 s")
             h2, t2 = self.wait_holder(verify, 30, exclude=(h,))
             run.until(lambda: False, max(0.0, t_k + 25 - time.time()))
-            fb9 = self.fallback_for(fb_inc)
+            fb9 = self.fallback_for(child)
             self.check("G9", "失聯接手成功：等 P0 接手時限後別隻接手，組不取消、沒有 fallback",
                        h2 is not None and t2 - t_k >= 10.0 and not fb9 and not self.closed_anywhere(verify),
                        f"{env.name(h)} 斷線 → " + (f"{env.name(h2)} {t2 - t_k:.1f} s 後接手（要 ≥ 10 s）" if h2 else
@@ -2271,7 +2448,18 @@ class GroupSuite(CommSuite):
                        f"{env.name(h2) if h2 else '-'} took over {t2 - t_k:.1f} s after {env.name(h)} went offline"
                        if h2 else "nobody took over", latency=round(t2 - t_k, 2) if h2 else None)
             if h2 is not None:
-                self.finish_role(verify)
+                self.finish_role(verify, started=True)
+            resolved = self.wait_event_state(child, ("RESOLVED",), 10)
+            states = self.event_states(child)
+            names = [x for x, _ in states]
+            fell = any(x == "DISPATCHED" and "舊進度不算" in why for x, why in states)
+            self.check("EP2", "換人後舊進度不算：EXECUTING → 接手（新的指派版本）退回 DISPATCHED → 新的執行者 EXECUTING → "
+                       "RESOLVED，原事件跟著結案",
+                       executing is not None and fell and self.in_order(names, ["EXECUTING", "DISPATCHED", "EXECUTING",
+                                                                                "RESOLVED"]) and resolved is not None and
+                       (self.event(inc) or {}).get("state") == "RESOLVED",
+                       f"{child}：" + " → ".join(names) + f"；原事件 {inc} {(self.event(inc) or {}).get('state')}",
+                       "takeover: old executor's progress dropped (back to DISPATCHED), new executor -> RESOLVED")
             self.revive(h)
 
         # ---------- 無人機恢復；兩隻狗被人工接管，剩下那隻也斷線 → 接手逾時才 fallback（G10） ----------
@@ -2519,6 +2707,146 @@ class GroupSuite(CommSuite):
                    f"、task_orphaned {'P0_UNASSIGNED' if odoc else '沒有'}；狗回到 AUTO 後 {env.name(h) if h else '沒人'}接手",
                    f"P0_UNASSIGNED after {t_f - t0:.1f} s: alert + FallbackRequest; {env.name(h) if h else '-'} took it later"
                    if t_f else "no watchdog", latency=round(t_f - t0, 2) if t_f else None)
+
+    # =========================================================================
+    # 場景四：事件流水線（2-1 階段 1 的案例 3、5、9；L5＋L6 C 批，2026-11-23）
+    # =========================================================================
+    def scene4(self, dogs, uavs):
+        env, run = self.env, self.run
+        self.scene_start("S4", "Scene 4  Event pipeline: confidence, priority, alarm storm",
+                         "medium VLM confidence -> one dog verifies; fire (P0) and left object (P2) at once with one dog "
+                         "-> fire first; alarm storm in one zone -> merged into one area patrol")
+        # ---------- E3（案例 3）：VLM 中信心 → NEEDS_CHECK → 只派 1 隻確認 ----------
+        self.set_vlm({"perimeter_intrusion": {"verdict": "uncertain", "confidence": 0.5}})
+        ix, iy = self.spot_in_zone("Z_HV_C")
+        # 只送 3 筆（1 s）：分數過 theta_on 之後要再撐 1.5 s 才送 VLM，這段時間不能再有偵測（證據再變強會直接升級成完整範本）
+        self.detect_stream([(dogs[0], "person_yolo_v1", "person", ix, iy, 66,
+                             dict(det="intruder3", shown="intruder? (VLM unsure)"))], 1.0)
+        e3 = self.wait_event(lambda d: d.get("event_type") == "perimeter_intrusion" and self.event_near(d, ix, iy) and
+                             d.get("rule") == "single_dog_verify", 15)
+        self.set_vlm({})
+        h3, roles3 = None, {}
+        if e3:
+            eid = e3["event_id"]
+            roles3 = self.wait_event_roles(eid, 10, count=1)
+            self.track_roles(eid, roles3)
+            h3, _ = self.wait_holder(roles3.get("verify"), 15) if roles3.get("verify") else (None, None)
+            vlm_sent = self.file_has(os.path.join(run.out, "fake_vlm.log"), f"fake_vlm {eid} ")
+            needs = self.file_has(os.path.join(run.out, "node_events.log"), f"{eid} VERIFYING -> NEEDS_CHECK")
+            if h3 is not None:
+                self.finish_role(roles3["verify"], started=True)
+            resolved = self.wait_event_state(eid, ("RESOLVED",), 10)
+            self.check("E3", "2-1 案例 3：VLM 中信心 → NEEDS_CHECK → 只派 1 隻狗確認（不是完整的入侵範本）",
+                       vlm_sent and needs and list(roles3) == ["verify"] and h3 is not None and env.is_dog(h3) and
+                       resolved is not None,
+                       f"{eid}：VLM {'送了' if vlm_sent else '沒送'}、{'NEEDS_CHECK' if needs else '沒有 NEEDS_CHECK'}、"
+                       f"角色 {list(roles3)} → {env.name(h3) if h3 else '沒人'}；{(self.event(eid) or {}).get('state')}",
+                       f"VLM 0.5 -> NEEDS_CHECK -> single_dog_verify -> {env.name(h3) if h3 else '-'}")
+        else:
+            self.check("E3", "2-1 案例 3：中信心只派 1 隻", False, "15 s 內沒有 single_dog_verify 的事件（看 node_events.log）")
+
+        # ---------- E5（案例 5）：兩事件同時、依優先級 ----------
+        # 只剩 1 隻狗（其他人工接管、無人機停飛）：遺留物（P2，要停留 30 s 才成立）先派、火（P0）約 1 s 後 →
+        # 狗先做火（P0 搶占或排在前面），做完再回來做遺留物；遺留物不會被取消
+        d0 = dogs[0]
+        for v in dogs[1:] + list(uavs):
+            self.set_mode(v, 1)
+        self.note("only " + env.name(d0) + " in service (other dogs taken over, UAVs grounded)")
+        run.sleep(2.0)
+        cam = uavs[0]
+        bx, by = self.spot(2, near=self.here(d0), rmin=10, rmax=25)
+        fx, fy = self.spot(2, near=self.here(d0), rmin=10, rmax=25, away=[(bx, by)], gap=8)
+        bag = (cam, "left_object_yolo", "bag", bx, by, 31, dict(det="bag", shown="left bag"))
+        self.detect_stream([bag], 30.0)
+        self.detect_stream([bag, (cam, "apriltag_fire", "fire", fx, fy, 103, dict(det="fire5"))], 3.0)
+        le = self.wait_event(lambda d: d.get("event_type") == "left_object" and self.event_near(d, bx, by) and
+                             d.get("rule") == "left_object_check", 15)
+        fe = self.wait_event(lambda d: d.get("event_type") == "fire" and self.event_near(d, fx, fy) and
+                             d.get("rule") == "fire_response", 15)
+        if not (le and fe):
+            self.check("E5", "2-1 案例 5：兩事件同時、依優先級", False,
+                       f"遺留物事件 {'有' if le else '沒有'}、火警事件 {'有' if fe else '沒有'}（看 node_events.log）")
+        else:
+            lo = self.wait_event_roles(le["event_id"], 10, count=1).get("observer")
+            fr = self.wait_event_roles(fe["event_id"], 10, count=2)
+            gv = fr.get("ground_fire_verify")
+            self.track_roles(le["event_id"], {"observer": lo})
+            self.track_roles(fe["event_id"], fr)
+            t_gv = run.until(lambda: run.assigned.get(d0, (None,))[0] == gv, 20)
+            lo_open = lo is not None and not self.closed_anywhere(lo)
+            if t_gv:
+                self.finish_role(gv, started=True)
+            t_fdone = time.time()
+            h_lo, _ = self.wait_holder(lo, 20) if lo else (None, None)
+            if h_lo is not None:
+                self.finish_role(lo, started=True)
+            t_ldone = run.until(lambda: lo is not None and self.closed_anywhere(lo), 10)
+            prio = {t: m.get("priority") for t, m in ((t, self.announced(t) or {}) for t in (gv, lo))}
+            others = sorted({u for (t, u, task, _) in run.history if task in (gv, lo) and u != d0})
+            self.check("E5", "2-1 案例 5：兩事件同時、只有 1 隻狗 → 先做 P0 的火，遺留物（P2）沒被取消、做完火再做",
+                       t_gv is not None and lo_open and h_lo == d0 and t_ldone is not None and t_ldone > t_fdone and
+                       prio.get(gv) == 0 and prio.get(lo) == 2 and not others,
+                       f"火 P{prio.get(gv)}、遺留物 P{prio.get(lo)}；{env.name(d0)} " +
+                       ("先做火" if t_gv else "沒拿到火") + f"、遺留物{'還開著' if lo_open else '被關閉（錯）'}、"
+                       f"之後由 {env.name(h_lo) if h_lo else '沒人'} 做完" + (f"；別台拿過（錯）{others}" if others else ""),
+                       f"{env.name(d0)}: fire (P0) first, then the left bag (P2)")
+        for v in dogs[1:] + list(uavs):
+            self.set_mode(v, 0)
+        self.note("all agents back in service")
+        run.sleep(2.0)
+
+        # ---------- E9（案例 9）：告警風暴 → 合併成區域巡查 ----------
+        # 同一區（Z_YARD）先 3 件火警（event_manager 的上限 storm_max_per_zone 3）→ 各自派；再 2 件 → 不再各自派，
+        # 合併成 1 個區域巡查（zone_patrol）、通知值班；巡查做完 → 合併的事件一起結案
+        pts = []
+        while len(pts) < 5:
+            pts.append(self.spot(2, away=pts, gap=6))
+        cams = [uavs[i % len(uavs)] for i in range(5)]
+        first = [(cams[i], "apriltag_fire", "fire", *pts[i], 110 + i, dict(det=f"storm{i}", shown="fire")) for i in range(3)]
+        self.detect_stream(first, 2.0)
+        firsts = [self.wait_event(lambda d, p=p: d.get("event_type") == "fire" and self.event_near(d, *p) and
+                                  d.get("rule") == "fire_response", 10) for p in pts[:3]]
+        later = [(cams[i], "apriltag_fire", "fire", *pts[i], 110 + i, dict(det=f"storm{i}", shown="fire")) for i in (3, 4)]
+        self.note("alarm storm: two more fires in the same zone")
+        self.detect_stream(later, 2.0)
+        storm = self.wait_event(lambda d: d.get("rule") == "zone_patrol", 10)
+        merged = [self.wait_event(lambda d, p=p: d.get("event_type") == "fire" and self.event_near(d, *p) and
+                                  d.get("state") == "MERGED", 10) for p in pts[3:]]
+        notice = self.wait_file(self.notices_file, ["合併成區域巡查"], 5)
+        sid = storm["event_id"] if storm else None
+        patrol = self.wait_event_roles(sid, 10, count=1).get("area_patroller") if sid else None
+        if sid:
+            self.track_roles(sid, {"area_patroller": patrol})
+        for f in firsts:
+            if f:
+                self.track_roles(f["event_id"], self.event_roles(f["event_id"]))
+        # 前 3 件的空中監看是 P0，巡查是 P1：無人機要先做完那些才輪到巡查。測試不做那 3 件，由值班標成演練結束
+        # （event_manager 取消它們的角色任務），空出載具後巡查才開始
+        self.note("operator closes the first three fires (drill) -> area patrol proceeds")
+        for f in firsts:
+            if f:
+                self.resolve_event(f["event_id"], True, "drill cleanup")
+        hp = self.finish_role(patrol, started=True, hold_timeout=30.0) if patrol else None
+        merged_done = sid is not None and self.run.until(
+            lambda: all(m and (self.event(m["event_id"]) or {}).get("state") == "RESOLVED" for m in merged), 10)
+        no_own = all(m and not self.event_roles(m["event_id"]) for m in merged)
+        n_zone = sum(1 for d in self.events_now().values() if d.get("rule") == "zone_patrol")
+        self.check("E9", "2-1 案例 9：同一區告警超過上限 → 合併成 1 個區域巡查、通知值班；巡查做完，合併的事件一起結案",
+                   all(firsts) and storm is not None and n_zone == 1 and all(m and m.get("parent") == sid for m in merged)
+                   and no_own and notice and hp is not None and bool(merged_done),
+                   f"前 3 件各自派 {sum(1 for f in firsts if f)}／3；巡查 {sid}（{storm.get('zone') if storm else '-'}）"
+                   f"→ {env.name(hp) if hp else '沒人'}；合併 {[m['event_id'] if m else None for m in merged]}"
+                   f"{'、沒有自己的任務' if no_own else '、有自己的任務（錯）'}；值班通知 {'有' if notice else '沒有'}；"
+                   f"合併的事件{'都結案' if merged_done else '沒有結案'}",
+                   f"5 fires in one zone: 3 dispatched, 2 merged into area patrol {sid} -> {env.name(hp) if hp else '-'}")
+        run.sleep(2.0)
+
+    def announced(self, tid):
+        """task_announced 裡這個任務的訊息（priority、platform、position…）"""
+        for e in self.run.events:
+            if e["kind"] == "announced" and e["msg"].get("task_id") == tid:
+                return e["msg"]
+        return None
 
     # ---------- 動畫 ----------
     def animate(self):
@@ -4673,7 +5001,8 @@ def main():
         if env.running(env.sim(), pat):
             busy.append((env.sim(), pat))
     if args.suite == "group":
-        for pat in (env.cfg["group"]["gateway_stop_pattern"], env.cfg["group"]["echo_pattern"]):
+        for pat in (env.cfg["group"]["gateway_stop_pattern"], env.cfg["group"]["echo_pattern"],
+                    env.cfg["group"]["events_stop_pattern"], env.cfg["group"]["vlm_stop_pattern"]):
             if env.running(env.cfg["group"]["container"], pat):
                 busy.append((env.cfg["group"]["container"], pat))
     dog = env.cfg.get("dog")

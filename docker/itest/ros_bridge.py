@@ -79,15 +79,21 @@ def _inside(pt, box, m):
 
 def plan_path(start, goal, blocks):
     """start → goal 繞開 blocks 的最短路（角落的可視圖＋Dijkstra）；回傳要經過的點（含 goal）。
-    起點或終點本來就在某個區域裡（剛重設、或規劃器給錯）就不管那個區域，免得走不出來"""
-    active = [b for b in blocks if not _inside(start, b, ZONE_MARGIN) and not _inside(goal, b, ZONE_MARGIN)]
-    if not any(_crosses(start, goal, b, ZONE_MARGIN) for b in active):
+    起點或終點在某個區域「內部」（剛重設、或規劃器給錯）就不管那個區域，免得走不出來。
+    在區域外的緩衝帶裡（任務點可以在邊線外 0.5 m，2026-11-23）：那一區只擋內部（緩衝 0），照樣繞——
+    原本整個區域都不管，狗直線穿過高壓區（itest group 場景三）"""
+    active = [b for b in blocks if not _inside(start, b, 0.0) and not _inside(goal, b, 0.0)]
+    margin = [0.0 if _inside(start, b, ZONE_MARGIN) or _inside(goal, b, ZONE_MARGIN) else ZONE_MARGIN for b in active]
+
+    def blocked(a, c):
+        return any(_crosses(a, c, b, m) for b, m in zip(active, margin))
+    if not blocked(start, goal):
         return [goal]
     nodes = [start, goal]
     for b in active:
         for x in (b[0] - CORNER_MARGIN, b[1] + CORNER_MARGIN):
             for y in (b[2] - CORNER_MARGIN, b[3] + CORNER_MARGIN):
-                if not any(_inside((x, y), o, ZONE_MARGIN) for o in active):
+                if not any(_inside((x, y), o, m) for o, m in zip(active, margin)):
                     nodes.append((x, y))
     n = len(nodes)
     dist, prev, done = [float("inf")] * n, [-1] * n, [False] * n
@@ -100,7 +106,7 @@ def plan_path(start, goal, blocks):
         if u == 1:
             break
         for v in range(n):
-            if done[v] or any(_crosses(nodes[u], nodes[v], b, ZONE_MARGIN) for b in active):
+            if done[v] or blocked(nodes[u], nodes[v]):
                 continue
             d = dist[u] + ((nodes[u][0] - nodes[v][0]) ** 2 + (nodes[u][1] - nodes[v][1]) ** 2) ** 0.5
             if d < dist[v]:
