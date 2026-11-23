@@ -19,6 +19,7 @@
 | [`failure_takeover_tests.md`](failure_takeover_tests.md) | 自己 | **任務失敗、平板接管、地面端的手動測試**：地面端（gcs，兩隻假狗）A1～A7、無人機端（itest demo）B1～B5，附結果紀錄表 | 2026-10-19 |
 | [`gazebo_view_guide.md`](gazebo_view_guide.md) | 自己 | **Gazebo 視角調整**：錄影鏡頭（`gen_patrol_site.py`）和視窗鏡頭（`px4_sitl.sh`）、pose 怎麼算、從視窗讀出鏡頭位置、錄一段確認 | 2026-10-19 |
 | [`cbf_nonlinear_report.html`](cbf_nonlinear_report.html) → `reports/cbf_nonlinear_control_20261025.pdf` | 自己、老師 | **無人機避碰（非線性控制觀點）**：系統模型、安全集合與 CBF、二階 CBF（剎車距離）、責任分配 ρ、CBF-QP、延遲餘量、路權＋VO 的監督式名目控制、參數、單元測試與 SITL 結果、限制；文獻依記憶整理，引用前要核對 | 2026-10-25；改 HTML 後用 Chrome 重新轉 PDF |
+| [`event_pipeline_unification.md`](event_pipeline_unification.md) | 狗端（伯宇） | **事件流水線統一**：event_bridge → swarm_events；保留伯宇的 BT、相機 L1、底層、Nav2、警戒台；他要改的（A 接上、B 換版、C BT 協同、D 實機安全）、我們要先做的 R1～R8、要一起決定的 Q1～Q5 | 2026-11-23 提案 |
 | [`reports/`](reports/) | 對外 | 某一天的進度快照（PDF），不再修改 | 快照 |
 | [`archive/`](archive/) | 查歷史 | 已經做完或被取代的規劃 | 封存 |
 

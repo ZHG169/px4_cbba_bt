@@ -273,7 +273,7 @@ CBBA_STATE 帶壓縮摘要（每個建立者一筆 14 B）→ 比對出不同的
 |---|---|---|
 | A（L6） | `site-config/yard/event_rules.yaml`（perimeter_intrusion、fire_response、single_dog_verify 和 itest 的範本一樣＋smoke／thermal／left_object）；`RuleExpander`（位置：incident＋偏移、區域觀察點、設備觀察姿態；preflight 移出禁入區、邊線外 0.5 m；TaskSpec 檢查＋機隊可行性 FLEET_INFEASIBLE、續航 ENDURANCE；`changedRoles`、角色 `retarget`）；`/gcs/expand_incident` **只回傳規劃結果、不注入** | ✅ 測過，`7806f3e` |
 | B（L2、L3、L5） | `IncidentManager`：觸發條件（zone_attr、time_rule、上班時段）、關聯（dt、r、track_id）、log-odds 累積（超過 1 s 沒偵測每秒乘 λ 遺忘）、θ_on 持續 min_duration、VLM（`vlm_enabled` 預設關；逾時 P0／P1 用 L2、P2／P3 再送）、θ_low（cost）／θ_high（`dispatch.theta_high` 0.8）→ 完整範本／派 1 隻確認／只記錄、證據變強升級、結案、誤報（E_TARGET_LOST 或值班）、升級派 fallback 子事件、過期、存檔；`event_manager` 節點自動派遣（改版只注入改了的角色、換範本取消多的角色）、`/gcs/incidents`、`/gcs/resolve_incident`、VLM 話題、`operator_notices`；swarm_interfaces 2.11.0 | ✅ 測過（單元、`expand_iface.sh` X1～X6、`incident_iface.sh` N1～N7），`7806f3e` |
-| C | **使用者 2026-11-23 的決定**：① **閘道統一發布角色／任務進度**，event_manager **依有效版本聚合**（只算目前正式指派版本、目前 revision），事件狀態 **DISPATCHED → ON_SITE → EXECUTING → RESOLVED**（多 EXECUTING）；② 補 2-1 階段 1 的 **案例 3（中信心只派 1 隻）、5（兩事件同時、依優先級）、6（移動入侵者、小位移不重新拍賣）、9（告警風暴合併成區域巡查）**；③ itest group 換掉假 Planner（偵測串流 → 閘道 → event_manager → 注入；G5／G7 的降級改由 event_manager 收 fallback_request） | **下一步** |
+| C | **使用者 2026-11-23 的決定**：① **閘道統一發布角色／任務進度**，event_manager **依有效版本聚合**（只算目前正式指派版本、目前 revision），事件狀態 **DISPATCHED → ON_SITE → EXECUTING → RESOLVED**（多 EXECUTING）；② 補 2-1 階段 1 的 **案例 3（中信心只派 1 隻）、5（兩事件同時、依優先級）、6（移動入侵者、小位移不重新拍賣）、9（告警風暴合併成區域巡查）**；③ itest group 換掉假 Planner（偵測串流 → 閘道 → event_manager → 注入；G5／G7 的降級改由 event_manager 收 fallback_request） | ✅ 11/23 測過（單元 test_incident_manager 16、test_expander 14；`incident_iface.sh`；itest `20261123_113449_group` 31／31）（`docs/l5_l6_plan.md` 4.4：`TaskAssignment` 帶進度〔swarm_interfaces 2.12.0〕、`IncidentManager::aggregate`、事件 EXECUTING／MERGED、告警風暴 `zone_patrol`、核准對應、證據；itest group 拿掉假 Planner、`fake_vlm.py`、場景四 E3／E5／E9、E6、EP1、EP2，共 31 項） |
 
 注意：事件要「分數 ≥ theta_on 持續 min_duration_s」才派遣、超過 1 s 沒偵測就遺忘——測試要**連續送偵測**（`ros2 topic pub -r 2 -t N`），只送一兩筆會消退（`incident_iface.sh` N4 踩過）。編譯的套件清單要加 `swarm_events`。
 **勝翔（文件寫：三人中負荷最重）**：REG-1 註冊表 schema＋載入器、UAV-1 `uav_adapter`＋平台狀態機、UAV-2 SITL 接 Gazebo、PLN-1 範本展開器、PLN-2 九層檢查器、EVT-1 偵測器外掛介面＋`event_types.yaml`、UAV 端協同與 CBBA 介接。伯宇：Action 介面與失敗碼、狗 8 個動作、`ExecuteSteps`、搶佔取消、追蹤交接。羅凡：2-1c 積木編輯器（Node-RED）。
@@ -622,6 +622,7 @@ yard 座標〔無人機在 PAD_1～3、狗在 DOCK_1～3〕、UAV 5／狗 3 m/s�
 | 真的 V60 | **還沒在真的狗上測**；伯宇的 BT 在我們的模擬裡已經接協定版本 4（兩個 patch），他自己的部署要換成 main 並照 `README_v60.md` 第 0.1 節套 patch；他 11/11 的新版（Switch9：Track、Wait、Speak…）還沒給，patch 可能要手動合 |
 
 最近的結果：
+- 2026-11-23：L5＋L6 C 批：`20261123_113449_group` 31／31（偵測走 event_manager、場景四 E3／E5／E9、E6、EP1、EP2）；單元 test_incident_manager 16、test_expander 14。
 - 2026-11-20：itest `group --dogs 3` 20 項全過（yard、registry／site、G16、G20、能做的動作由註冊表推導）；單元（cbba_core 全部含 `test_time_contract`、`test_coop_bidding`、
   `test_supported_actions`；swarm_cbba 的 `test_registry`〔含 `SupportedActionsFromRegistry`〕、`test_spec_validator`、`test_fake_executor`）全過。
 - 2026-11-19：`exec_step_iface.sh`（A1～A7）、`test_fake_executor` 全過。
@@ -657,7 +658,7 @@ yard 座標〔無人機在 PAD_1～3、狗在 DOCK_1～3〕、UAV 5／狗 3 m/s�
 
 **使用者 11/16 的範圍**：完成 CB-4＋TDR → 用「指令注入＋假 BT／假 Planner」測試，先測到這裡；真的 BT、人機介面（Node-RED）之後再對接。
 
-0. **L5＋L6 的 C 批**（見「L5＋L6 事件流水線」）：閘道發布角色進度＋event_manager 依有效版本聚合（ON_SITE、EXECUTING）→ itest group 換掉假 Planner → 補 2-1 案例 3、5、6、9。之後是 L2、L3 的跨攝影機投影、L1 偵測器、L4 VLM 本體
+0. ~~L5＋L6 的 C 批~~（11/23 測過，itest group 31 項全過；還沒 commit）。之後是 L2、L3 的跨攝影機投影、L1 偵測器、L4 VLM 本體
 1. ~~itest group 補到 G21、三個連續場景、影片~~（11/20～23 完成、commit：`a3dd0a6` 核心與介面〔能做的動作由註冊表推導、協同出價第一次就算等待、`home_position`、`Task.assignment_version`〕、`e653472` itest 三場景、`75a08e6` 文件）。
    三場景：場景一入侵＋火警閉環 14、場景二資源不足＋失聯＋降級 6、場景三禁區＋協同排程＋搶占 5（`GroupSuite.scene1～3`；任務點依 `--seed` 在 yard 隨機；假身體繞開禁入區；影片原速、監控版面）。
    踩過的：G8 讀錯數字（得標者自己的 log 只有第一筆，改看別台的 winner_bid）；G17 返航點（cbba_node 重開後變成重開的地方 → 參數 `home_position`）；G6 禁區邊線（safe anchor 往外 0.5 m）

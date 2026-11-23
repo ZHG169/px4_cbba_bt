@@ -173,11 +173,31 @@ rules:
 C 批的內容（照上面）：閘道發布角色進度 → event_manager 聚合（ON_SITE、EXECUTING）→ itest group 換掉假 Planner
 （偵測串流 → 閘道 → event_manager → 展開 → 注入；G5／G7 的降級改由 event_manager 收 fallback_request 派子事件）→ 補案例 3、5、6、9。
 
+## 4.4 C 批的實作（2026-11-23 測過：單元 16＋14 項、`incident_iface.sh`、itest `20261123_113449_group` 31／31）
+
+| 項目 | 做法 | 程式 |
+|---|---|---|
+| 閘道發布角色進度（決定 1） | `TaskAssignment` 加 `progress_assign_version`、`progress_revision`、`progress_executor`、`phase`、`step_index`、`milestones`（有效的，cbba_node 依指派版本、incident revision 判斷過）：和分配放同一則，使用的人一次拿到一致的快照；`assignments` 內容變了才發，進度變了也會發。swarm_interfaces 2.12.0 | `swarm_cbba/src/cbba_node.cpp`（`publishAssignments`）、`TaskAssignment.msg` |
+| 依有效版本聚合 | event_manager 只算 `progress_assign_version == assign_version`、`progress_revision == revision`、RESERVED／ACTIVE 的進度：`started` → 角色 EXECUTING、`arrived` 或 phase ARRIVED／ARRIVED_WAITING → ARRIVED；phase EN_ROUTE、ACCEPTED 不算到場（同一次指派改版後重新出發）。事件由全部角色重新聚合：有角色到場 ON_SITE、有**必要**角色開始執行 EXECUTING（optional 的只算到場）、必要角色都完成 RESOLVED；**可以退回**（換人、改版後舊進度不算，原因寫「舊進度不算」）。task_closed 先到的角色不會被晚到的 assignments 改回去 | `IncidentManager::aggregate`、`event_manager_node` 的 `roleOf` |
+| 核准 | 訂閘道的 `approvals`：INJECTED → 記角色的 task_id（B 批漏掉：要核准的角色注入時 task_id 是 0，之後一直對不到）；REJECTED → 當成值班判定誤報（FALSE_ALARM）。參數 `approval_event_types`（場域政策：這些事件類型的派遣一律要核准；注入時才讀，可以 `ros2 param set`） | `onApproval` |
+| 誤報、拒絕時取消 | 事件變成 FALSE_ALARM／REJECTED 時，取消它還開著的角色任務（`cancel_task`） | `cancelClosedEvents` |
+| 證據 | 偵測的 `attrs`（JSON）帶 `snapshot_uri`、`clip_uri`、`evidence_uri` → 事件記分數最高的那筆；注入時帶 `evidence_uri`（沒有就用截圖）、`evidence_confidence`（事件信心）、`snapshot_uri`、`clip_uri`、`camera_ids`（偵測的 source） | `Evidence`、`expandAndInject` |
+| 案例 9 告警風暴（決定 2） | 要派遣的事件（CONFIRMED、NEEDS_CHECK）所在區域（`zoneAt` 的最小區域）已有 `storm_max_per_zone`（3）件派遣中的事件，或那一區已有開著的區域巡查 → 不各自派，併進區域巡查（新事件 `storm`，規則 `storm_rule` = `zone_patrol`，`{incident.zone}` 代換成那一區）→ MERGED、通知值班；巡查結案 → 併進來的事件一起結案。已經派過（中信心升級）、降級子事件不併。0 = 不合併 | `absorbIntoStorm`、`event_rules.yaml` 的 `zone_patrol`、`task_types.yaml` 的 `area_patroller`（30）、`zone_patrol`（11） |
+| 案例 3、5、6 | 3（中信心只派 1 隻）、6（小位移不重新展開）B 批已經做在 `IncidentManager`；5（兩事件、依優先級）靠範本帶的優先級，CBBA 的搶占、排隊。這三個都在 itest 驗 | — |
+| 新狀態 | 事件 EXECUTING、MERGED；角色 EXECUTING（`EventIncident.msg` 的說明跟著改） | `incident_manager.hpp` |
+| 規則檢查 | location 的值含 `{incident.` 時不檢查場域裡有沒有（展開時才知道） | `event_rules.cpp` |
+| itest group | 拿掉假 Planner（TEMPLATES、plan_from_detection）；`cbba_gcs` 跑 event_manager＋`fake_vlm.py`；偵測用串流。G14、G14D、G15、G18、G19 走 event_manager（G14D 改成「同一個入侵者的偵測繼續送 → 還是同一個事件」；G18 的核准由 `approval_event_types` 打開、拒絕後事件 FALSE_ALARM；G19 的證據來自偵測的 attrs）；G6 改成 event_manager 收 incident_updates 自己重新展開（入侵者從 Z_HV_B 走到 Z_HV_C，front／rear 的觀察點都換）；G5 改成「入侵事件、只剩 1 隻狗」→ 閘道整組取消＋FallbackRequest → event_manager 升級、派降級子事件（G7）。新增 E6、EP1（場景一）、EP2（場景二 G9 的接手）、場景四 E3、E5、E9，共 31 項 | `docker/itest/itest.py`、`fake_vlm.py`、`config.json`、`animate_group.py` |
+
+測試時遇到、已修：`fireAt` 把兩次偵測寫在同一個 `join(...)` 的引數裡，gcc 從右邊求值、時間倒過來（測試的問題）；E9 的巡查排在前 3 件火警的 P0 空中監看後面，測試改成先由值班結掉那 3 件再做巡查。
+
+單元測試：`test_incident_manager` 加 `ProgressAggregatesAndFallsBack`、`AlarmStormMergesIntoZonePatrol`（16 項）；`test_expander` 加
+`ZonePatrolUsesIncidentZone`（14 項）。節點腳本 `incident_iface.sh`（N1～N7）照舊當回歸（N3 的比對改成「任何狀態 -> RESOLVED」：角色 DONE 會先聚合成 EXECUTING 再結案）。
+
 ## 5. 先不做（之後再說）
 
 - L1 偵測器（人員、煙霧、熱像、遺留物）、L4 的 VLM 模型與信心校準：要有影像、模型、GPU；照 2-1，感知用離線評估集另外驗證。
 - 攝影機投影（L3 的座標由偵測直接帶 map 座標；投影是空間對位那一塊）。
-- 告警風暴合併成區域巡查、攝影機異常事件、機器人自身遮罩：B 批可以預留，C 批再決定要不要做。
+- 攝影機異常事件、機器人自身遮罩（告警風暴合併 C 批做了）。
 - 開放事件（`unknown`）的 VLM 提案：現在只支援「外部給 steps＋一律要核准」。
 
 ## 6. 使用者的決定（2026-11-23）
